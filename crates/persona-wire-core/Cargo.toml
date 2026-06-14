@@ -6,6 +6,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "persona-wire core: Domain (Graph + Specification + Compute + Constraint + AutoVersion + CRUD) + Application (NamedProjection registry, Use Case) + Infrastructure (SQLite storage, Rendering adapter). Transport-agnostic."
 
 [dependencies]

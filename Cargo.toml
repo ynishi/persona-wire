@@ -13,6 +13,8 @@ authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ynishi/persona-wire"
 rust-version = "1.78"
+keywords = ["mcp", "graph", "knowledge-graph", "persona", "context"]
+categories = ["database", "data-structures"]
 
 [workspace.dependencies]
 # Shared utility deps
@@ -35,4 +37,4 @@ schemars = "0.8"
 clap = { version = "4", features = ["derive"] }
 
 # Intra-workspace
-persona-wire-core = { path = "crates/persona-wire-core" }
+persona-wire-core = { path = "crates/persona-wire-core", version = "0.0.0" }

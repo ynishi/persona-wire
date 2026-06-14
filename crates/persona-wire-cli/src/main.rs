@@ -18,9 +18,7 @@ enum Command {
         db: String,
     },
     /// Run a registered named projection.
-    Project {
-        name: String,
-    },
+    Project { name: String },
     /// Node low-level CRUD.
     Node {
         #[command(subcommand)]
@@ -42,15 +40,18 @@ enum NodeOp {
 
 #[derive(Subcommand, Debug)]
 enum EdgeOp {
-    Create { src: String, tgt: String, kind: String },
+    Create {
+        src: String,
+        tgt: String,
+        kind: String,
+    },
     List,
 }
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 

@@ -6,6 +6,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "persona-wire CLI — clap-based CLI bin. Wraps persona-wire-core's Application use cases for local invocation (init / project / node / edge / spec / projection)."
 
 [[bin]]

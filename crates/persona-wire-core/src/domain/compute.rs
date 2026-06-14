@@ -16,11 +16,7 @@ pub struct TraversalResult {
 
 /// Traverse the graph from `start` while `spec` holds; bounded by `max_depth`.
 /// Returns the matched node subset.
-pub fn traverse(
-    _start: &NodeId,
-    _spec: &Specification,
-    _max_depth: u32,
-) -> TraversalResult {
+pub fn traverse(_start: &NodeId, _spec: &Specification, _max_depth: u32) -> TraversalResult {
     // TODO(P1): wire to graph port and walk.
     TraversalResult {
         nodes: Vec::new(),

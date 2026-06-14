@@ -5,11 +5,7 @@
 
 use crate::application::projection_registry::TargetForm;
 
-pub fn render(
-    _target_form: TargetForm,
-    _template: &str,
-    _data: &serde_json::Value,
-) -> String {
+pub fn render(_target_form: TargetForm, _template: &str, _data: &serde_json::Value) -> String {
     // TODO(P0+): wire template engine after DSL decision.
     String::new()
 }

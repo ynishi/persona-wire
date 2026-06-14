@@ -6,6 +6,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "persona-wire MCP server — rmcp transport bin. Wraps persona-wire-core's Application use cases as MCP Tools (pnet_* / wire_node_* / wire_edge_* / wire_spec_* / wire_projection_*)."
 
 [[bin]]
