@@ -14,4 +14,5 @@ pub mod constraint;
 pub mod crud;
 pub mod error;
 pub mod graph;
+pub mod repository;
 pub mod specification;

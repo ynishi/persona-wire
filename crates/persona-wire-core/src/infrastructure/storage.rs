@@ -251,6 +251,139 @@ impl SqliteStorage {
             )
             .map_err(|e| WireError::Storage(e.to_string()))
     }
+
+    // ---- Specifications ----
+
+    pub fn upsert_specification(&self, name: &str, expr_json: &str) -> WireResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO specifications (name, expr_json, created_at) \
+                 VALUES (?1, ?2, 0) \
+                 ON CONFLICT(name) DO UPDATE SET expr_json = excluded.expr_json",
+                params![name, expr_json],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn get_specification(&self, name: &str) -> WireResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT expr_json FROM specifications WHERE name = ?1",
+                params![name],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    pub fn list_specifications(&self) -> WireResult<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, expr_json FROM specifications ORDER BY name")
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    // ---- Projections ----
+
+    pub fn upsert_projection(
+        &self,
+        name: &str,
+        spec_ref: &str,
+        template: &str,
+        target_form: &str,
+    ) -> WireResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO projections (name, spec_ref, template, target_form, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 0) \
+                 ON CONFLICT(name) DO UPDATE SET \
+                    spec_ref = excluded.spec_ref, \
+                    template = excluded.template, \
+                    target_form = excluded.target_form",
+                params![name, spec_ref, template, target_form],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn get_projection(&self, name: &str) -> WireResult<Option<(String, String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT spec_ref, template, target_form FROM projections WHERE name = ?1",
+                params![name],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    pub fn list_projections(&self) -> WireResult<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM projections ORDER BY name")
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+}
+
+impl crate::domain::repository::Repository for SqliteStorage {
+    fn list_types_by_kind(&self, kind: &str) -> WireResult<Vec<String>> {
+        SqliteStorage::list_types_by_kind(self, kind)
+    }
+
+    fn insert_node(&self, node: &Node) -> WireResult<()> {
+        SqliteStorage::insert_node(self, node)
+    }
+
+    fn get_node(&self, id: &NodeId) -> WireResult<Option<Node>> {
+        SqliteStorage::get_node(self, id)
+    }
+
+    fn list_nodes_by_type(&self, type_name: &str) -> WireResult<Vec<Node>> {
+        SqliteStorage::list_nodes_by_type(self, type_name)
+    }
+
+    fn insert_edge(&self, edge: &Edge) -> WireResult<()> {
+        SqliteStorage::insert_edge(self, edge)
+    }
+
+    fn get_edge(&self, id: &EdgeId) -> WireResult<Option<Edge>> {
+        SqliteStorage::get_edge(self, id)
+    }
+
+    fn list_edges_from(&self, src_node: &NodeId) -> WireResult<Vec<Edge>> {
+        SqliteStorage::list_edges_from(self, src_node)
+    }
+
+    fn list_edges_to(&self, tgt_node: &NodeId) -> WireResult<Vec<Edge>> {
+        SqliteStorage::list_edges_to(self, tgt_node)
+    }
+
+    fn insert_version_record(&self, rec: &VersionRecord) -> WireResult<()> {
+        SqliteStorage::insert_version_record(self, rec)
+    }
+
+    fn count_versions(&self, target_kind: VersionTargetKind, target_id: &str) -> WireResult<i64> {
+        SqliteStorage::count_versions(self, target_kind, target_id)
+    }
 }
 
 fn severity_to_str(s: Severity) -> &'static str {
@@ -349,6 +482,29 @@ CREATE TABLE IF NOT EXISTS versions (
     author       TEXT,
     PRIMARY KEY (target_kind, target_id, version)
 );
+
+CREATE TABLE IF NOT EXISTS specifications (
+    name        TEXT PRIMARY KEY,
+    expr_json   TEXT NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS projections (
+    name         TEXT PRIMARY KEY,
+    spec_ref     TEXT NOT NULL,
+    template     TEXT NOT NULL,
+    target_form  TEXT NOT NULL CHECK (target_form IN ('prompt', 'markdown', 'json', 'ascii')),
+    created_at   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id          TEXT PRIMARY KEY,
+    def_node    TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    started_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    metadata    TEXT NOT NULL DEFAULT '{}'
+);
 "#;
 
 #[cfg(test)]
@@ -390,7 +546,18 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(names, vec!["edges", "nodes", "type_registry", "versions"]);
+        assert_eq!(
+            names,
+            vec![
+                "edges",
+                "nodes",
+                "projections",
+                "specifications",
+                "type_registry",
+                "versions",
+                "workflow_runs",
+            ]
+        );
     }
 
     #[test]
@@ -604,5 +771,140 @@ mod tests {
         };
         s.insert_version_record(&rec).unwrap();
         assert!(s.insert_version_record(&rec).is_err());
+    }
+
+    #[test]
+    fn specification_upsert_roundtrip_and_overwrite() {
+        let s = setup();
+        s.upsert_specification("active_personas", r#"{"TypeIs":"persona"}"#)
+            .unwrap();
+        assert_eq!(
+            s.get_specification("active_personas").unwrap().as_deref(),
+            Some(r#"{"TypeIs":"persona"}"#)
+        );
+
+        // Overwrite under same name
+        s.upsert_specification("active_personas", r#"{"TypeIs":"channel"}"#)
+            .unwrap();
+        assert_eq!(
+            s.get_specification("active_personas").unwrap().as_deref(),
+            Some(r#"{"TypeIs":"channel"}"#)
+        );
+
+        s.upsert_specification("workflow_defs", r#"{"TypeIs":"workflow_def"}"#)
+            .unwrap();
+        let all = s.list_specifications().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, "active_personas");
+        assert_eq!(all[1].0, "workflow_defs");
+    }
+
+    #[test]
+    fn projection_upsert_roundtrip_and_form_check() {
+        let s = setup();
+        s.upsert_projection(
+            "_persona_toc",
+            "active_personas",
+            "Personas: {{count}}",
+            "prompt",
+        )
+        .unwrap();
+        let got = s.get_projection("_persona_toc").unwrap().expect("exists");
+        assert_eq!(got.0, "active_personas");
+        assert_eq!(got.1, "Personas: {{count}}");
+        assert_eq!(got.2, "prompt");
+
+        assert!(s
+            .list_projections()
+            .unwrap()
+            .contains(&"_persona_toc".into()));
+
+        // Bad target_form is rejected
+        assert!(s.upsert_projection("bad", "any", "tpl", "yaml").is_err());
+    }
+
+    #[test]
+    fn workflow_runs_table_exists() {
+        let s = setup();
+        s.conn
+            .execute(
+                "INSERT INTO workflow_runs (id, def_node, state, started_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params!["r1", "wf_alpha", "ready", 100i64, 100i64],
+            )
+            .unwrap();
+        let cnt: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM workflow_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 1);
+    }
+
+    #[test]
+    fn repository_trait_compute_traverse_one_hop() {
+        use crate::domain::compute::traverse;
+        use crate::domain::repository::Repository;
+        use crate::domain::specification::Specification;
+
+        let s = setup();
+        // graph: shi -[routes_to]-> mia, shi -[routes_to]-> misaki
+        for id in ["shi", "mia", "misaki"] {
+            s.insert_node(&bare_node(id, "persona")).unwrap();
+        }
+        for (id, src, tgt) in [("e1", "shi", "mia"), ("e2", "shi", "misaki")] {
+            s.insert_edge(&Edge {
+                id: id.into(),
+                src_node: src.into(),
+                tgt_node: tgt.into(),
+                kind: "routes_to".into(),
+                severity: None,
+                metadata: json!({}),
+                version: 1,
+                prev_id: None,
+            })
+            .unwrap();
+        }
+        // include shi (start) via TypeIs::persona match
+        let spec = Specification::TypeIs("persona".into());
+        let repo: &dyn Repository = &s;
+        let result = traverse(&"shi".into(), &spec, 1, repo).unwrap();
+        assert_eq!(result.nodes.len(), 3);
+        assert_eq!(result.depth_reached, 1);
+        let ids: Vec<_> = result.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"shi"));
+        assert!(ids.contains(&"mia"));
+        assert!(ids.contains(&"misaki"));
+    }
+
+    #[test]
+    fn repository_trait_compute_traverse_depth_zero_only_start() {
+        use crate::domain::compute::traverse;
+        use crate::domain::repository::Repository;
+        use crate::domain::specification::Specification;
+
+        let s = setup();
+        s.insert_node(&bare_node("shi", "persona")).unwrap();
+        s.insert_node(&bare_node("mia", "persona")).unwrap();
+        s.insert_edge(&Edge {
+            id: "e1".into(),
+            src_node: "shi".into(),
+            tgt_node: "mia".into(),
+            kind: "routes_to".into(),
+            severity: None,
+            metadata: json!({}),
+            version: 1,
+            prev_id: None,
+        })
+        .unwrap();
+        let repo: &dyn Repository = &s;
+        let result = traverse(
+            &"shi".into(),
+            &Specification::TypeIs("persona".into()),
+            0,
+            repo,
+        )
+        .unwrap();
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0].id, "shi");
     }
 }
