@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/persona-wire-core",
+    "crates/persona-wire-mcp",
+    "crates/persona-wire-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+authors = ["Yutaka Nishimura"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ynishi/persona-wire"
+rust-version = "1.78"
+
+[workspace.dependencies]
+# Shared utility deps
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# MCP server
+rmcp = { version = "0.2", features = ["server", "transport-io"] }
+schemars = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Intra-workspace
+persona-wire-core = { path = "crates/persona-wire-core" }

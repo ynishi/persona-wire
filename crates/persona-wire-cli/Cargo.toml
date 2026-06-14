@@ -1,0 +1,22 @@
+[package]
+name = "persona-wire-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "persona-wire CLI — clap-based CLI bin. Wraps persona-wire-core's Application use cases for local invocation (init / project / node / edge / spec / projection)."
+
+[[bin]]
+name = "persona-wire"
+path = "src/main.rs"
+
+[dependencies]
+persona-wire-core.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

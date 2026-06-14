@@ -1,0 +1,17 @@
+[package]
+name = "persona-wire-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "persona-wire core: Domain (Graph + Specification + Compute + Constraint + AutoVersion + CRUD) + Application (NamedProjection registry, Use Case) + Infrastructure (SQLite storage, Rendering adapter). Transport-agnostic."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
