@@ -600,19 +600,19 @@ mod tests {
     fn insert_and_get_node_roundtrip() {
         let s = setup();
         let mut n = bare_node("n1", "persona");
-        n.sot_ref = Some("pp://shi".into());
+        n.sot_ref = Some("pp://alpha".into());
         n.confidence = Some(0.95);
         n.last_verified_at = Some(1_700_000_000);
-        n.metadata = json!({"name": "shi", "tags": ["dev"]});
+        n.metadata = json!({"name": "alpha", "tags": ["dev"]});
         s.insert_node(&n).unwrap();
 
         let got = s.get_node(&"n1".into()).unwrap().expect("exists");
         assert_eq!(got.id, "n1");
         assert_eq!(got.r#type, "persona");
-        assert_eq!(got.sot_ref.as_deref(), Some("pp://shi"));
+        assert_eq!(got.sot_ref.as_deref(), Some("pp://alpha"));
         assert_eq!(got.confidence, Some(0.95));
         assert_eq!(got.last_verified_at, Some(1_700_000_000));
-        assert_eq!(got.metadata, json!({"name": "shi", "tags": ["dev"]}));
+        assert_eq!(got.metadata, json!({"name": "alpha", "tags": ["dev"]}));
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
                 version: v,
                 diff: json!({"step": v}),
                 ts: 1_700_000_000 + v as i64,
-                author: Some("shi".into()),
+                author: Some("alpha".into()),
             };
             s.insert_version_record(&rec).unwrap();
         }
@@ -847,11 +847,11 @@ mod tests {
         use crate::domain::specification::Specification;
 
         let s = setup();
-        // graph: shi -[routes_to]-> mia, shi -[routes_to]-> misaki
-        for id in ["shi", "mia", "misaki"] {
+        // graph: alpha -[routes_to]-> beta, alpha -[routes_to]-> gamma
+        for id in ["alpha", "beta", "gamma"] {
             s.insert_node(&bare_node(id, "persona")).unwrap();
         }
-        for (id, src, tgt) in [("e1", "shi", "mia"), ("e2", "shi", "misaki")] {
+        for (id, src, tgt) in [("e1", "alpha", "beta"), ("e2", "alpha", "gamma")] {
             s.insert_edge(&Edge {
                 id: id.into(),
                 src_node: src.into(),
@@ -864,16 +864,16 @@ mod tests {
             })
             .unwrap();
         }
-        // include shi (start) via TypeIs::persona match
+        // include alpha (start) via TypeIs::persona match
         let spec = Specification::TypeIs("persona".into());
         let repo: &dyn Repository = &s;
-        let result = traverse(&"shi".into(), &spec, 1, repo).unwrap();
+        let result = traverse(&"alpha".into(), &spec, 1, repo).unwrap();
         assert_eq!(result.nodes.len(), 3);
         assert_eq!(result.depth_reached, 1);
         let ids: Vec<_> = result.nodes.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"shi"));
-        assert!(ids.contains(&"mia"));
-        assert!(ids.contains(&"misaki"));
+        assert!(ids.contains(&"alpha"));
+        assert!(ids.contains(&"beta"));
+        assert!(ids.contains(&"gamma"));
     }
 
     #[test]
@@ -883,12 +883,12 @@ mod tests {
         use crate::domain::specification::Specification;
 
         let s = setup();
-        s.insert_node(&bare_node("shi", "persona")).unwrap();
-        s.insert_node(&bare_node("mia", "persona")).unwrap();
+        s.insert_node(&bare_node("alpha", "persona")).unwrap();
+        s.insert_node(&bare_node("beta", "persona")).unwrap();
         s.insert_edge(&Edge {
             id: "e1".into(),
-            src_node: "shi".into(),
-            tgt_node: "mia".into(),
+            src_node: "alpha".into(),
+            tgt_node: "beta".into(),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -898,13 +898,13 @@ mod tests {
         .unwrap();
         let repo: &dyn Repository = &s;
         let result = traverse(
-            &"shi".into(),
+            &"alpha".into(),
             &Specification::TypeIs("persona".into()),
             0,
             repo,
         )
         .unwrap();
         assert_eq!(result.nodes.len(), 1);
-        assert_eq!(result.nodes[0].id, "shi");
+        assert_eq!(result.nodes[0].id, "alpha");
     }
 }

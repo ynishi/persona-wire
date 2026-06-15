@@ -72,8 +72,12 @@ mod tests {
 
     #[test]
     fn substitutes_simple_key() {
-        let out = render(TargetForm::Prompt, "Hi, {{name}}!", &json!({"name": "shi"}));
-        assert_eq!(out, "Hi, shi!");
+        let out = render(
+            TargetForm::Prompt,
+            "Hi, {{name}}!",
+            &json!({"name": "alpha"}),
+        );
+        assert_eq!(out, "Hi, alpha!");
     }
 
     #[test]
@@ -81,9 +85,9 @@ mod tests {
         let out = render(
             TargetForm::Markdown,
             "Owner is {{owner.name}}.",
-            &json!({"owner": {"name": "ytk"}}),
+            &json!({"owner": {"name": "user_a"}}),
         );
-        assert_eq!(out, "Owner is ytk.");
+        assert_eq!(out, "Owner is user_a.");
     }
 
     #[test]
@@ -94,7 +98,11 @@ mod tests {
 
     #[test]
     fn missing_path_renders_empty() {
-        let out = render(TargetForm::Prompt, "[{{absent}}]", &json!({"name": "shi"}));
+        let out = render(
+            TargetForm::Prompt,
+            "[{{absent}}]",
+            &json!({"name": "alpha"}),
+        );
         assert_eq!(out, "[]");
     }
 

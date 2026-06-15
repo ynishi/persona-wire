@@ -2,14 +2,14 @@
 //!
 //! Walks the full pipeline through the public API of `persona-wire-core`:
 //! migrate → seed → insert nodes/edges → register Specification → register
-//! NamedProjection → pnet_init renders → pnet_close reports.
+//! NamedProjection → wire_init renders → wire_close reports.
 
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    pnet_close, pnet_init, PnetCloseInput, PnetInitInput,
+    wire_close, wire_init, WireCloseInput, WireInitInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -42,10 +42,10 @@ fn full_pipeline_init_seed_register_render_close() {
     assert_eq!(nodes.len(), 9, "expected 9 seeded node types");
 
     // Insert a small persona-routing graph.
-    // shi -[routes_to]-> mia
-    // shi -[routes_to]-> misaki
-    // mia -[triggers_review_of severity=hard]-> note1 (outline_node)
-    for id in ["shi", "mia", "misaki"] {
+    // alpha -[routes_to]-> beta
+    // alpha -[routes_to]-> gamma
+    // beta -[triggers_review_of severity=hard]-> note1 (outline_node)
+    for id in ["alpha", "beta", "gamma"] {
         storage
             .insert_node(&bare_node(id, "persona", json!({"display": id})))
             .unwrap();
@@ -61,8 +61,8 @@ fn full_pipeline_init_seed_register_render_close() {
     storage
         .insert_edge(&Edge {
             id: "e_shi_mia".into(),
-            src_node: "shi".into(),
-            tgt_node: "mia".into(),
+            src_node: "alpha".into(),
+            tgt_node: "beta".into(),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -73,8 +73,8 @@ fn full_pipeline_init_seed_register_render_close() {
     storage
         .insert_edge(&Edge {
             id: "e_shi_misaki".into(),
-            src_node: "shi".into(),
-            tgt_node: "misaki".into(),
+            src_node: "alpha".into(),
+            tgt_node: "gamma".into(),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -85,7 +85,7 @@ fn full_pipeline_init_seed_register_render_close() {
     storage
         .insert_edge(&Edge {
             id: "e_mia_review".into(),
-            src_node: "mia".into(),
+            src_node: "beta".into(),
             tgt_node: "note1".into(),
             kind: "triggers_review_of".into(),
             severity: Some(Severity::Hard),
@@ -126,14 +126,14 @@ fn full_pipeline_init_seed_register_render_close() {
         })
         .unwrap();
 
-    // pnet_init renders both projections.
-    let init_out = pnet_init(
-        PnetInitInput {
-            persona_id: "shi".into(),
+    // wire_init renders both projections.
+    let init_out = wire_init(
+        WireInitInput {
+            persona_id: "alpha".into(),
         },
         &storage,
     )
-    .expect("pnet_init");
+    .expect("wire_init");
     assert_eq!(init_out.projections.len(), 2);
     assert!(init_out.warnings.is_empty(), "no dangling spec_refs");
 
@@ -146,7 +146,7 @@ fn full_pipeline_init_seed_register_render_close() {
     let toc = by_name["_persona_toc"];
     assert_eq!(toc.target_form, TargetForm::Prompt);
     assert!(toc.rendered.starts_with("Personas (3):"));
-    for id in ["shi", "mia", "misaki"] {
+    for id in ["alpha", "beta", "gamma"] {
         assert!(
             toc.rendered.contains(id),
             "toc missing {id}: {}",
@@ -158,14 +158,14 @@ fn full_pipeline_init_seed_register_render_close() {
     assert_eq!(review.target_form, TargetForm::Markdown);
     assert_eq!(review.rendered, "Review targets (1): note1");
 
-    // pnet_close reports correct totals.
-    let close_out = pnet_close(
-        PnetCloseInput {
-            persona_id: "shi".into(),
+    // wire_close reports correct totals.
+    let close_out = wire_close(
+        WireCloseInput {
+            persona_id: "alpha".into(),
         },
         &storage,
     )
-    .expect("pnet_close");
+    .expect("wire_close");
     assert_eq!(close_out.total_node_count, 4);
     assert_eq!(close_out.total_edge_count, 3);
     assert_eq!(
@@ -177,7 +177,7 @@ fn full_pipeline_init_seed_register_render_close() {
 }
 
 #[test]
-fn pnet_init_warns_on_dangling_spec_ref() {
+fn wire_init_warns_on_dangling_spec_ref() {
     let storage = SqliteStorage::open_in_memory().unwrap();
     storage.migrate().unwrap();
     storage.seed_default_types().unwrap();
@@ -192,9 +192,9 @@ fn pnet_init_warns_on_dangling_spec_ref() {
         })
         .unwrap();
 
-    let out = pnet_init(
-        PnetInitInput {
-            persona_id: "shi".into(),
+    let out = wire_init(
+        WireInitInput {
+            persona_id: "alpha".into(),
         },
         &storage,
     )
@@ -210,42 +210,42 @@ fn composed_specification_roundtrips_through_storage_and_evaluates() {
     storage.migrate().unwrap();
     storage.seed_default_types().unwrap();
 
-    // Persona with `owner=shi` metadata, persona without.
+    // Persona with `owner=alpha` metadata, persona without.
     storage
         .insert_node(&bare_node(
             "p1",
             "persona",
-            json!({"owner": {"name": "shi"}}),
+            json!({"owner": {"name": "alpha"}}),
         ))
         .unwrap();
     storage
         .insert_node(&bare_node(
             "p2",
             "persona",
-            json!({"owner": {"name": "mia"}}),
+            json!({"owner": {"name": "beta"}}),
         ))
         .unwrap();
 
-    // Compose: TypeIs("persona") AND MetadataEq("owner.name", "shi")
+    // Compose: TypeIs("persona") AND MetadataEq("owner.name", "alpha")
     let spec = Specification::TypeIs("persona".into()).and(Specification::MetadataEq {
         path: "owner.name".into(),
-        value: json!("shi"),
+        value: json!("alpha"),
     });
     SpecRegistry::new(&storage)
-        .register("personas_owned_by_shi", &spec)
+        .register("personas_owned_by_alpha", &spec)
         .unwrap();
     ProjectionRegistry::new(&storage)
         .register(&NamedProjection {
             name: "_owned".into(),
-            spec_ref: "personas_owned_by_shi".into(),
+            spec_ref: "personas_owned_by_alpha".into(),
             template: "{{count}} matched: {{names}}".into(),
             target_form: TargetForm::Prompt,
         })
         .unwrap();
 
-    let out = pnet_init(
-        PnetInitInput {
-            persona_id: "shi".into(),
+    let out = wire_init(
+        WireInitInput {
+            persona_id: "alpha".into(),
         },
         &storage,
     )

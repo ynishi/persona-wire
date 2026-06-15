@@ -77,7 +77,7 @@ mod tests {
             "by_owner",
             &Specification::MetadataEq {
                 path: "owner".into(),
-                value: json!("shi"),
+                value: json!("owner_a"),
             },
         )
         .unwrap();
@@ -85,7 +85,7 @@ mod tests {
         match got {
             Specification::MetadataEq { path, value } => {
                 assert_eq!(path, "owner");
-                assert_eq!(value, json!("shi"));
+                assert_eq!(value, json!("owner_a"));
             }
             _ => panic!("expected MetadataEq after overwrite"),
         }
@@ -116,10 +116,10 @@ mod tests {
         let reg = SpecRegistry::new(&storage);
         let spec = Specification::TypeIs("persona".into()).and(Specification::MetadataEq {
             path: "owner.name".into(),
-            value: json!("shi"),
+            value: json!("owner_a"),
         });
-        reg.register("personas_owned_by_shi", &spec).unwrap();
-        let got = reg.get("personas_owned_by_shi").unwrap().expect("exists");
+        reg.register("personas_owned_by_alpha", &spec).unwrap();
+        let got = reg.get("personas_owned_by_alpha").unwrap().expect("exists");
         match got {
             Specification::And(parts) => assert_eq!(parts.len(), 2),
             _ => panic!("expected And"),

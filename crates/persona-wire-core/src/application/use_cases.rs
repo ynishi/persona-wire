@@ -1,4 +1,4 @@
-//! Use cases — orchestration of Domain + Infrastructure for pnet_* flows.
+//! Use cases — orchestration of Domain + Infrastructure for wire_* flows.
 
 use crate::application::projection_registry::{ProjectionRegistry, TargetForm};
 use crate::application::spec_registry::SpecRegistry;
@@ -8,9 +8,9 @@ use crate::domain::specification::Specification;
 use crate::infrastructure::rendering::render;
 use crate::infrastructure::storage::SqliteStorage;
 
-// ---- pnet_init ----
+// ---- wire_init ----
 
-pub struct PnetInitInput {
+pub struct WireInitInput {
     pub persona_id: String,
 }
 
@@ -20,7 +20,7 @@ pub struct RenderedProjection {
     pub rendered: String,
 }
 
-pub struct PnetInitOutput {
+pub struct WireInitOutput {
     pub persona_id: String,
     pub projections: Vec<RenderedProjection>,
     pub warnings: Vec<String>,
@@ -28,8 +28,8 @@ pub struct PnetInitOutput {
 
 /// Run every registered NamedProjection against the current graph and return
 /// the rendered context bundle. Used as the `/wake` auto-call entry per
-/// concept-doc §3 Application layer (pnet_init flow).
-pub fn pnet_init(input: PnetInitInput, storage: &SqliteStorage) -> WireResult<PnetInitOutput> {
+/// concept-doc §3 Application layer (wire_init flow).
+pub fn wire_init(input: WireInitInput, storage: &SqliteStorage) -> WireResult<WireInitOutput> {
     let spec_reg = SpecRegistry::new(storage);
     let proj_reg = ProjectionRegistry::new(storage);
 
@@ -64,7 +64,7 @@ pub fn pnet_init(input: PnetInitInput, storage: &SqliteStorage) -> WireResult<Pn
         });
     }
 
-    Ok(PnetInitOutput {
+    Ok(WireInitOutput {
         persona_id: input.persona_id,
         projections,
         warnings,
@@ -84,13 +84,13 @@ fn collect_matching_nodes(storage: &SqliteStorage, spec: &Specification) -> Wire
     Ok(out)
 }
 
-// ---- pnet_close ----
+// ---- wire_close ----
 
-pub struct PnetCloseInput {
+pub struct WireCloseInput {
     pub persona_id: String,
 }
 
-pub struct PnetCloseOutput {
+pub struct WireCloseOutput {
     pub persona_id: String,
     pub orphan_node_count: usize,
     pub total_node_count: usize,
@@ -101,7 +101,7 @@ pub struct PnetCloseOutput {
 /// Minimal lifecycle scan for the `/work-close` auto-call. P1 reports orphan
 /// nodes (no in- or out-edges) and graph totals. P3 will expand this to
 /// stale / asymmetric / high-fanout scan + Daily report emit.
-pub fn pnet_close(input: PnetCloseInput, storage: &SqliteStorage) -> WireResult<PnetCloseOutput> {
+pub fn wire_close(input: WireCloseInput, storage: &SqliteStorage) -> WireResult<WireCloseOutput> {
     let mut total_nodes = 0_usize;
     let mut total_edges = 0_usize;
     let mut orphan = 0_usize;
@@ -120,13 +120,13 @@ pub fn pnet_close(input: PnetCloseInput, storage: &SqliteStorage) -> WireResult<
 
     let persona = &input.persona_id;
     let report_markdown = format!(
-        "# pnet_close report for `{persona}`\n\n\
+        "# wire_close report for `{persona}`\n\n\
          - total nodes: {total_nodes}\n\
          - total edges: {total_edges}\n\
          - orphan nodes (0 in + 0 out): {orphan}\n",
     );
 
-    Ok(PnetCloseOutput {
+    Ok(WireCloseOutput {
         persona_id: input.persona_id,
         orphan_node_count: orphan,
         total_node_count: total_nodes,
@@ -165,26 +165,26 @@ mod tests {
     }
 
     #[test]
-    fn pnet_init_with_no_projections_yields_empty() {
+    fn wire_init_with_no_projections_yields_empty() {
         let s = setup();
-        let out = pnet_init(
-            PnetInitInput {
-                persona_id: "shi".into(),
+        let out = wire_init(
+            WireInitInput {
+                persona_id: "alpha".into(),
             },
             &s,
         )
         .unwrap();
-        assert_eq!(out.persona_id, "shi");
+        assert_eq!(out.persona_id, "alpha");
         assert!(out.projections.is_empty());
         assert!(out.warnings.is_empty());
     }
 
     #[test]
-    fn pnet_init_renders_registered_projection() {
+    fn wire_init_renders_registered_projection() {
         let s = setup();
         // Insert 2 personas
-        s.insert_node(&bare_node("shi", "persona")).unwrap();
-        s.insert_node(&bare_node("mia", "persona")).unwrap();
+        s.insert_node(&bare_node("alpha", "persona")).unwrap();
+        s.insert_node(&bare_node("beta", "persona")).unwrap();
         // Register Specification
         SpecRegistry::new(&s)
             .register("active_personas", &Specification::TypeIs("persona".into()))
@@ -199,9 +199,9 @@ mod tests {
             })
             .unwrap();
 
-        let out = pnet_init(
-            PnetInitInput {
-                persona_id: "shi".into(),
+        let out = wire_init(
+            WireInitInput {
+                persona_id: "alpha".into(),
             },
             &s,
         )
@@ -211,13 +211,13 @@ mod tests {
         assert_eq!(p.name, "_persona_toc");
         assert_eq!(p.target_form, TargetForm::Prompt);
         assert!(p.rendered.contains("Personas (2):"));
-        assert!(p.rendered.contains("mia"));
-        assert!(p.rendered.contains("shi"));
+        assert!(p.rendered.contains("beta"));
+        assert!(p.rendered.contains("alpha"));
         assert!(out.warnings.is_empty());
     }
 
     #[test]
-    fn pnet_init_warns_on_unknown_spec_ref() {
+    fn wire_init_warns_on_unknown_spec_ref() {
         let s = setup();
         ProjectionRegistry::new(&s)
             .register(&NamedProjection {
@@ -227,9 +227,9 @@ mod tests {
                 target_form: TargetForm::Prompt,
             })
             .unwrap();
-        let out = pnet_init(
-            PnetInitInput {
-                persona_id: "shi".into(),
+        let out = wire_init(
+            WireInitInput {
+                persona_id: "alpha".into(),
             },
             &s,
         )
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn pnet_close_reports_orphans_and_totals() {
+    fn wire_close_reports_orphans_and_totals() {
         let s = setup();
         // 3 personas, 1 directional edge: a -> b. c is orphan.
         for id in ["a", "b", "c"] {
@@ -258,9 +258,9 @@ mod tests {
         })
         .unwrap();
 
-        let out = pnet_close(
-            PnetCloseInput {
-                persona_id: "shi".into(),
+        let out = wire_close(
+            WireCloseInput {
+                persona_id: "alpha".into(),
             },
             &s,
         )
@@ -275,11 +275,11 @@ mod tests {
     }
 
     #[test]
-    fn pnet_close_empty_graph_zero_everything() {
+    fn wire_close_empty_graph_zero_everything() {
         let s = setup();
-        let out = pnet_close(
-            PnetCloseInput {
-                persona_id: "shi".into(),
+        let out = wire_close(
+            WireCloseInput {
+                persona_id: "alpha".into(),
             },
             &s,
         )

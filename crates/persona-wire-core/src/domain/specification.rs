@@ -109,10 +109,10 @@ mod tests {
     fn metadata_eq_supports_nested_path() {
         let s = Specification::MetadataEq {
             path: "owner.name".into(),
-            value: json!("shi"),
+            value: json!("alpha"),
         };
-        let yes = node("a", "persona", json!({"owner": {"name": "shi"}}));
-        let no = node("a", "persona", json!({"owner": {"name": "mia"}}));
+        let yes = node("a", "persona", json!({"owner": {"name": "alpha"}}));
+        let no = node("a", "persona", json!({"owner": {"name": "beta"}}));
         let missing = node("a", "persona", json!({}));
         assert!(s.is_satisfied_by(&yes));
         assert!(!s.is_satisfied_by(&no));
@@ -123,11 +123,11 @@ mod tests {
     fn and_short_circuits_on_false() {
         let s = Specification::TypeIs("persona".into()).and(Specification::MetadataEq {
             path: "owner.name".into(),
-            value: json!("shi"),
+            value: json!("alpha"),
         });
-        let yes = node("a", "persona", json!({"owner": {"name": "shi"}}));
-        let no_type = node("a", "channel", json!({"owner": {"name": "shi"}}));
-        let no_meta = node("a", "persona", json!({"owner": {"name": "mia"}}));
+        let yes = node("a", "persona", json!({"owner": {"name": "alpha"}}));
+        let no_type = node("a", "channel", json!({"owner": {"name": "alpha"}}));
+        let no_meta = node("a", "persona", json!({"owner": {"name": "beta"}}));
         assert!(s.is_satisfied_by(&yes));
         assert!(!s.is_satisfied_by(&no_type));
         assert!(!s.is_satisfied_by(&no_meta));

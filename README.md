@@ -2,7 +2,7 @@
 
 A SingleMCPApp graph engine for persona × SoT × workflow context routing.
 
-Concept seed: [issue 543a0f01](https://example) (tomo / personal) — Edge/Node Graph + Lifecycle + Knowledge SoT navigator.
+Concept seed: Edge/Node Graph + Lifecycle + Knowledge SoT navigator (see `docs/concept-2026-06-14.md`).
 
 ## Workspace layout
 
@@ -11,8 +11,8 @@ persona-wire/
 ├── Cargo.toml                  # workspace root
 └── crates/
     ├── persona-wire-core/      # Domain + Application + Infrastructure (transport-agnostic)
-    ├── persona-wire-mcp/       # rmcp server bin (MCP transport)
-    └── persona-wire-cli/       # clap CLI bin (local invocation)
+    ├── persona-wire-mcp/       # rmcp server library (exposes serve_stdio())
+    └── persona-wire/           # unified bin (clap CLI + `mcp` subcommand dispatch)
 ```
 
 ## Architecture (v4 / BP-aligned)
@@ -45,10 +45,10 @@ cargo test --workspace
 
 ```sh
 # CLI
-cargo run -p persona-wire-cli -- init --db /tmp/wire.db
+cargo run -p persona-wire -- init --db /tmp/wire.db
 
-# MCP server (stdio transport)
-cargo run -p persona-wire-mcp
+# MCP server (stdio transport) — `mcp` subcommand dispatches into persona-wire-mcp::serve_stdio
+cargo run -p persona-wire -- mcp
 ```
 
 ## Status

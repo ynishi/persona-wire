@@ -1,5 +1,5 @@
 [package]
-name = "persona-wire-cli"
+name = "persona-wire"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "persona-wire CLI — clap-based CLI bin. Wraps persona-wire-core's Application use cases for local invocation (init / project / node / edge / spec / projection)."
+description = "persona-wire unified CLI — clap-based bin dispatching subcommands (init / node / edge / spec / projection / wire-init / wire-close / mcp). The `mcp` subcommand boots the stdio MCP server (persona-wire-mcp lib)."
 
 [[bin]]
 name = "persona-wire"
@@ -16,9 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 persona-wire-core.workspace = true
+persona-wire-mcp = { path = "../persona-wire-mcp", version = "0.0.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

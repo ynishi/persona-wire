@@ -1,4 +1,5 @@
-//! persona-wire MCP server entry point (rmcp stdio transport).
+//! persona-wire MCP server library — exposes [`serve_stdio`] for the unified
+//! `persona-wire mcp` subcommand to dispatch into. rmcp stdio transport.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +14,7 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    pnet_close, pnet_init, PnetCloseInput, PnetInitInput,
+    wire_close, wire_init, WireCloseInput, WireInitInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -42,13 +43,13 @@ impl WireServer {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct PnetInitParams {
+pub struct WireInitParams {
     /// Persona id for which the context bundle is rendered.
     pub persona_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct PnetCloseParams {
+pub struct WireCloseParams {
     /// Persona id for which the lifecycle scan is reported.
     pub persona_id: String,
 }
@@ -59,7 +60,7 @@ pub struct WireNodeCreateParams {
     /// Node type — must be in type_registry (e.g. "persona", "outline_node").
     #[serde(rename = "type")]
     pub type_: String,
-    /// Optional SoT ref like "pp://shi".
+    /// Optional SoT ref like "pp://alpha".
     #[serde(default)]
     pub sot_ref: Option<String>,
     /// Optional metadata object (JSON), defaults to `{}`.
@@ -107,16 +108,16 @@ pub struct WireProjectionRegisterParams {
 impl WireServer {
     /// Render every registered NamedProjection as a Context bundle.
     #[tool(
-        name = "pnet_init",
-        description = "Run pnet_init: render every registered NamedProjection against the current graph; returns the rendered context bundle (one entry per projection)."
+        name = "wire_init",
+        description = "Run wire_init: render every registered NamedProjection against the current graph; returns the rendered context bundle (one entry per projection)."
     )]
-    async fn pnet_init_tool(
+    async fn wire_init_tool(
         &self,
-        Parameters(p): Parameters<PnetInitParams>,
+        Parameters(p): Parameters<WireInitParams>,
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
-        let out = pnet_init(
-            PnetInitInput {
+        let out = wire_init(
+            WireInitInput {
                 persona_id: p.persona_id,
             },
             &s,
@@ -136,16 +137,16 @@ impl WireServer {
 
     /// Run lifecycle scan (orphan + totals).
     #[tool(
-        name = "pnet_close",
-        description = "Run pnet_close: minimal lifecycle scan reporting total nodes / edges / orphan-node count, in a Markdown report."
+        name = "wire_close",
+        description = "Run wire_close: minimal lifecycle scan reporting total nodes / edges / orphan-node count, in a Markdown report."
     )]
-    async fn pnet_close_tool(
+    async fn wire_close_tool(
         &self,
-        Parameters(p): Parameters<PnetCloseParams>,
+        Parameters(p): Parameters<WireCloseParams>,
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
-        let out = pnet_close(
-            PnetCloseInput {
+        let out = wire_close(
+            WireCloseInput {
                 persona_id: p.persona_id,
             },
             &s,
@@ -268,26 +269,19 @@ impl ServerHandler for WireServer {
         ))
         .with_instructions(
             "persona-wire MCP server. Graph engine over persona × SoT × workflow \
-             context routing. Tools: pnet_init / pnet_close / wire_node_create / \
+             context routing. Tools: wire_init / wire_close / wire_node_create / \
              wire_edge_create / wire_spec_register / wire_projection_register.",
         )
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+/// Run the MCP server over stdio against the given SQLite db path. Caller
+/// (typically the unified `persona-wire mcp` subcommand) owns tokio runtime
+/// setup and tracing init.
+pub async fn serve_stdio(db_path: &str) -> Result<()> {
+    tracing::info!(db = %db_path, "persona-wire mcp starting");
 
-    let db_path =
-        std::env::var("PERSONA_WIRE_DB").unwrap_or_else(|_| "./persona-wire.db".to_string());
-    tracing::info!(db = %db_path, "persona-wire-mcp starting");
-
-    let storage = SqliteStorage::open(&db_path)?;
+    let storage = SqliteStorage::open(db_path)?;
     storage.migrate()?;
     storage.seed_default_types()?;
 

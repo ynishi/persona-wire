@@ -9,7 +9,7 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    pnet_close, pnet_init, PnetCloseInput, PnetInitInput,
+    wire_close, wire_init, WireCloseInput, WireInitInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
@@ -64,11 +64,14 @@ enum Command {
         op: ProjectionOp,
     },
 
-    /// `pnet_init` use case — render every registered projection.
-    PnetInit(PnetInitArgs),
+    /// `wire_init` use case — render every registered projection.
+    WireInit(WireInitArgs),
 
-    /// `pnet_close` use case — lifecycle scan report.
-    PnetClose(PnetCloseArgs),
+    /// `wire_close` use case — lifecycle scan report.
+    WireClose(WireCloseArgs),
+
+    /// Boot the stdio MCP server (delegates to persona-wire-mcp::serve_stdio).
+    Mcp,
 }
 
 #[derive(Subcommand, Debug)]
@@ -82,7 +85,7 @@ enum NodeOp {
         /// Optional JSON metadata. Defaults to `{}`.
         #[arg(long, default_value = "{}")]
         metadata: String,
-        /// Optional SoT ref (e.g. `pp://shi`).
+        /// Optional SoT ref (e.g. `pp://alpha`).
         #[arg(long)]
         sot_ref: Option<String>,
     },
@@ -166,25 +169,32 @@ enum ProjectionOp {
 }
 
 #[derive(Args, Debug)]
-struct PnetInitArgs {
+struct WireInitArgs {
     #[arg(long)]
     persona: String,
 }
 
 #[derive(Args, Debug)]
-struct PnetCloseArgs {
+struct WireCloseArgs {
     #[arg(long)]
     persona: String,
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // `mcp` subcommand uses stdout for JSON-RPC framing, so route tracing to
+    // stderr in that mode. Other subcommands keep default (stdout).
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if matches!(cli.command, Command::Mcp) {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
 
     match cli.command {
         Command::Init => {
@@ -351,10 +361,10 @@ fn main() -> Result<()> {
             }
         },
 
-        Command::PnetInit(args) => {
+        Command::WireInit(args) => {
             let s = SqliteStorage::open(&cli.db)?;
-            let out = pnet_init(
-                PnetInitInput {
+            let out = wire_init(
+                WireInitInput {
                     persona_id: args.persona,
                 },
                 &s,
@@ -368,15 +378,20 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::PnetClose(args) => {
+        Command::WireClose(args) => {
             let s = SqliteStorage::open(&cli.db)?;
-            let out = pnet_close(
-                PnetCloseInput {
+            let out = wire_close(
+                WireCloseInput {
                     persona_id: args.persona,
                 },
                 &s,
             )?;
             println!("{}", out.report_markdown);
+        }
+
+        Command::Mcp => {
+            let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
+            rt.block_on(persona_wire_mcp::serve_stdio(&cli.db))?;
         }
     }
 

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/persona-wire-core",
     "crates/persona-wire-mcp",
-    "crates/persona-wire-cli",
+    "crates/persona-wire",
 ]
 
 [workspace.package]

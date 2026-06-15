@@ -8,11 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "persona-wire MCP server — rmcp transport bin. Wraps persona-wire-core's Application use cases as MCP Tools (pnet_* / wire_node_* / wire_edge_* / wire_spec_* / wire_projection_*)."
-
-[[bin]]
-name = "persona-wire-mcp"
-path = "src/main.rs"
+description = "persona-wire MCP server library — exposes serve_stdio() for the unified persona-wire CLI's `mcp` subcommand. Wraps persona-wire-core's Application use cases as MCP Tools (wire_init / wire_close / wire_node_* / wire_edge_* / wire_spec_* / wire_projection_*)."
 
 [dependencies]
 persona-wire-core.workspace = true
