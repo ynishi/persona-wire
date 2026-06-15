@@ -132,9 +132,9 @@ enum SpecOp {
     Register {
         #[arg(long)]
         name: String,
-        /// Specification JSON body. Example: `{"TypeIs":"persona"}`.
-        #[arg(long)]
-        json: String,
+        /// Specification body (JSON-serialised). Example: `{"TypeIs":"persona"}`.
+        #[arg(long = "spec", alias = "json")]
+        spec: String,
     },
     /// Get a registered Specification (printed as JSON).
     Get {
@@ -170,14 +170,14 @@ enum ProjectionOp {
 
 #[derive(Args, Debug)]
 struct WireInitArgs {
-    #[arg(long)]
-    persona: String,
+    #[arg(long = "persona-id", alias = "persona")]
+    persona_id: String,
 }
 
 #[derive(Args, Debug)]
 struct WireCloseArgs {
-    #[arg(long)]
-    persona: String,
+    #[arg(long = "persona-id", alias = "persona")]
+    persona_id: String,
 }
 
 fn main() -> Result<()> {
@@ -301,10 +301,10 @@ fn main() -> Result<()> {
         },
 
         Command::Spec { op } => match op {
-            SpecOp::Register { name, json } => {
+            SpecOp::Register { name, spec } => {
                 let s = SqliteStorage::open(&cli.db)?;
                 let spec: Specification =
-                    serde_json::from_str(&json).context("parse --json as Specification")?;
+                    serde_json::from_str(&spec).context("parse --spec as Specification")?;
                 SpecRegistry::new(&s).register(&name, &spec)?;
                 println!("registered spec: {name}");
             }
@@ -365,7 +365,7 @@ fn main() -> Result<()> {
             let s = SqliteStorage::open(&cli.db)?;
             let out = wire_init(
                 WireInitInput {
-                    persona_id: args.persona,
+                    persona_id: args.persona_id,
                 },
                 &s,
             )?;
@@ -382,7 +382,7 @@ fn main() -> Result<()> {
             let s = SqliteStorage::open(&cli.db)?;
             let out = wire_close(
                 WireCloseInput {
-                    persona_id: args.persona,
+                    persona_id: args.persona_id,
                 },
                 &s,
             )?;
