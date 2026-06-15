@@ -6,8 +6,13 @@
 //! - `limit` / `offset` paginate the result correctly
 //! - validation: spec + spec_ref are mutually exclusive; one is required
 
+use persona_wire_core::application::projection_registry::{
+    NamedProjection, ProjectionRegistry, TargetForm,
+};
 use persona_wire_core::application::spec_registry::SpecRegistry;
-use persona_wire_core::application::use_cases::{wire_query, WireQueryInput};
+use persona_wire_core::application::use_cases::{
+    wire_query, wire_render, WireQueryInput, WireRenderInput,
+};
 use persona_wire_core::domain::graph::Node;
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;
@@ -214,4 +219,81 @@ fn validation_errors_when_spec_and_spec_ref_both_or_neither() {
     )
     .expect_err("expected not-found error");
     assert!(err.to_string().to_lowercase().contains("not found"));
+}
+
+#[test]
+fn wire_render_evaluates_registered_projection_by_name() {
+    let s = setup();
+    SpecRegistry::new(&s)
+        .register(
+            "active_personas",
+            &Specification::TypeIs("persona".into()).and(Specification::MetadataEq {
+                path: "status".into(),
+                value: json!("active"),
+            }),
+        )
+        .unwrap();
+    ProjectionRegistry::new(&s)
+        .register(&NamedProjection {
+            name: "_active".into(),
+            spec_ref: "active_personas".into(),
+            template: "Active personas ({{count}}): {{names}}".into(),
+            target_form: TargetForm::Prompt,
+        })
+        .unwrap();
+
+    let out = wire_render(
+        WireRenderInput {
+            projection_ref: "_active".into(),
+        },
+        &s,
+    )
+    .unwrap();
+
+    assert_eq!(out.name, "_active");
+    assert_eq!(out.target_form, TargetForm::Prompt);
+    assert!(out.rendered.starts_with("Active personas (3):"));
+    for id in ["p1", "p2", "p3"] {
+        assert!(out.rendered.contains(id), "missing {id}: {}", out.rendered);
+    }
+    assert!(
+        !out.rendered.contains("p4"),
+        "p4 is retired and must be filtered out"
+    );
+}
+
+#[test]
+fn wire_render_errors_on_unknown_projection_and_dangling_spec() {
+    let s = setup();
+
+    // (a) Unknown projection name.
+    let err = wire_render(
+        WireRenderInput {
+            projection_ref: "does_not_exist".into(),
+        },
+        &s,
+    )
+    .expect_err("expected not-found");
+    assert!(err.to_string().to_lowercase().contains("projection"));
+
+    // (b) Projection whose spec_ref dangles.
+    ProjectionRegistry::new(&s)
+        .register(&NamedProjection {
+            name: "broken".into(),
+            spec_ref: "missing_spec".into(),
+            template: "x".into(),
+            target_form: TargetForm::Prompt,
+        })
+        .unwrap();
+    let err = wire_render(
+        WireRenderInput {
+            projection_ref: "broken".into(),
+        },
+        &s,
+    )
+    .expect_err("expected dangling spec_ref error");
+    assert!(err
+        .to_string()
+        .to_lowercase()
+        .contains("spec_ref (dangling)"));
 }

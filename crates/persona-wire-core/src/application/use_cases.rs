@@ -268,6 +268,62 @@ pub fn wire_query(input: WireQueryInput, storage: &SqliteStorage) -> WireResult<
     })
 }
 
+// ---- wire_render ----
+
+#[derive(Debug)]
+pub struct WireRenderInput {
+    /// Name of a registered NamedProjection to evaluate + render.
+    pub projection_ref: String,
+}
+
+#[derive(Debug)]
+pub struct WireRenderOutput {
+    pub name: String,
+    pub target_form: TargetForm,
+    pub rendered: String,
+}
+
+/// Render a single registered NamedProjection by name. Counterpart to
+/// `wire_init` (which renders every projection at once): use `wire_render`
+/// when you want exactly one rendered context, identified by name.
+///
+/// Ad-hoc inline rendering (spec + template + target_form passed inline,
+/// without registration) is carried to a follow-up surface — see
+/// `docs/wire-query-spec.md` §8 Future expansion.
+pub fn wire_render(
+    input: WireRenderInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireRenderOutput> {
+    let proj = ProjectionRegistry::new(storage)
+        .get(&input.projection_ref)?
+        .ok_or_else(|| {
+            crate::domain::error::WireError::NotFound(format!(
+                "projection: {}",
+                input.projection_ref
+            ))
+        })?;
+    let spec = SpecRegistry::new(storage)
+        .get(&proj.spec_ref)?
+        .ok_or_else(|| {
+            crate::domain::error::WireError::NotFound(format!(
+                "spec_ref (dangling): {}",
+                proj.spec_ref
+            ))
+        })?;
+    let matched = collect_matching_nodes(storage, &spec)?;
+    let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
+    let data = serde_json::json!({
+        "count": matched.len(),
+        "names": names.join(", "),
+    });
+    let rendered = render(proj.target_form, &proj.template, &data);
+    Ok(WireRenderOutput {
+        name: proj.name,
+        target_form: proj.target_form,
+        rendered,
+    })
+}
+
 // ---- wire_nodes_create_batch ----
 
 pub struct WireNodesCreateBatchInput {

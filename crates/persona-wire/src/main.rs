@@ -9,7 +9,8 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_doctor, wire_init, wire_query, WireCloseInput, WireInitInput, WireQueryInput,
+    wire_close, wire_doctor, wire_init, wire_query, wire_render, WireCloseInput, WireInitInput,
+    WireQueryInput, WireRenderInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
@@ -76,6 +77,9 @@ enum Command {
     /// `wire_query` use case — ad-hoc Specification query (slim node list).
     /// Provide either `--spec <json>` (inline) or `--spec-ref <name>` (registered).
     Query(QueryArgs),
+
+    /// `wire_render` use case — render a single registered NamedProjection by name.
+    Render(RenderArgs),
 
     /// Boot the stdio MCP server (delegates to persona-wire-mcp::serve_stdio).
     Mcp,
@@ -185,6 +189,13 @@ struct WireInitArgs {
 struct WireCloseArgs {
     #[arg(long = "persona-id", alias = "persona")]
     persona_id: String,
+}
+
+#[derive(Args, Debug)]
+struct RenderArgs {
+    /// Name of a registered NamedProjection to render.
+    #[arg(long = "projection-ref")]
+    projection_ref: String,
 }
 
 #[derive(Args, Debug)]
@@ -465,6 +476,22 @@ fn main() -> Result<()> {
                 })).collect::<Vec<_>>(),
                 "total_count": out.total_count,
                 "returned_count": out.returned_count,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+
+        Command::Render(args) => {
+            let s = SqliteStorage::open(&db)?;
+            let out = wire_render(
+                WireRenderInput {
+                    projection_ref: args.projection_ref,
+                },
+                &s,
+            )?;
+            let json = serde_json::json!({
+                "name": out.name,
+                "target_form": out.target_form.as_str(),
+                "rendered": out.rendered,
             });
             println!("{}", serde_json::to_string_pretty(&json)?);
         }

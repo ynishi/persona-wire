@@ -271,7 +271,7 @@ mcp__persona-wire__wire_query({
 
 | 軸 | 概要 | trigger |
 |---|---|---|
-| `wire_render` | register 済 NamedProjection を name 指定で **1 つだけ** 呼ぶ (現 wire_init は全 projection 一括) | usage 観察、 「特定 projection だけ呼びたい」 surface 時 |
+| ~~`wire_render`~~ **land 済** | register 済 NamedProjection を name 指定で個別 render (wire_init の counterpart)、 戻り値 `{name, target_form, rendered}`、 dangling spec_ref / 不在 projection_ref は `NotFound` error。 ad-hoc inline (spec + template + target_form 直渡し) は carry | wire_init で「全 projection 一括」 が token 重い時の選択肢として land |
 | field-level output filter | 戻り値 Node の field 絞り (例: `--fields id,metadata.status`)、 mini-app `output_fields` 相当 | slim form でも metadata が大きすぎる時 |
 | `MetadataIn` / `MetadataGt` / `MetadataLt` 等の Leaf 拡張 | array 包含 / 数値比較 / 範囲 | expressiveness 不足 surface 時 |
 | sort / aggregate (count / sum / group_by) | ordering + 集計 | 大量 hit で client 側 sort/agg が token 重くなる時 |

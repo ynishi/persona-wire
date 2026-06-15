@@ -15,8 +15,8 @@ use persona_wire_core::application::projection_registry::{
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_edges_create_batch, wire_init, wire_nodes_create_batch,
-    wire_query, WireCloseInput, WireEdgesCreateBatchInput, WireInitInput,
-    WireNodesCreateBatchInput, WireQueryInput,
+    wire_query, wire_render, WireCloseInput, WireEdgesCreateBatchInput, WireInitInput,
+    WireNodesCreateBatchInput, WireQueryInput, WireRenderInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -94,6 +94,12 @@ pub struct WireNodesCreateBatchParams {
 pub struct WireEdgesCreateBatchParams {
     /// Array of edge entries; each entry mirrors `wire_edge_create` params.
     pub edges: Vec<WireEdgeCreateParams>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireRenderParams {
+    /// Name of a registered NamedProjection to evaluate + render.
+    pub projection_ref: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -332,6 +338,31 @@ impl WireServer {
         Ok(format!("created edge: {}", p.id))
     }
 
+    /// Render a single registered NamedProjection by name (counterpart to wire_init).
+    #[tool(
+        name = "wire_render",
+        description = "Render a single registered NamedProjection by name. Counterpart to wire_init (which renders every registered projection at once): use wire_render when you want exactly one rendered context, identified by projection_ref."
+    )]
+    async fn wire_render_tool(
+        &self,
+        Parameters(p): Parameters<WireRenderParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_render(
+            WireRenderInput {
+                projection_ref: p.projection_ref,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "name": out.name,
+            "target_form": out.target_form.as_str(),
+            "rendered": out.rendered,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
     /// Ad-hoc query: run a Specification against the graph and return matched nodes.
     #[tool(
         name = "wire_query",
@@ -427,7 +458,7 @@ impl ServerHandler for WireServer {
         .with_instructions(
             "persona-wire MCP server. Graph engine over persona × SoT × workflow \
              context routing. Tools: wire_init / wire_close / wire_doctor / wire_query / \
-             wire_node_create / wire_edge_create / wire_nodes_create_batch / \
+             wire_render / wire_node_create / wire_edge_create / wire_nodes_create_batch / \
              wire_edges_create_batch / wire_spec_register / wire_projection_register.",
         )
     }
