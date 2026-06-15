@@ -84,6 +84,43 @@ fn collect_matching_nodes(storage: &SqliteStorage, spec: &Specification) -> Wire
     Ok(out)
 }
 
+// ---- graph scan (shared by wire_close + wire_doctor) ----
+
+/// Shared graph health summary used by `wire_close` (persona-scoped report)
+/// and `wire_doctor` (orphan-only diagnostic).
+pub struct GraphScanSummary {
+    pub orphan_node_count: usize,
+    pub total_node_count: usize,
+    pub total_edge_count: usize,
+}
+
+/// Walk every node type and tally totals + orphan count (nodes with no
+/// in- or out-edges). Shared scan primitive for `wire_close` / `wire_doctor`;
+/// P3 daemon will extend this with stale / asymmetric / high-fanout checks.
+pub fn graph_scan_summary(storage: &SqliteStorage) -> WireResult<GraphScanSummary> {
+    let mut total_nodes = 0_usize;
+    let mut total_edges = 0_usize;
+    let mut orphan = 0_usize;
+
+    for t in storage.list_types_by_kind("node")? {
+        for n in storage.list_nodes_by_type(&t)? {
+            total_nodes += 1;
+            let out_edges = storage.list_edges_from(&n.id)?;
+            let in_edges = storage.list_edges_to(&n.id)?;
+            total_edges += out_edges.len();
+            if out_edges.is_empty() && in_edges.is_empty() {
+                orphan += 1;
+            }
+        }
+    }
+
+    Ok(GraphScanSummary {
+        orphan_node_count: orphan,
+        total_node_count: total_nodes,
+        total_edge_count: total_edges,
+    })
+}
+
 // ---- wire_close ----
 
 pub struct WireCloseInput {
@@ -102,35 +139,56 @@ pub struct WireCloseOutput {
 /// nodes (no in- or out-edges) and graph totals. P3 will expand this to
 /// stale / asymmetric / high-fanout scan + Daily report emit.
 pub fn wire_close(input: WireCloseInput, storage: &SqliteStorage) -> WireResult<WireCloseOutput> {
-    let mut total_nodes = 0_usize;
-    let mut total_edges = 0_usize;
-    let mut orphan = 0_usize;
-
-    for t in storage.list_types_by_kind("node")? {
-        for n in storage.list_nodes_by_type(&t)? {
-            total_nodes += 1;
-            let out_edges = storage.list_edges_from(&n.id)?;
-            let in_edges = storage.list_edges_to(&n.id)?;
-            total_edges += out_edges.len();
-            if out_edges.is_empty() && in_edges.is_empty() {
-                orphan += 1;
-            }
-        }
-    }
-
+    let summary = graph_scan_summary(storage)?;
     let persona = &input.persona_id;
     let report_markdown = format!(
         "# wire_close report for `{persona}`\n\n\
          - total nodes: {total_nodes}\n\
          - total edges: {total_edges}\n\
          - orphan nodes (0 in + 0 out): {orphan}\n",
+        total_nodes = summary.total_node_count,
+        total_edges = summary.total_edge_count,
+        orphan = summary.orphan_node_count,
     );
 
     Ok(WireCloseOutput {
         persona_id: input.persona_id,
-        orphan_node_count: orphan,
-        total_node_count: total_nodes,
-        total_edge_count: total_edges,
+        orphan_node_count: summary.orphan_node_count,
+        total_node_count: summary.total_node_count,
+        total_edge_count: summary.total_edge_count,
+        report_markdown,
+    })
+}
+
+// ---- wire_doctor ----
+
+pub struct WireDoctorOutput {
+    pub orphan_node_count: usize,
+    pub total_node_count: usize,
+    pub total_edge_count: usize,
+    pub report_markdown: String,
+}
+
+/// Graph-wide health diagnostic. P2a scope: orphan count + totals only
+/// (= same scan as `wire_close`, but not persona-scoped + framed as a
+/// standalone health check). Future expansion (stale / asymmetric /
+/// high-fanout) carried to P3 daemon.
+pub fn wire_doctor(storage: &SqliteStorage) -> WireResult<WireDoctorOutput> {
+    let summary = graph_scan_summary(storage)?;
+    let report_markdown = format!(
+        "# wire_doctor report\n\n\
+         - total nodes: {total_nodes}\n\
+         - total edges: {total_edges}\n\
+         - orphan nodes (0 in + 0 out): {orphan}\n",
+        total_nodes = summary.total_node_count,
+        total_edges = summary.total_edge_count,
+        orphan = summary.orphan_node_count,
+    );
+
+    Ok(WireDoctorOutput {
+        orphan_node_count: summary.orphan_node_count,
+        total_node_count: summary.total_node_count,
+        total_edge_count: summary.total_edge_count,
         report_markdown,
     })
 }

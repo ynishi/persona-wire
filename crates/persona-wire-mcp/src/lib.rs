@@ -14,7 +14,7 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_init, WireCloseInput, WireInitInput,
+    wire_close, wire_doctor, wire_init, WireCloseInput, WireInitInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -155,6 +155,17 @@ impl WireServer {
         Ok(out.report_markdown)
     }
 
+    /// Graph-wide health diagnostic (orphan + totals, persona-agnostic).
+    #[tool(
+        name = "wire_doctor",
+        description = "Run wire_doctor: graph-wide health diagnostic reporting total nodes / edges / orphan-node count in a Markdown report. Not persona-scoped."
+    )]
+    async fn wire_doctor_tool(&self) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_doctor(&s).map_err(|e| e.to_string())?;
+        Ok(out.report_markdown)
+    }
+
     /// Insert a node.
     #[tool(
         name = "wire_node_create",
@@ -269,8 +280,9 @@ impl ServerHandler for WireServer {
         ))
         .with_instructions(
             "persona-wire MCP server. Graph engine over persona × SoT × workflow \
-             context routing. Tools: wire_init / wire_close / wire_node_create / \
-             wire_edge_create / wire_spec_register / wire_projection_register.",
+             context routing. Tools: wire_init / wire_close / wire_doctor / \
+             wire_node_create / wire_edge_create / wire_spec_register / \
+             wire_projection_register.",
         )
     }
 }

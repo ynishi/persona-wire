@@ -9,7 +9,7 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_init, WireCloseInput, WireInitInput,
+    wire_close, wire_doctor, wire_init, WireCloseInput, WireInitInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
@@ -69,6 +69,9 @@ enum Command {
 
     /// `wire_close` use case — lifecycle scan report.
     WireClose(WireCloseArgs),
+
+    /// `wire_doctor` use case — graph-wide health diagnostic (orphan + totals).
+    WireDoctor,
 
     /// Boot the stdio MCP server (delegates to persona-wire-mcp::serve_stdio).
     Mcp,
@@ -386,6 +389,12 @@ fn main() -> Result<()> {
                 },
                 &s,
             )?;
+            println!("{}", out.report_markdown);
+        }
+
+        Command::WireDoctor => {
+            let s = SqliteStorage::open(&cli.db)?;
+            let out = wire_doctor(&s)?;
             println!("{}", out.report_markdown);
         }
 
