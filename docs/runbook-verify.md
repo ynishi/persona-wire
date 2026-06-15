@@ -24,6 +24,7 @@
 | TC-009 | wire_doctor | graph-wide 健全性 diagnostic (orphan + totals)、 wire_close と parity verify | 手動 + ✓ test | P2a land |
 | TC-010 | bulk import | wire_nodes_create_batch / wire_edges_create_batch (1-row-at-a-time loop、 stops on first failure)、 happy path + duplicate stop + missing FK stop | ✓ test | P2c land |
 | TC-011 | DB path resolution | env (`PERSONA_WIRE_DB`) > CLI `--db` flag > OS data dir (`$XDG_DATA_HOME/persona-wire/store.db` or `$HOME/.persona-wire/store.db`) の 3 段優先順 | ✓ test (env mutation) | path resolution 変更時 |
+| TC-012 | wire_query | ad-hoc Specification → slim node list、 spec literal / spec_ref / limit / offset / 排他 validation | ✓ test + 手動 | P2b land |
 
 ---
 
@@ -241,6 +242,58 @@ CLI と同等 flow を MCP Tool 経由で:
 
 ---
 
+## TC-012: wire_query (ad-hoc Specification → slim node list)
+
+- **目的**: graph 全体に対する ad-hoc query (Specification AST literal or 登録済 spec_ref) で slim Node list を取得する semantic を verify。 mini-app `list(table, filter)` と semantic 対応
+- **前提**: 使い捨て DB or 永続 DB + 既存 graph
+- **手順 (test 内蔵 4 case、 `tests/p2b_e2e.rs`)**:
+  1. `inline_spec_returns_matched_nodes_in_slim_form`: `Specification::TypeIs("persona")` literal → 全 persona 件取得、 戻り値が slim form (id + type + metadata、 sot_ref / version は含まない)
+  2. `spec_ref_resolves_registered_specification`: 登録済 `active_personas` spec を `spec_ref` で参照、 `MetadataEq("status", "active")` 経由で 4 件中 3 件 hit
+  3. `limit_and_offset_paginate_results`: limit=2 / offset=0,2 で page split、 disjoint id set、 offset 超過で returned_count=0
+  4. `validation_errors_when_spec_and_spec_ref_both_or_neither`: 両方 set / 両方 None → `InvalidSpec` (mutually exclusive / required)、 不在 spec_ref → `NotFound`
+
+### CLI form (手動 smoke)
+
+```bash
+# inline spec (全件)
+persona-wire query --spec '{"TypeIs":"persona"}'
+
+# inline spec + pagination
+persona-wire query --spec '{"TypeIs":"persona"}' --limit 2 --offset 2
+
+# env limit fallback (--limit 未指定時に env で default 設定)
+PERSONA_WIRE_QUERY_LIMIT=3 persona-wire query --spec '{"TypeIs":"persona"}'
+
+# 登録済 spec を name 参照
+persona-wire query --spec-ref active_personas
+
+# 排他制約 (clap conflicts_with で reject)
+persona-wire query --spec '{"TypeIs":"persona"}' --spec-ref some  # error
+```
+
+### 戻り値 form (JSON pretty)
+
+```json
+{
+  "matched": [
+    {"id": "p1", "type": "persona", "metadata": {"status": "active"}},
+    ...
+  ],
+  "total_count": 4,
+  "returned_count": 2
+}
+```
+
+### Semantic 注意
+
+- **slim form**: 戻り値 Node は `id` + `type` + `metadata` のみ (sot_ref / version / confidence 等は除外)、 token 量と情報密度のトレードオフで slim 優先。 full Node を欲しい場合は別 Tool 検討 (将来 carry)
+- **field-level output filter (mini-app `output_fields` 相当)**: 別 surface 候補 (carry、 wire_select 等の名前)
+- **limit precedence**: CLI `--limit` flag > env `PERSONA_WIRE_QUERY_LIMIT` > None (unlimited)
+- **spec / spec_ref 排他**: CLI は clap `conflicts_with`、 MCP / core は use case 内 validation (両方の path で error 経路 verify 済)
+- **Mlua 統合**: 着手なし (usage 観察待ち、 expressiveness 不足 surface 時に trigger)
+
+---
+
 ## TC-011: DB path resolution (env > flag > fallback)
 
 - **目的**: persona-x family 規約 (persona-work pattern) に揃えた path resolution が env / flag / OS data dir の 3 段優先順で動作することを verify
@@ -293,6 +346,7 @@ CLI と MCP Tool param は semantic-first で literal 揃え (kebab ↔ snake �
 - 2026-06-15: P2a `wire_doctor` land — graph-wide 健全性 diagnostic Tool 追加 (Orphan 1 軸、 `wire_close` の orphan logic を `graph_scan_summary` pub fn として切り出し共有)、 CLI subcommand + MCP Tool + integration test 3 件追加 (`tests/p2a_e2e.rs` 新規)、 cargo test 55 PASS (49 unit + 3 p1_e2e + 3 p2a_e2e)、 TC-009 起こし
 - 2026-06-15: P2c bulk import Tool land — `wire_nodes_create_batch` / `wire_edges_create_batch` MCP Tool 追加 (1-row-at-a-time loop、 stops on first failure、 inserted_count + failed_at + error_message 返り値)、 CLI は carry (別 turn)、 integration test 3 件追加 (`tests/p2c_e2e.rs` 新規)、 cargo test 58 PASS (49 + 3 + 3 + 3)、 TC-010 起こし。 atomic Tx wrap は usage 観察後 carry
 - 2026-06-15: DB path resolution fix — `DEFAULT_DB = "./persona-wire.db"` (CWD 相対 hardcoded) を persona-x family 規約 (persona-work pattern) に揃える、 `storage::default_db_path()` helper 新規 (XDG_DATA_HOME > $HOME/.persona-wire/store.db fallback)、 `main.rs` で env (`PERSONA_WIRE_DB`) > CLI `--db` > helper の 3 段優先順実装、 `.mcp.json` の env block 削除、 integration test 3 件 (`tests/db_path_resolution.rs` 新規)、 cargo test 61 PASS (49 + 3 + 3 + 3 + 3)、 TC-011 起こし。 project root 直下汚染 bug 解消
+- 2026-06-15: P2b `wire_query` land — ad-hoc Specification query (slim Node list、 mini-app `list(table, filter)` semantic 対応)、 spec literal OR spec_ref 排他、 limit/offset pagination、 env `PERSONA_WIRE_QUERY_LIMIT` fallback、 CLI subcommand + MCP Tool + integration test 4 件 (`tests/p2b_e2e.rs` 新規)、 cargo test 65 PASS (49 + 3 + 3 + 4 + 3 + 3)、 TC-012 起こし。 output values filter (field-level) は別 surface carry、 Mlua 統合は usage 観察 trigger 待ち
 
 ## 運用 SOP
 

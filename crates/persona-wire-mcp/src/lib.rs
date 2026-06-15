@@ -15,7 +15,8 @@ use persona_wire_core::application::projection_registry::{
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_edges_create_batch, wire_init, wire_nodes_create_batch,
-    WireCloseInput, WireEdgesCreateBatchInput, WireInitInput, WireNodesCreateBatchInput,
+    wire_query, WireCloseInput, WireEdgesCreateBatchInput, WireInitInput,
+    WireNodesCreateBatchInput, WireQueryInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -93,6 +94,23 @@ pub struct WireNodesCreateBatchParams {
 pub struct WireEdgesCreateBatchParams {
     /// Array of edge entries; each entry mirrors `wire_edge_create` params.
     pub edges: Vec<WireEdgeCreateParams>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireQueryParams {
+    /// Inline Specification body (JSON-serialised). Mutually exclusive with `spec_ref`.
+    /// Example: `{"TypeIs":"persona"}` or `{"And":[...]}`.
+    #[serde(default)]
+    pub spec: Option<String>,
+    /// Name of a previously registered Specification. Mutually exclusive with `spec`.
+    #[serde(default)]
+    pub spec_ref: Option<String>,
+    /// Maximum number of matched nodes to return. Omit for unlimited.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Number of leading matched nodes to skip. Omit for 0.
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -314,6 +332,45 @@ impl WireServer {
         Ok(format!("created edge: {}", p.id))
     }
 
+    /// Ad-hoc query: run a Specification against the graph and return matched nodes.
+    #[tool(
+        name = "wire_query",
+        description = "Ad-hoc query: evaluate either an inline `spec` (Specification JSON) or a registered `spec_ref` against the graph and return matched nodes (slim form: id + type + metadata). Supports `limit` / `offset` for pagination; both unset = unlimited. Mirrors mini-app `list(table, filter)` semantics on the graph."
+    )]
+    async fn wire_query_tool(
+        &self,
+        Parameters(p): Parameters<WireQueryParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let spec = match p.spec.as_deref() {
+            Some(body) => Some(
+                serde_json::from_str::<Specification>(body)
+                    .map_err(|e| format!("parse spec JSON: {e}"))?,
+            ),
+            None => None,
+        };
+        let out = wire_query(
+            WireQueryInput {
+                spec,
+                spec_ref: p.spec_ref,
+                limit: p.limit,
+                offset: p.offset,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "matched": out.matched.iter().map(|n| serde_json::json!({
+                "id": n.id,
+                "type": n.r#type,
+                "metadata": n.metadata,
+            })).collect::<Vec<_>>(),
+            "total_count": out.total_count,
+            "returned_count": out.returned_count,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
     /// Register a Specification (dynamic-axis query object).
     #[tool(
         name = "wire_spec_register",
@@ -369,7 +426,7 @@ impl ServerHandler for WireServer {
         ))
         .with_instructions(
             "persona-wire MCP server. Graph engine over persona × SoT × workflow \
-             context routing. Tools: wire_init / wire_close / wire_doctor / \
+             context routing. Tools: wire_init / wire_close / wire_doctor / wire_query / \
              wire_node_create / wire_edge_create / wire_nodes_create_batch / \
              wire_edges_create_batch / wire_spec_register / wire_projection_register.",
         )

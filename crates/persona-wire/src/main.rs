@@ -9,7 +9,7 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_doctor, wire_init, WireCloseInput, WireInitInput,
+    wire_close, wire_doctor, wire_init, wire_query, WireCloseInput, WireInitInput, WireQueryInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
@@ -72,6 +72,10 @@ enum Command {
 
     /// `wire_doctor` use case — graph-wide health diagnostic (orphan + totals).
     WireDoctor,
+
+    /// `wire_query` use case — ad-hoc Specification query (slim node list).
+    /// Provide either `--spec <json>` (inline) or `--spec-ref <name>` (registered).
+    Query(QueryArgs),
 
     /// Boot the stdio MCP server (delegates to persona-wire-mcp::serve_stdio).
     Mcp,
@@ -181,6 +185,23 @@ struct WireInitArgs {
 struct WireCloseArgs {
     #[arg(long = "persona-id", alias = "persona")]
     persona_id: String,
+}
+
+#[derive(Args, Debug)]
+struct QueryArgs {
+    /// Inline Specification body (JSON). Mutually exclusive with `--spec-ref`.
+    /// Example: `--spec '{"TypeIs":"persona"}'`.
+    #[arg(long, conflicts_with = "spec_ref")]
+    spec: Option<String>,
+    /// Name of a previously registered Specification. Mutually exclusive with `--spec`.
+    #[arg(long = "spec-ref")]
+    spec_ref: Option<String>,
+    /// Maximum matches to return. Default: env `PERSONA_WIRE_QUERY_LIMIT` if set, else unlimited.
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Number of leading matches to skip (pagination).
+    #[arg(long)]
+    offset: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -409,6 +430,43 @@ fn main() -> Result<()> {
             let s = SqliteStorage::open(&db)?;
             let out = wire_doctor(&s)?;
             println!("{}", out.report_markdown);
+        }
+
+        Command::Query(args) => {
+            let s = SqliteStorage::open(&db)?;
+            // env precedence for `limit`: --limit flag > env PERSONA_WIRE_QUERY_LIMIT > None (unlimited).
+            let limit: Option<usize> = match args.limit {
+                Some(n) => Some(n),
+                None => std::env::var("PERSONA_WIRE_QUERY_LIMIT")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok()),
+            };
+            let spec = match args.spec.as_deref() {
+                Some(body) => Some(
+                    serde_json::from_str::<Specification>(body)
+                        .context("parse --spec as Specification")?,
+                ),
+                None => None,
+            };
+            let out = wire_query(
+                WireQueryInput {
+                    spec,
+                    spec_ref: args.spec_ref,
+                    limit,
+                    offset: args.offset,
+                },
+                &s,
+            )?;
+            let json = serde_json::json!({
+                "matched": out.matched.iter().map(|n| serde_json::json!({
+                    "id": n.id,
+                    "type": n.r#type,
+                    "metadata": n.metadata,
+                })).collect::<Vec<_>>(),
+                "total_count": out.total_count,
+                "returned_count": out.returned_count,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
         }
 
         Command::Mcp => {

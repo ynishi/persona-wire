@@ -193,6 +193,81 @@ pub fn wire_doctor(storage: &SqliteStorage) -> WireResult<WireDoctorOutput> {
     })
 }
 
+// ---- wire_query ----
+
+#[derive(Debug)]
+pub struct WireQueryInput {
+    /// Either an inline `Specification` AST or a reference to a registered
+    /// spec by name. Exactly one of the two must be Some (validated at
+    /// the entry).
+    pub spec: Option<Specification>,
+    pub spec_ref: Option<String>,
+    /// Maximum number of matched nodes to return. `None` = unlimited.
+    pub limit: Option<usize>,
+    /// Number of leading matched nodes to skip. `None` = 0.
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug)]
+pub struct WireQueryNode {
+    pub id: String,
+    pub r#type: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub struct WireQueryOutput {
+    pub matched: Vec<WireQueryNode>,
+    pub total_count: usize,
+    pub returned_count: usize,
+}
+
+/// Ad-hoc query: evaluate `spec` (inline or by registered name) against the
+/// whole graph and return matched nodes in a slim form (id + type + metadata
+/// only). Field-level output filtering is a separate concern carried to a
+/// future "output values filter" surface (mirrors mini-app's `output_fields`).
+pub fn wire_query(input: WireQueryInput, storage: &SqliteStorage) -> WireResult<WireQueryOutput> {
+    let resolved: Specification = match (input.spec, input.spec_ref.as_deref()) {
+        (Some(s), None) => s,
+        (None, Some(name)) => SpecRegistry::new(storage)
+            .get(name)?
+            .ok_or_else(|| crate::domain::error::WireError::NotFound(format!("spec: {name}")))?,
+        (Some(_), Some(_)) => {
+            return Err(crate::domain::error::WireError::InvalidSpec(
+                "spec and spec_ref are mutually exclusive".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(crate::domain::error::WireError::InvalidSpec(
+                "either spec or spec_ref is required".into(),
+            ));
+        }
+    };
+
+    let all = collect_matching_nodes(storage, &resolved)?;
+    let total_count = all.len();
+    let offset = input.offset.unwrap_or(0);
+    let slice: Vec<Node> = match input.limit {
+        Some(lim) => all.into_iter().skip(offset).take(lim).collect(),
+        None => all.into_iter().skip(offset).collect(),
+    };
+    let returned_count = slice.len();
+    let matched = slice
+        .into_iter()
+        .map(|n| WireQueryNode {
+            id: n.id,
+            r#type: n.r#type,
+            metadata: n.metadata,
+        })
+        .collect();
+
+    Ok(WireQueryOutput {
+        matched,
+        total_count,
+        returned_count,
+    })
+}
+
 // ---- wire_nodes_create_batch ----
 
 pub struct WireNodesCreateBatchInput {
