@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 persona-wire-core.workspace = true
-persona-wire-mcp = { path = "../persona-wire-mcp", version = "0.0.0" }
+persona-wire-mcp = { path = "../persona-wire-mcp", version = "0.1.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
