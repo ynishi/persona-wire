@@ -13,16 +13,16 @@ use persona_wire_core::application::use_cases::{
 };
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
-use persona_wire_core::infrastructure::storage::SqliteStorage;
-
-const DEFAULT_DB: &str = "./persona-wire.db";
+use persona_wire_core::infrastructure::storage::{default_db_path, SqliteStorage};
 
 #[derive(Parser, Debug)]
 #[command(name = "persona-wire", version, about = "persona-wire CLI")]
 struct Cli {
     /// Path to the SQLite db (created if absent, except for `init` which always creates).
-    #[arg(long, global = true, default_value = DEFAULT_DB)]
-    db: String,
+    /// Resolution order: env `PERSONA_WIRE_DB` > this `--db` flag > OS data dir
+    /// fallback (`$XDG_DATA_HOME/persona-wire/store.db` or `$HOME/.persona-wire/store.db`).
+    #[arg(long, global = true)]
+    db: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -199,16 +199,29 @@ fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
+    // Resolve DB path: env > CLI flag > OS data dir fallback.
+    let db: String = if let Ok(env_path) = std::env::var("PERSONA_WIRE_DB") {
+        env_path
+    } else if let Some(flag) = cli.db.clone() {
+        flag
+    } else {
+        let p = default_db_path().context("resolve default db path")?;
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).context("create db parent dir")?;
+        }
+        p.to_string_lossy().into_owned()
+    };
+
     match cli.command {
         Command::Init => {
-            let s = SqliteStorage::open(&cli.db).with_context(|| format!("open db: {}", cli.db))?;
+            let s = SqliteStorage::open(&db).with_context(|| format!("open db: {db}"))?;
             s.migrate().context("migrate")?;
             s.seed_default_types().context("seed default types")?;
-            println!("initialized: db={} (9 node + 9 edge types seeded)", cli.db);
+            println!("initialized: db={db} (9 node + 9 edge types seeded)");
         }
 
         Command::Types { kind } => {
-            let s = SqliteStorage::open(&cli.db)?;
+            let s = SqliteStorage::open(&db)?;
             let entries = match kind.as_deref() {
                 Some("node") => s
                     .list_types_by_kind("node")?
@@ -235,7 +248,7 @@ fn main() -> Result<()> {
                 metadata,
                 sot_ref,
             } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 let meta: serde_json::Value =
                     serde_json::from_str(&metadata).context("parse --metadata as JSON")?;
                 let node = Node {
@@ -254,7 +267,7 @@ fn main() -> Result<()> {
                 println!("created node: {id}");
             }
             NodeOp::Get { id } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 match s.get_node(&id)? {
                     Some(n) => println!("{}", serde_json::to_string_pretty(&n)?),
                     None => {
@@ -264,7 +277,7 @@ fn main() -> Result<()> {
                 }
             }
             NodeOp::List { type_ } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 let nodes = s.list_nodes_by_type(&type_)?;
                 println!("{}", serde_json::to_string_pretty(&nodes)?);
             }
@@ -279,7 +292,7 @@ fn main() -> Result<()> {
                 severity,
                 metadata,
             } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 let meta: serde_json::Value =
                     serde_json::from_str(&metadata).context("parse --metadata as JSON")?;
                 let sev = severity.as_deref().map(parse_severity).transpose()?;
@@ -297,7 +310,7 @@ fn main() -> Result<()> {
                 println!("created edge: {id}");
             }
             EdgeOp::From { src } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 let edges = s.list_edges_from(&src)?;
                 println!("{}", serde_json::to_string_pretty(&edges)?);
             }
@@ -305,14 +318,14 @@ fn main() -> Result<()> {
 
         Command::Spec { op } => match op {
             SpecOp::Register { name, spec } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 let spec: Specification =
                     serde_json::from_str(&spec).context("parse --spec as Specification")?;
                 SpecRegistry::new(&s).register(&name, &spec)?;
                 println!("registered spec: {name}");
             }
             SpecOp::Get { name } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 match SpecRegistry::new(&s).get(&name)? {
                     Some(spec) => println!("{}", serde_json::to_string_pretty(&spec)?),
                     None => {
@@ -322,7 +335,7 @@ fn main() -> Result<()> {
                 }
             }
             SpecOp::List => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 for n in SpecRegistry::new(&s).list()? {
                     println!("{n}");
                 }
@@ -336,7 +349,7 @@ fn main() -> Result<()> {
                 template,
                 target_form,
             } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 let tf = TargetForm::parse(&target_form)?;
                 ProjectionRegistry::new(&s).register(&NamedProjection {
                     name: name.clone(),
@@ -347,7 +360,7 @@ fn main() -> Result<()> {
                 println!("registered projection: {name}");
             }
             ProjectionOp::Get { name } => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 match ProjectionRegistry::new(&s).get(&name)? {
                     Some(p) => println!("{}", serde_json::to_string_pretty(&p)?),
                     None => {
@@ -357,7 +370,7 @@ fn main() -> Result<()> {
                 }
             }
             ProjectionOp::List => {
-                let s = SqliteStorage::open(&cli.db)?;
+                let s = SqliteStorage::open(&db)?;
                 for n in ProjectionRegistry::new(&s).list()? {
                     println!("{n}");
                 }
@@ -365,7 +378,7 @@ fn main() -> Result<()> {
         },
 
         Command::WireInit(args) => {
-            let s = SqliteStorage::open(&cli.db)?;
+            let s = SqliteStorage::open(&db)?;
             let out = wire_init(
                 WireInitInput {
                     persona_id: args.persona_id,
@@ -382,7 +395,7 @@ fn main() -> Result<()> {
         }
 
         Command::WireClose(args) => {
-            let s = SqliteStorage::open(&cli.db)?;
+            let s = SqliteStorage::open(&db)?;
             let out = wire_close(
                 WireCloseInput {
                     persona_id: args.persona_id,
@@ -393,14 +406,14 @@ fn main() -> Result<()> {
         }
 
         Command::WireDoctor => {
-            let s = SqliteStorage::open(&cli.db)?;
+            let s = SqliteStorage::open(&db)?;
             let out = wire_doctor(&s)?;
             println!("{}", out.report_markdown);
         }
 
         Command::Mcp => {
             let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
-            rt.block_on(persona_wire_mcp::serve_stdio(&cli.db))?;
+            rt.block_on(persona_wire_mcp::serve_stdio(&db))?;
         }
     }
 

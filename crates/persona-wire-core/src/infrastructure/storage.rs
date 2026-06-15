@@ -3,10 +3,36 @@
 //! P1 scope: type_registry / nodes / edges / versions schema + CRUD primitive.
 //! specifications / projections / workflow_runs tables are P2+ carry.
 
+use std::path::PathBuf;
+
 use crate::domain::autoversion::{VersionRecord, VersionTargetKind};
 use crate::domain::error::{WireError, WireResult};
 use crate::domain::graph::{Edge, EdgeId, Node, NodeId, Severity};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+
+/// Resolve the default DB path for persona-wire. Follows the persona-x family
+/// convention (= persona-work `store-sqlite/src/lib.rs:96-109`):
+///
+/// 1. `$XDG_DATA_HOME/persona-wire/store.db` if `XDG_DATA_HOME` is set
+/// 2. `$HOME/.persona-wire/store.db` otherwise
+///
+/// Env override (`PERSONA_WIRE_DB`) and CLI `--db` override are the caller's
+/// responsibility (the CLI / MCP wrapper applies that precedence before
+/// falling back to this helper).
+pub fn default_db_path() -> WireResult<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        let mut p = PathBuf::from(xdg);
+        p.push("persona-wire");
+        p.push("store.db");
+        return Ok(p);
+    }
+    let home =
+        std::env::var_os("HOME").ok_or_else(|| WireError::Storage("HOME not set".to_string()))?;
+    let mut p = PathBuf::from(home);
+    p.push(".persona-wire");
+    p.push("store.db");
+    Ok(p)
+}
 
 pub struct SqliteStorage {
     conn: Connection,

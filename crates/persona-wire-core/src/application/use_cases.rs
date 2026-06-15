@@ -193,6 +193,71 @@ pub fn wire_doctor(storage: &SqliteStorage) -> WireResult<WireDoctorOutput> {
     })
 }
 
+// ---- wire_nodes_create_batch ----
+
+pub struct WireNodesCreateBatchInput {
+    pub nodes: Vec<Node>,
+}
+
+pub struct WireBatchOutput {
+    pub inserted_count: usize,
+    /// 0-based index of the first item that failed; `None` if all succeeded.
+    pub failed_at: Option<usize>,
+    pub error_message: Option<String>,
+}
+
+/// Insert a batch of nodes by iterating `insert_node` 1 row at a time. Stops
+/// on the first failure (non-atomic), reports counts so the caller can
+/// decide whether to retry / patch / rollback. P2c scope: minimal bulk
+/// surface; atomic SQLite Tx wrap is carried until usage observation.
+pub fn wire_nodes_create_batch(
+    input: WireNodesCreateBatchInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireBatchOutput> {
+    for (i, n) in input.nodes.iter().enumerate() {
+        if let Err(e) = storage.insert_node(n) {
+            return Ok(WireBatchOutput {
+                inserted_count: i,
+                failed_at: Some(i),
+                error_message: Some(e.to_string()),
+            });
+        }
+    }
+    Ok(WireBatchOutput {
+        inserted_count: input.nodes.len(),
+        failed_at: None,
+        error_message: None,
+    })
+}
+
+// ---- wire_edges_create_batch ----
+
+pub struct WireEdgesCreateBatchInput {
+    pub edges: Vec<crate::domain::graph::Edge>,
+}
+
+/// Insert a batch of edges by iterating `insert_edge` 1 row at a time. Same
+/// non-atomic semantics as `wire_nodes_create_batch`.
+pub fn wire_edges_create_batch(
+    input: WireEdgesCreateBatchInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireBatchOutput> {
+    for (i, e) in input.edges.iter().enumerate() {
+        if let Err(err) = storage.insert_edge(e) {
+            return Ok(WireBatchOutput {
+                inserted_count: i,
+                failed_at: Some(i),
+                error_message: Some(err.to_string()),
+            });
+        }
+    }
+    Ok(WireBatchOutput {
+        inserted_count: input.edges.len(),
+        failed_at: None,
+        error_message: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

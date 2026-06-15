@@ -14,7 +14,8 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_doctor, wire_init, WireCloseInput, WireInitInput,
+    wire_close, wire_doctor, wire_edges_create_batch, wire_init, wire_nodes_create_batch,
+    WireCloseInput, WireEdgesCreateBatchInput, WireInitInput, WireNodesCreateBatchInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -80,6 +81,18 @@ pub struct WireEdgeCreateParams {
     pub severity: Option<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireNodesCreateBatchParams {
+    /// Array of node entries; each entry mirrors `wire_node_create` params.
+    pub nodes: Vec<WireNodeCreateParams>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireEdgesCreateBatchParams {
+    /// Array of edge entries; each entry mirrors `wire_edge_create` params.
+    pub edges: Vec<WireEdgeCreateParams>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -192,6 +205,82 @@ impl WireServer {
         Ok(format!("created node: {}", p.id))
     }
 
+    /// Bulk-insert a batch of nodes (1-row-at-a-time loop, stops on first error).
+    #[tool(
+        name = "wire_nodes_create_batch",
+        description = "Bulk-insert a batch of nodes. Iterates 1-row-at-a-time (non-atomic); stops on first failure and returns inserted_count + failed_at. Use when constructing a graph from many rows (e.g. mini-app row → Node mapping) to avoid per-row tool-call overhead."
+    )]
+    async fn wire_nodes_create_batch_tool(
+        &self,
+        Parameters(p): Parameters<WireNodesCreateBatchParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let nodes: Vec<Node> = p
+            .nodes
+            .into_iter()
+            .map(|np| Node {
+                id: np.id,
+                r#type: np.type_,
+                sot_ref: np.sot_ref,
+                confidence: None,
+                applicability: None,
+                last_verified_at: None,
+                review_due: None,
+                version: 1,
+                prev_id: None,
+                metadata: np.metadata.unwrap_or(serde_json::json!({})),
+            })
+            .collect();
+        let out = wire_nodes_create_batch(WireNodesCreateBatchInput { nodes }, &s)
+            .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "inserted_count": out.inserted_count,
+            "failed_at": out.failed_at,
+            "error_message": out.error_message,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    /// Bulk-insert a batch of edges (1-row-at-a-time loop, stops on first error).
+    #[tool(
+        name = "wire_edges_create_batch",
+        description = "Bulk-insert a batch of edges. Same non-atomic semantics as wire_nodes_create_batch: stops on first failure and returns inserted_count + failed_at."
+    )]
+    async fn wire_edges_create_batch_tool(
+        &self,
+        Parameters(p): Parameters<WireEdgesCreateBatchParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let mut edges = Vec::with_capacity(p.edges.len());
+        for ep in p.edges {
+            let sev = match ep.severity.as_deref() {
+                None => None,
+                Some("hard") => Some(Severity::Hard),
+                Some("soft") => Some(Severity::Soft),
+                Some("advisory") => Some(Severity::Advisory),
+                Some(other) => return Err(format!("unknown severity: {other}")),
+            };
+            edges.push(Edge {
+                id: ep.id,
+                src_node: ep.src,
+                tgt_node: ep.tgt,
+                kind: ep.kind,
+                severity: sev,
+                metadata: ep.metadata.unwrap_or(serde_json::json!({})),
+                version: 1,
+                prev_id: None,
+            });
+        }
+        let out = wire_edges_create_batch(WireEdgesCreateBatchInput { edges }, &s)
+            .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "inserted_count": out.inserted_count,
+            "failed_at": out.failed_at,
+            "error_message": out.error_message,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
     /// Insert an edge.
     #[tool(
         name = "wire_edge_create",
@@ -281,8 +370,8 @@ impl ServerHandler for WireServer {
         .with_instructions(
             "persona-wire MCP server. Graph engine over persona × SoT × workflow \
              context routing. Tools: wire_init / wire_close / wire_doctor / \
-             wire_node_create / wire_edge_create / wire_spec_register / \
-             wire_projection_register.",
+             wire_node_create / wire_edge_create / wire_nodes_create_batch / \
+             wire_edges_create_batch / wire_spec_register / wire_projection_register.",
         )
     }
 }
