@@ -1,67 +1,37 @@
 //! Rendering adapter — render extracted graph subsets into output forms.
 //!
-//! P1 scope: a minimal `{{path.to.field}}` substitution engine over JSON data.
-//! Per concept-doc §6, the choice of a richer DSL (Lua / Tera) is deferred to
-//! the project's "rich rendering" milestone; the minimal engine keeps wire
-//! self-contained and avoids the mlua / tera dependency at the P1 boundary.
+//! Engine: `handlebars` (Mustache superset) — supports section iteration
+//! (`{{#each list}}…{{/each}}`), conditionals (`{{#if cond}}…{{/if}}`),
+//! dotted path lookup (`{{a.b.c}}`), and the existing scalar substitution
+//! syntax (backward-compatible with the P1 minimal engine).
+//!
+//! HTML-escape is **disabled** globally: wire emits markdown / prompt /
+//! json / ascii, none of which want HTML entity encoding (`<` → `&lt;`).
 
 use crate::application::projection_registry::TargetForm;
+use handlebars::{no_escape, Handlebars};
 
-/// Render `template` by substituting `{{key.path}}` occurrences with values
-/// looked up from `data` (dotted JSON path, e.g. `{{user.name}}`).
+/// Render `template` against `data` using a handlebars engine.
 ///
 /// Behaviour:
-/// - Whitespace inside the braces is trimmed: `{{ a.b }}` ≡ `{{a.b}}`.
-/// - Missing paths render as the empty string.
-/// - Non-string values render via their JSON representation (no surrounding quotes for strings).
+/// - Scalar substitution: `{{key.path}}` looks up dotted JSON paths.
+/// - Section iteration: `{{#each list}}{{this.field}}{{/each}}` walks arrays.
+/// - Conditionals: `{{#if cond}}…{{/if}}` evaluates truthiness.
+/// - Missing paths render as the empty string (handlebars default).
+/// - HTML escape is OFF (markdown/prompt/json/ascii outputs preserved verbatim).
+/// - On template parse / render error, returns a `{{render-error: <msg>}}`
+///   prefix followed by the raw template literal so callers can diagnose
+///   syntax issues at-a-glance (never panics).
 /// - `target_form` is currently informational; future variants (e.g. JSON-array
 ///   wrapping) will dispatch on this.
 pub fn render(target_form: TargetForm, template: &str, data: &serde_json::Value) -> String {
     let _ = target_form;
-    let mut out = String::with_capacity(template.len());
-    let bytes = template.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            if let Some(end) = find_closing(bytes, i + 2) {
-                let key = std::str::from_utf8(&bytes[i + 2..end]).unwrap_or("").trim();
-                out.push_str(&lookup(data, key));
-                i = end + 2;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn find_closing(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut j = start;
-    while j + 1 < bytes.len() {
-        if bytes[j] == b'}' && bytes[j + 1] == b'}' {
-            return Some(j);
-        }
-        j += 1;
-    }
-    None
-}
-
-fn lookup(data: &serde_json::Value, key: &str) -> String {
-    if key.is_empty() {
-        return String::new();
-    }
-    let mut current = data;
-    for part in key.split('.') {
-        match current.get(part) {
-            Some(next) => current = next,
-            None => return String::new(),
-        }
-    }
-    match current {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
+    let mut hb = Handlebars::new();
+    hb.register_escape_fn(no_escape);
+    hb.set_strict_mode(false);
+    match hb.render_template(template, data) {
+        Ok(s) => s,
+        Err(e) => format!("{{{{render-error: {}}}}} {}", e, template),
     }
 }
 
@@ -113,9 +83,11 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_open_brace_passes_through() {
+    fn unmatched_open_brace_returns_visible_error() {
         let out = render(TargetForm::Prompt, "{{ no_close", &json!({}));
-        assert_eq!(out, "{{ no_close");
+        // handlebars parse error → visible {{render-error: ...}} prefix.
+        assert!(out.starts_with("{{render-error:"));
+        assert!(out.contains("{{ no_close"));
     }
 
     #[test]
@@ -142,5 +114,61 @@ mod tests {
             &json!({"a": "x", "b": "y", "c": "z"}),
         );
         assert_eq!(out, "x-y-z");
+    }
+
+    #[test]
+    fn each_section_iterates_list() {
+        let out = render(
+            TargetForm::Markdown,
+            "{{#each nodes}}- {{this.id}}\n{{/each}}",
+            &json!({"nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}]}),
+        );
+        assert_eq!(out, "- a\n- b\n- c\n");
+    }
+
+    #[test]
+    fn each_section_with_nested_metadata_lookup() {
+        let out = render(
+            TargetForm::Markdown,
+            "{{#each nodes}}- {{this.id}}: {{this.metadata.label}}\n{{/each}}",
+            &json!({
+                "nodes": [
+                    {"id": "a", "metadata": {"label": "Alpha"}},
+                    {"id": "b", "metadata": {"label": "Beta"}}
+                ]
+            }),
+        );
+        assert_eq!(out, "- a: Alpha\n- b: Beta\n");
+    }
+
+    #[test]
+    fn if_section_evaluates_truthiness() {
+        let out = render(
+            TargetForm::Prompt,
+            "{{#if has_carry}}carry present{{else}}no carry{{/if}}",
+            &json!({"has_carry": true}),
+        );
+        assert_eq!(out, "carry present");
+    }
+
+    #[test]
+    fn html_escape_is_disabled_for_markdown() {
+        // markdown / prompt 出力で `<` `>` を `&lt;` `&gt;` にエンコードしない
+        let out = render(
+            TargetForm::Markdown,
+            "tag: {{tag}}",
+            &json!({"tag": "<div>"}),
+        );
+        assert_eq!(out, "tag: <div>");
+    }
+
+    #[test]
+    fn empty_each_section_renders_empty() {
+        let out = render(
+            TargetForm::Markdown,
+            "[{{#each nodes}}- {{this.id}}\n{{/each}}]",
+            &json!({"nodes": []}),
+        );
+        assert_eq!(out, "[]");
     }
 }

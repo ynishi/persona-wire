@@ -14,9 +14,11 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_doctor, wire_edges_create_batch, wire_init, wire_nodes_create_batch,
-    wire_query, wire_render, WireCloseInput, WireEdgesCreateBatchInput, WireInitInput,
-    WireNodesCreateBatchInput, WireQueryInput, WireRenderInput,
+    wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
+    wire_node_delete, wire_nodes_create_batch, wire_projection_delete, wire_prompt_context,
+    wire_query, wire_render, wire_spec_delete, WireCloseInput, WireDeleteInput,
+    WireEdgesCreateBatchInput, WireInitInput, WireNodesCreateBatchInput, WirePromptContextInput,
+    WireQueryInput, WireRenderInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -54,6 +56,34 @@ pub struct WireInitParams {
 pub struct WireCloseParams {
     /// Persona id for which the lifecycle scan is reported.
     pub persona_id: String,
+}
+
+/// Normalize a metadata argument that may arrive as a JSON-encoded string.
+///
+/// Some MCP clients (and the rmcp serde path the unified `Parameters<T>`
+/// wrapper goes through for top-level fields) stringify `serde_json::Value`
+/// inputs before deserialization. Without normalization, an object payload
+/// like `{ "persona": "alpha" }` ends up stored as `Value::String("{ … }")`,
+/// which breaks every downstream `MetadataEq` query.
+///
+/// The batch tools (`wire_nodes_create_batch` / `wire_edges_create_batch`)
+/// avoid the issue because rmcp deserializes the outer `Vec<…>` first and
+/// recursively unwraps each element. Single-row tools need to apply the
+/// same recovery explicitly.
+///
+/// Rules:
+/// - `None` / `Value::Null` → empty object `{}` (legacy default).
+/// - `Value::String(s)` where `s` parses as JSON → parsed value.
+/// - `Value::String(s)` where `s` is not JSON → kept as-is (caller intent).
+/// - Anything else → returned unchanged.
+fn normalize_metadata(raw: Option<serde_json::Value>) -> serde_json::Value {
+    match raw {
+        None | Some(serde_json::Value::Null) => serde_json::Value::Object(serde_json::Map::new()),
+        Some(serde_json::Value::String(s)) => {
+            serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s))
+        }
+        Some(other) => other,
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -135,6 +165,23 @@ pub struct WireProjectionRegisterParams {
     pub template: String,
     /// One of prompt | markdown | json | ascii.
     pub target_form: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireDeleteParams {
+    /// Node id (for wire_node_delete / wire_edge_delete) or registered name
+    /// (for wire_spec_delete / wire_projection_delete).
+    pub id_or_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WirePromptContextParams {
+    pub persona_id: String,
+    /// Optional subset of axis names to render (e.g. `["active", "ng"]`).
+    /// `None` (omitted) = render all axes registered in persona-pack
+    /// `[extra.persona_wire.sections]`.
+    #[serde(default)]
+    pub projection_names: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +270,7 @@ impl WireServer {
             review_due: None,
             version: 1,
             prev_id: None,
-            metadata: p.metadata.unwrap_or(serde_json::json!({})),
+            metadata: normalize_metadata(p.metadata),
         };
         s.insert_node(&node).map_err(|e| e.to_string())?;
         Ok(format!("created node: {}", p.id))
@@ -252,7 +299,7 @@ impl WireServer {
                 review_due: None,
                 version: 1,
                 prev_id: None,
-                metadata: np.metadata.unwrap_or(serde_json::json!({})),
+                metadata: normalize_metadata(np.metadata),
             })
             .collect();
         let out = wire_nodes_create_batch(WireNodesCreateBatchInput { nodes }, &s)
@@ -290,7 +337,7 @@ impl WireServer {
                 tgt_node: ep.tgt,
                 kind: ep.kind,
                 severity: sev,
-                metadata: ep.metadata.unwrap_or(serde_json::json!({})),
+                metadata: normalize_metadata(ep.metadata),
                 version: 1,
                 prev_id: None,
             });
@@ -330,7 +377,7 @@ impl WireServer {
             tgt_node: p.tgt,
             kind: p.kind,
             severity: sev,
-            metadata: p.metadata.unwrap_or(serde_json::json!({})),
+            metadata: normalize_metadata(p.metadata),
             version: 1,
             prev_id: None,
         };
@@ -441,7 +488,157 @@ impl WireServer {
             .map_err(|e| e.to_string())?;
         Ok(format!("registered projection: {}", p.name))
     }
+
+    /// Delete a node by id. Edges are not cascade-deleted (wire_doctor surfaces
+    /// surviving dangling references on the next scan).
+    #[tool(
+        name = "wire_node_delete",
+        description = "Delete a node by id. Returns {kind, id_or_name, deleted}. Edges are NOT cascade-deleted; surviving edges referencing the removed id become dangling — wire_doctor flags them."
+    )]
+    async fn wire_node_delete_tool(
+        &self,
+        Parameters(p): Parameters<WireDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_node_delete(
+            WireDeleteInput {
+                id_or_name: p.id_or_name,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "kind": out.kind,
+            "id_or_name": out.id_or_name,
+            "deleted": out.deleted,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    /// Delete an edge by id.
+    #[tool(
+        name = "wire_edge_delete",
+        description = "Delete an edge by id. Returns {kind, id_or_name, deleted}."
+    )]
+    async fn wire_edge_delete_tool(
+        &self,
+        Parameters(p): Parameters<WireDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_edge_delete(
+            WireDeleteInput {
+                id_or_name: p.id_or_name,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "kind": out.kind,
+            "id_or_name": out.id_or_name,
+            "deleted": out.deleted,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    /// Delete a Specification by name. Projections referencing this spec via
+    /// `spec_ref` will start returning dangling-spec errors at render time.
+    #[tool(
+        name = "wire_spec_delete",
+        description = "Delete a Specification by name. Returns {kind, id_or_name, deleted}. Projections referencing this spec via spec_ref will start returning dangling-spec errors at render time."
+    )]
+    async fn wire_spec_delete_tool(
+        &self,
+        Parameters(p): Parameters<WireDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_spec_delete(
+            WireDeleteInput {
+                id_or_name: p.id_or_name,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "kind": out.kind,
+            "id_or_name": out.id_or_name,
+            "deleted": out.deleted,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    /// One-shot entry: discover persona-scoped wiring entries, fetch each axis
+    /// via the Layer 6 Adapter, render with the registered NamedProjection
+    /// (optionally merged with a persona-pack overlay), and concatenate the
+    /// rendered blocks into a single PromptContext.
+    #[tool(
+        name = "wire_prompt_context",
+        description = "Run every registered NamedProjection through the Layer 6 Adapter (mini-app:// / file:// schemes supported) to fresh-fetch each wiring entry's source_uri, render via handlebars, and return the concatenated PromptContext literal in one call. Used as the `/wake` auto-load entry — wire holds wiring metadata only, data lives in the SoT (mini-app / file / outline)."
+    )]
+    async fn wire_prompt_context_tool(
+        &self,
+        Parameters(p): Parameters<WirePromptContextParams>,
+    ) -> Result<String, String> {
+        let storage = self.storage.clone();
+        let out = wire_prompt_context(
+            WirePromptContextInput {
+                persona_id: p.persona_id,
+                projection_names: p.projection_names,
+            },
+            storage,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "persona_id": out.persona_id,
+            "prompt_context": out.prompt_context,
+            "projections": out.projections.iter().map(|p| serde_json::json!({
+                "name": p.name,
+                "target_form": format!("{:?}", p.target_form),
+                "rendered": p.rendered,
+            })).collect::<Vec<_>>(),
+            "warnings": out.warnings,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    /// Delete a NamedProjection by name.
+    #[tool(
+        name = "wire_projection_delete",
+        description = "Delete a NamedProjection by name. Returns {kind, id_or_name, deleted}."
+    )]
+    async fn wire_projection_delete_tool(
+        &self,
+        Parameters(p): Parameters<WireDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_projection_delete(
+            WireDeleteInput {
+                id_or_name: p.id_or_name,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "kind": out.kind,
+            "id_or_name": out.id_or_name,
+            "deleted": out.deleted,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Onboarding guide — exposed both as a Rust constant (for embedding in tests
+// or other crates) and as an MCP resource at `wire-guide://onboarding`.
+
+/// Full end-to-end onboarding guide bundled with the MCP server.
+///
+/// Source: `docs/onboarding.md`. The contents are embedded at build time so
+/// that the binary always ships a self-describing copy and a client can fetch
+/// it through `read_resource` without filesystem access.
+pub const ONBOARDING_GUIDE: &str = include_str!("../../../docs/onboarding.md");
+
+const ONBOARDING_URI: &str = "wire-guide://onboarding";
 
 #[tool_handler]
 impl ServerHandler for WireServer {
@@ -449,6 +646,7 @@ impl ServerHandler for WireServer {
         rmcp::model::ServerInfo::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
+                .enable_resources()
                 .build(),
         )
         .with_server_info(rmcp::model::Implementation::new(
@@ -457,10 +655,62 @@ impl ServerHandler for WireServer {
         ))
         .with_instructions(
             "persona-wire MCP server. Graph engine over persona × SoT × workflow \
-             context routing. Tools: wire_init / wire_close / wire_doctor / wire_query / \
-             wire_render / wire_node_create / wire_edge_create / wire_nodes_create_batch / \
-             wire_edges_create_batch / wire_spec_register / wire_projection_register.",
+             context routing. Tools: wire_init / wire_close / wire_doctor / \
+             wire_query / wire_render / wire_prompt_context / wire_node_create / \
+             wire_edge_create / wire_nodes_create_batch / wire_edges_create_batch / \
+             wire_spec_register / wire_projection_register / wire_node_delete / \
+             wire_edge_delete / wire_spec_delete / wire_projection_delete. \
+             For the full end-to-end onboarding walkthrough (setup → wire entries → \
+             spec / projection → optional persona-pack overlay → wire_prompt_context \
+             call → Skill / Prompt wiring) read the bundled resource at \
+             `wire-guide://onboarding` via `read_resource`.",
         )
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _ctx: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> std::result::Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
+        let raw = rmcp::model::RawResource {
+            uri: ONBOARDING_URI.to_string(),
+            name: "persona-wire onboarding guide".to_string(),
+            title: Some("Onboarding — Wiring a new persona end-to-end".to_string()),
+            description: Some(
+                "Full walkthrough: install, register wiring entries, register \
+                 Specification + NamedProjection, optional persona-pack overlay, \
+                 smoke-test, and inline the rendered prompt_context into a Skill."
+                    .to_string(),
+            ),
+            mime_type: Some("text/markdown".to_string()),
+            size: Some(ONBOARDING_GUIDE.len() as u32),
+            icons: None,
+            meta: None,
+        };
+        let resource = rmcp::model::Resource {
+            raw,
+            annotations: None,
+        };
+        Ok(rmcp::model::ListResourcesResult::with_all_items(vec![
+            resource,
+        ]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _ctx: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> std::result::Result<rmcp::model::ReadResourceResult, rmcp::ErrorData> {
+        if request.uri == ONBOARDING_URI {
+            Ok(rmcp::model::ReadResourceResult::new(vec![
+                rmcp::model::ResourceContents::text(ONBOARDING_GUIDE, ONBOARDING_URI),
+            ]))
+        } else {
+            Err(rmcp::ErrorData::resource_not_found(
+                format!("unknown resource uri: {}", request.uri),
+                None,
+            ))
+        }
     }
 }
 
@@ -480,4 +730,64 @@ pub async fn serve_stdio(db_path: &str) -> Result<()> {
     service.waiting().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_metadata_none_becomes_empty_object() {
+        let got = normalize_metadata(None);
+        assert_eq!(got, json!({}));
+        assert!(got.is_object());
+    }
+
+    #[test]
+    fn normalize_metadata_null_becomes_empty_object() {
+        let got = normalize_metadata(Some(serde_json::Value::Null));
+        assert_eq!(got, json!({}));
+    }
+
+    #[test]
+    fn normalize_metadata_object_passes_through() {
+        let got = normalize_metadata(Some(json!({"persona": "alpha", "axis": "active"})));
+        assert_eq!(got, json!({"persona": "alpha", "axis": "active"}));
+    }
+
+    #[test]
+    fn normalize_metadata_json_encoded_string_is_recovered_as_object() {
+        // This is the core Finding 1 fix: a stringified JSON object payload
+        // must round-trip back into an Object so downstream `MetadataEq`
+        // queries against `metadata.persona` etc. continue to match.
+        let stringified = r#"{"persona":"alpha","axis":"active","nested":{"k":1}}"#;
+        let got = normalize_metadata(Some(serde_json::Value::String(stringified.into())));
+        assert_eq!(
+            got,
+            json!({
+                "persona": "alpha",
+                "axis": "active",
+                "nested": {"k": 1}
+            })
+        );
+        assert!(got.is_object());
+    }
+
+    #[test]
+    fn normalize_metadata_plain_string_is_preserved() {
+        // A genuine string payload (not JSON-encoded) is kept as-is so the
+        // caller's intent is not silently mutated.
+        let got = normalize_metadata(Some(serde_json::Value::String("hello".into())));
+        assert_eq!(got, json!("hello"));
+        assert!(got.is_string());
+    }
+
+    #[test]
+    fn normalize_metadata_json_array_string_is_recovered() {
+        // Arrays survive the same way as objects.
+        let got = normalize_metadata(Some(serde_json::Value::String("[1,2,3]".into())));
+        assert_eq!(got, json!([1, 2, 3]));
+        assert!(got.is_array());
+    }
 }

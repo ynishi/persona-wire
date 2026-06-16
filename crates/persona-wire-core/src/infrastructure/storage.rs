@@ -61,7 +61,7 @@ impl SqliteStorage {
     pub fn seed_default_types(&self) -> WireResult<()> {
         const SEED: &[(&str, &str, Option<&str>)] = &[
             ("outline_node", "node", None),
-            ("mia_artifact", "node", None),
+            ("actor_artifact", "node", None),
             ("pp_field", "node", None),
             ("ma_row", "node", None),
             ("pj_chapter", "node", None),
@@ -368,6 +368,65 @@ impl SqliteStorage {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| WireError::Storage(e.to_string()))
     }
+
+    // ---- delete surface (P2c-bis、 メンテ運用必須) ----
+
+    /// Delete a node by id. Returns `true` if a row was deleted, `false` if
+    /// no row matched. Edges referencing this node (as src or tgt) are
+    /// **cascade-deleted** in the same transaction — schema has NOT-NULL FK
+    /// from edges → nodes, so orphan edges are not representable; cascade is
+    /// the only consistent option.
+    pub fn delete_node(&self, id: &str) -> WireResult<bool> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM edges WHERE src_node = ?1 OR tgt_node = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| WireError::Storage(e.to_string()))?;
+        let n = tx
+            .execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        tx.commit().map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(n > 0)
+    }
+
+    /// Delete an edge by id. Returns `true` if a row was deleted.
+    pub fn delete_edge(&self, id: &str) -> WireResult<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM edges WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(n > 0)
+    }
+
+    /// Delete a Specification by name. Returns `true` if a row was deleted.
+    /// Projections referencing this spec via `spec_ref` will start returning
+    /// dangling-spec errors at render time (existing wire_render contract).
+    pub fn delete_specification(&self, name: &str) -> WireResult<bool> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM specifications WHERE name = ?1",
+                rusqlite::params![name],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(n > 0)
+    }
+
+    /// Delete a NamedProjection by name. Returns `true` if a row was deleted.
+    pub fn delete_projection(&self, name: &str) -> WireResult<bool> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM projections WHERE name = ?1",
+                rusqlite::params![name],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(n > 0)
+    }
 }
 
 impl crate::domain::repository::Repository for SqliteStorage {
@@ -669,12 +728,12 @@ mod tests {
     #[test]
     fn insert_and_list_edges_from() {
         let s = setup();
-        s.insert_node(&bare_node("p_shi", "persona")).unwrap();
-        s.insert_node(&bare_node("p_mia", "persona")).unwrap();
+        s.insert_node(&bare_node("p_alpha", "persona")).unwrap();
+        s.insert_node(&bare_node("p_beta", "persona")).unwrap();
         let e = Edge {
             id: "e1".into(),
-            src_node: "p_shi".into(),
-            tgt_node: "p_mia".into(),
+            src_node: "p_alpha".into(),
+            tgt_node: "p_beta".into(),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({"weight": 1}),
@@ -683,14 +742,14 @@ mod tests {
         };
         s.insert_edge(&e).unwrap();
 
-        let edges = s.list_edges_from(&"p_shi".into()).unwrap();
+        let edges = s.list_edges_from(&"p_alpha".into()).unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].id, "e1");
         assert_eq!(edges[0].kind, "routes_to");
         assert_eq!(edges[0].metadata, json!({"weight": 1}));
 
         // reverse direction empty
-        let back = s.list_edges_from(&"p_mia".into()).unwrap();
+        let back = s.list_edges_from(&"p_beta".into()).unwrap();
         assert!(back.is_empty());
     }
 

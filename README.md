@@ -1,8 +1,31 @@
 # persona-wire
 
-A SingleMCPApp graph engine for persona × SoT × workflow context routing.
+A small graph engine for persona × SoT × workflow context routing. Wire
+turns a runtime [`Specification`][spec] over a property graph into a rendered
+string (Prompt / Markdown / JSON / ASCII) by binding it to a registered
+template — the **ProjectionAsPrompt** pattern — and concatenates one or more
+such renderings into a wake-time prompt context.
 
-Concept seed: Edge/Node Graph + Lifecycle + Knowledge SoT navigator (see `docs/concept-2026-06-14.md`).
+## Documentation
+
+**The crate's Rustdoc is the source of truth for design and API.**
+
+- **Onboarding (end-to-end how-to)** — [`docs/onboarding.md`][onboarding].
+  Walks through install → wiring entries → Specification / NamedProjection
+  registration → optional persona-pack overlay → `wire_prompt_context`
+  smoke-test → Skill / Prompt wiring. The same document is also bundled
+  into the MCP server as the resource `wire-guide://onboarding`, so a
+  client can `read_resource` it without leaving the session.
+- Crate docs (architecture, layer split, render / prompt-context flow,
+  persistence schema): the `//!` block at the top of
+  [`persona-wire-core/src/lib.rs`][lib-rs]. Run locally with
+  `cargo doc --workspace --open -p persona-wire-core`, or read the
+  published docs at <https://docs.rs/persona-wire-core/>.
+- Concept seed (early, narrative): [`docs/concept-2026-06-14.md`][concept].
+- MCP tool surface: published docs for
+  [`persona-wire-mcp`](https://docs.rs/persona-wire-mcp/).
+- CLI subcommands: `persona-wire --help` (or
+  [`persona-wire`](https://docs.rs/persona-wire/) on docs.rs).
 
 ## Workspace layout
 
@@ -15,23 +38,31 @@ persona-wire/
     └── persona-wire/           # unified bin (clap CLI + `mcp` subcommand dispatch)
 ```
 
-## Architecture (v4 / BP-aligned)
-
-DDD + Hexagonal layer split (see `docs/concept-2026-06-14.md` once P0 lands):
+## Architecture at a glance (DDD + Hexagonal)
 
 | Layer | Where | Contents |
 |---|---|---|
-| Surface | `mcp` / `cli` | MCP Tool surface + clap subcommand surface |
-| Application | `core::application` | Use cases, `SpecRegistry` (dynamic), `ProjectionRegistry` (named) |
-| Domain Core | `core::domain` | 6 primitive: Graph / CRUD / Compute / Constraint / AutoVersion / **Specification** |
-| Infrastructure | `core::infrastructure` | SQLite storage adapter, Rendering adapter |
+| Surface | `mcp` / `cli` | MCP Tool surface, clap subcommands |
+| Application | `core::application` | Use cases; `SpecRegistry` (dynamic) and `ProjectionRegistry` (named) read model; `MergeStrategy`; persona-pack overlay resolver |
+| Domain Core | `core::domain` | `Node` / `Edge`, composable [`Specification`][spec], autoversion, repository trait |
+| Infrastructure | `core::infrastructure` | SQLite storage, handlebars rendering, Layer 6 SoT Adapter (`mini-app://` via the `mini-app-core` SDK; `file:` via `std::fs`) |
 
-### Why two-axis query
+Two complementary query axes, both first-class:
 
-- **Dynamic axis** — `Specification` (Evans / Fowler BP): composable first-class predicate object (`and` / `or` / `not`) for arbitrary runtime queries.
-- **Fixed axis** — `NamedProjection` (CQRS Read Model): registered named query + template + target form (Prompt / Markdown / JSON / ASCII).
+- **Dynamic axis** — inline `Specification` evaluated on demand
+  (`wire_query`). Good for ad-hoc filters.
+- **Fixed axis** — `NamedProjection = (spec_ref, template, target_form)`
+  registered by name (`wire_render`, `wire_prompt_context`). Good for
+  stable surfaces like wake-time injection.
 
-The **ProjectionAsPrompt** core (= the heart of wire's value prop) emerges from chaining: `Specification` → traversal → template binding → `Rendering Adapter` → consumable form.
+There is **no hard-coded projection list in the crate** — every projection
+is data, registered through `ProjectionRegistry`. Optional template
+overlays per persona live in persona-pack
+(`[extra.persona_wire.projections.<axis>]`) and are folded in via
+`MergeStrategy` (`Replace` / `Append` / `Prepend` / `Section(name)`).
+
+For the full layer-by-layer description, the persistence schema, and the
+render / prompt-context flow diagrams, see the crate Rustdoc above.
 
 ## Build
 
@@ -39,6 +70,7 @@ The **ProjectionAsPrompt** core (= the heart of wire's value prop) emerges from 
 cargo check --workspace
 cargo build --workspace
 cargo test --workspace
+cargo doc --workspace --open -p persona-wire-core   # browse the design docs
 ```
 
 ## Run
@@ -51,12 +83,10 @@ cargo run -p persona-wire -- init --db /tmp/wire.db
 cargo run -p persona-wire -- mcp
 ```
 
-## Status
-
-Skeleton land. P0 design doc + P1 storage/use-case wiring pending.
-
-See `docs/ROADMAP.md` once it lands for phase plan (P0 doc → P1 storage+core → P2 adapters → P3 daemon → P4 RelationMap → P5 WorkflowEngine).
-
 ## License
 
 Dual: MIT OR Apache-2.0.
+
+[spec]: https://en.wikipedia.org/wiki/Specification_pattern
+[lib-rs]: https://github.com/ynishi/persona-wire/blob/main/crates/persona-wire-core/src/lib.rs
+[concept]: docs/concept-2026-06-14.md

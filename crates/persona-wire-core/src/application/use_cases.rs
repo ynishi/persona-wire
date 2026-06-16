@@ -14,6 +14,7 @@ pub struct WireInitInput {
     pub persona_id: String,
 }
 
+#[derive(Debug)]
 pub struct RenderedProjection {
     pub name: String,
     pub target_form: TargetForm,
@@ -27,8 +28,10 @@ pub struct WireInitOutput {
 }
 
 /// Run every registered NamedProjection against the current graph and return
-/// the rendered context bundle. Used as the `/wake` auto-call entry per
-/// concept-doc §3 Application layer (wire_init flow).
+/// the rendered context bundle. **P1 互換 (sync)** = wire 内 graph の data 本体
+/// を render する旧 path。 新規 `wire_prompt_context` (async + Adapter 経由) で
+/// Layer 6 Adapter fresh fetch 経路に置き換える前提、 本 fn は P1 contract / test
+/// 維持のため sync で残す。
 pub fn wire_init(input: WireInitInput, storage: &SqliteStorage) -> WireResult<WireInitOutput> {
     let spec_reg = SpecRegistry::new(storage);
     let proj_reg = ProjectionRegistry::new(storage);
@@ -38,7 +41,6 @@ pub fn wire_init(input: WireInitInput, storage: &SqliteStorage) -> WireResult<Wi
 
     for name in proj_reg.list()? {
         let Some(proj) = proj_reg.get(&name)? else {
-            // Race: row deleted between list() and get(). Skip silently.
             continue;
         };
         let Some(spec) = spec_reg.get(&proj.spec_ref)? else {
@@ -51,9 +53,20 @@ pub fn wire_init(input: WireInitInput, storage: &SqliteStorage) -> WireResult<Wi
 
         let matched = collect_matching_nodes(storage, &spec)?;
         let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
+        let nodes_json: Vec<serde_json::Value> = matched
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id,
+                    "type": n.r#type,
+                    "metadata": n.metadata,
+                })
+            })
+            .collect();
         let data = serde_json::json!({
             "count": matched.len(),
             "names": names.join(", "),
+            "nodes": nodes_json,
             "persona_id": input.persona_id,
         });
         let rendered = render(proj.target_form, &proj.template, &data);
@@ -66,6 +79,182 @@ pub fn wire_init(input: WireInitInput, storage: &SqliteStorage) -> WireResult<Wi
 
     Ok(WireInitOutput {
         persona_id: input.persona_id,
+        projections,
+        warnings,
+    })
+}
+
+// ---- wire_prompt_context (Layer 6 Adapter + persona-pack 配線 SoT 経路) ----
+
+#[derive(Debug)]
+pub struct WirePromptContextInput {
+    pub persona_id: String,
+    /// `Some(["active", "ng"])` で該当 axis のみ render、 `None` で全 axis。
+    pub projection_names: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
+pub struct WirePromptContextOutput {
+    pub persona_id: String,
+    /// 全 projection を rendered block 化して concat した PromptContext literal。
+    pub prompt_context: String,
+    /// 個別 rendered block (= 各 projection 1 件)。
+    pub projections: Vec<RenderedProjection>,
+    pub warnings: Vec<String>,
+}
+
+/// 各 axis 1 件の Phase 1 sync collect 結果。
+struct CollectedAxis {
+    axis: String,
+    source_uri: String,
+    target_form: TargetForm,
+    template: String,
+}
+
+/// 全 builtin axis (or projection_names で subset) を iterate し、 各 axis の
+/// **配線 (source_uri)** を **wire DB の wiring entry `<persona>.<axis>`** から取得、
+/// **template** を 3 段優先 (1: persona-pack overlay × `MergeStrategy.merge` / 2: wire
+/// DB の動的 register projection `<persona>.section.<axis>` / 3: `BUILTIN_PROJECTIONS`)
+/// で解決して Adapter で fresh fetch + render し、 全 axis を concat した
+/// **PromptContext** を 1 call で return する `/wake` 用 entry。
+///
+/// 設計確定 (2026-06-16 reframe):
+/// - 配線 SoT = **wire DB wiring entry**。 persona-pack には書かない (= 二重管理 drift 防止)
+/// - persona-pack `[extra.persona_wire.projections.<axis>]` は **Projection template の
+///   Overlay only** (persona 固有 emote / register 等を `MergeStrategy` 指定で被せる)
+/// - `projection_names: Some([...])` で subset 指定可能 (= 動的 Selection)
+pub async fn wire_prompt_context(
+    input: WirePromptContextInput,
+    storage: std::sync::Arc<std::sync::Mutex<SqliteStorage>>,
+) -> WireResult<WirePromptContextOutput> {
+    use crate::application::persona_pack_resolver::read_projection_overlays;
+
+    // ---- Phase 0: persona-pack overlay 解決 (best-effort、 不在は空 BTreeMap) ----
+    let overlays = read_projection_overlays(&input.persona_id)?.unwrap_or_default();
+
+    // ---- Phase 1: sync collect (MutexGuard を await 跨がない form) ----
+    //   axis list = projection_names で subset 指定があればそれ、
+    //               None なら wire DB の wiring entry (= persona-scoped Node) を
+    //               spec query で全件取得し metadata.axis を抽出する。
+    let mut warnings = Vec::new();
+    let collected: Vec<CollectedAxis> = {
+        let s = storage.lock().map_err(|_| {
+            crate::domain::error::WireError::Storage("storage mutex poisoned".to_string())
+        })?;
+        let proj_reg = ProjectionRegistry::new(&s);
+
+        let axes: Vec<String> = if let Some(names) = input.projection_names.as_ref() {
+            names.clone()
+        } else {
+            // wire DB から persona の wiring entry 全件 spec query → axis 抽出
+            let spec = Specification::And(vec![
+                Specification::TypeIs("outline_node".to_string()),
+                Specification::MetadataEq {
+                    path: "persona".to_string(),
+                    value: serde_json::json!(input.persona_id),
+                },
+            ]);
+            let nodes = collect_matching_nodes(&s, &spec)?;
+            nodes
+                .iter()
+                .filter_map(|n| {
+                    n.metadata
+                        .get("axis")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        };
+
+        let mut out: Vec<CollectedAxis> = Vec::new();
+        for axis in &axes {
+            // 配線 SoT = wire DB Node `<persona>.<axis>` の metadata.source_uri
+            let node_id = format!("{}.{}", input.persona_id, axis);
+            let Some(node) = s.get_node(&node_id)? else {
+                continue; // 未配線 = silent skip
+            };
+            let Some(source_uri) = node.metadata.get("source_uri").and_then(|v| v.as_str()) else {
+                warnings.push(format!(
+                    "wiring entry '{node_id}' lacks metadata.source_uri — axis skipped"
+                ));
+                continue;
+            };
+
+            // base template = wire DB 動的 register `<persona>.section.<axis>` のみ。
+            //                 不在は skip + warning (= builtin hardcode 廃止)。
+            let projection_name = format!("{}.section.{}", input.persona_id, axis);
+            let (base_template, base_target) = match proj_reg.get(&projection_name)? {
+                Some(proj) => (proj.template, proj.target_form),
+                None => {
+                    warnings.push(format!(
+                        "axis '{axis}' has no registered projection \
+                         '{projection_name}' — axis skipped"
+                    ));
+                    continue;
+                }
+            };
+
+            // overlay merge (MergeStrategy 経由)
+            let (final_template, final_target) = if let Some(o) = overlays.get(axis) {
+                (o.strategy.merge(&base_template, &o.template), o.target_form)
+            } else {
+                (base_template, base_target)
+            };
+
+            out.push(CollectedAxis {
+                axis: axis.clone(),
+                source_uri: source_uri.to_string(),
+                target_form: final_target,
+                template: final_template,
+            });
+        }
+        out
+    };
+
+    // ---- Phase 2: async fetch + render (Adapter 経由) ----
+    let mut projections = Vec::new();
+    for c in collected {
+        let fetched = match crate::infrastructure::adapter::fetch_via_adapter(&c.source_uri).await {
+            Ok(v) => v,
+            Err(e) => {
+                warnings.push(format!(
+                    "adapter fetch failed for axis '{}' (uri={}): {e}",
+                    c.axis, c.source_uri
+                ));
+                serde_json::Value::Null
+            }
+        };
+        let entries = vec![serde_json::json!({
+            "wiring_entry": {
+                "axis": c.axis,
+                "source_uri": c.source_uri,
+            },
+            "fetched_data": fetched,
+        })];
+        let data = serde_json::json!({
+            "count": 1,
+            "axis": c.axis,
+            "entries": entries,
+            "persona_id": input.persona_id,
+        });
+        let rendered = render(c.target_form, &c.template, &data);
+        projections.push(RenderedProjection {
+            name: format!("{}.section.{}", input.persona_id, c.axis),
+            target_form: c.target_form,
+            rendered,
+        });
+    }
+
+    // ---- Phase 3: concat (= PromptContext として 1 string) ----
+    let prompt_context = projections
+        .iter()
+        .map(|p| p.rendered.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(WirePromptContextOutput {
+        persona_id: input.persona_id,
+        prompt_context,
         projections,
         warnings,
     })
@@ -312,15 +501,95 @@ pub fn wire_render(
         })?;
     let matched = collect_matching_nodes(storage, &spec)?;
     let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
+    let nodes_json: Vec<serde_json::Value> = matched
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "type": n.r#type,
+                "metadata": n.metadata,
+            })
+        })
+        .collect();
     let data = serde_json::json!({
         "count": matched.len(),
         "names": names.join(", "),
+        "nodes": nodes_json,
     });
     let rendered = render(proj.target_form, &proj.template, &data);
     Ok(WireRenderOutput {
         name: proj.name,
         target_form: proj.target_form,
         rendered,
+    })
+}
+
+// ---- delete surface (P2c-bis、 メンテ運用必須) ----
+
+#[derive(Debug)]
+pub struct WireDeleteInput {
+    /// Node id / Edge id / Spec name / Projection name (kind に応じた identifier)
+    pub id_or_name: String,
+}
+
+#[derive(Debug)]
+pub struct WireDeleteOutput {
+    pub kind: &'static str,
+    pub id_or_name: String,
+    pub deleted: bool,
+}
+
+/// Delete a node by id. Edges are not cascade-deleted; surviving edges referencing
+/// the removed id become dangling — wire_doctor surfaces them on the next scan.
+pub fn wire_node_delete(
+    input: WireDeleteInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireDeleteOutput> {
+    let deleted = storage.delete_node(&input.id_or_name)?;
+    Ok(WireDeleteOutput {
+        kind: "node",
+        id_or_name: input.id_or_name,
+        deleted,
+    })
+}
+
+/// Delete an edge by id.
+pub fn wire_edge_delete(
+    input: WireDeleteInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireDeleteOutput> {
+    let deleted = storage.delete_edge(&input.id_or_name)?;
+    Ok(WireDeleteOutput {
+        kind: "edge",
+        id_or_name: input.id_or_name,
+        deleted,
+    })
+}
+
+/// Delete a Specification by name. Projections referencing it via spec_ref will
+/// start returning dangling-spec errors at render time (existing wire_render contract).
+pub fn wire_spec_delete(
+    input: WireDeleteInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireDeleteOutput> {
+    let deleted = storage.delete_specification(&input.id_or_name)?;
+    Ok(WireDeleteOutput {
+        kind: "spec",
+        id_or_name: input.id_or_name,
+        deleted,
+    })
+}
+
+/// Delete a NamedProjection by name.
+pub fn wire_projection_delete(
+    input: WireDeleteInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireDeleteOutput> {
+    let deleted = storage.delete_projection(&input.id_or_name)?;
+    Ok(WireDeleteOutput {
+        kind: "projection",
+        id_or_name: input.id_or_name,
+        deleted,
     })
 }
 
@@ -541,5 +810,172 @@ mod tests {
         assert_eq!(out.total_node_count, 0);
         assert_eq!(out.total_edge_count, 0);
         assert_eq!(out.orphan_node_count, 0);
+    }
+
+    // ---- delete surface tests ----
+
+    #[test]
+    fn wire_node_delete_returns_true_when_row_exists() {
+        let s = setup();
+        s.insert_node(&bare_node("a", "persona")).unwrap();
+        let out = wire_node_delete(
+            WireDeleteInput {
+                id_or_name: "a".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.kind, "node");
+        assert_eq!(out.id_or_name, "a");
+        assert!(out.deleted);
+        // 二重削除 → false
+        let out2 = wire_node_delete(
+            WireDeleteInput {
+                id_or_name: "a".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert!(!out2.deleted);
+    }
+
+    #[test]
+    fn wire_node_delete_returns_false_when_row_missing() {
+        let s = setup();
+        let out = wire_node_delete(
+            WireDeleteInput {
+                id_or_name: "ghost".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert!(!out.deleted);
+    }
+
+    #[test]
+    fn wire_edge_delete_returns_true_when_row_exists() {
+        let s = setup();
+        s.insert_node(&bare_node("a", "persona")).unwrap();
+        s.insert_node(&bare_node("b", "persona")).unwrap();
+        s.insert_edge(&Edge {
+            id: "e1".into(),
+            src_node: "a".into(),
+            tgt_node: "b".into(),
+            kind: "routes_to".into(),
+            severity: None,
+            metadata: json!({}),
+            version: 1,
+            prev_id: None,
+        })
+        .unwrap();
+        let out = wire_edge_delete(
+            WireDeleteInput {
+                id_or_name: "e1".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.kind, "edge");
+        assert!(out.deleted);
+    }
+
+    #[test]
+    fn wire_spec_delete_returns_true_when_row_exists() {
+        let s = setup();
+        SpecRegistry::new(&s)
+            .register("active_personas", &Specification::TypeIs("persona".into()))
+            .unwrap();
+        let out = wire_spec_delete(
+            WireDeleteInput {
+                id_or_name: "active_personas".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.kind, "spec");
+        assert!(out.deleted);
+    }
+
+    #[test]
+    fn wire_projection_delete_returns_true_when_row_exists() {
+        let s = setup();
+        SpecRegistry::new(&s)
+            .register("p", &Specification::TypeIs("persona".into()))
+            .unwrap();
+        ProjectionRegistry::new(&s)
+            .register(&NamedProjection {
+                name: "doomed".into(),
+                spec_ref: "p".into(),
+                template: "x".into(),
+                target_form: TargetForm::Prompt,
+            })
+            .unwrap();
+        let out = wire_projection_delete(
+            WireDeleteInput {
+                id_or_name: "doomed".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.kind, "projection");
+        assert!(out.deleted);
+        // 削除済 projection は wire_init / wire_render の list() から消える
+        assert!(ProjectionRegistry::new(&s).list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn wire_node_delete_cascades_to_referencing_edges() {
+        // node 削除は src / tgt どちらで参照されている edge も同 Tx 内で削除する
+        // (schema が NOT-NULL FK edges→nodes なので orphan edge は表現不能、 cascade 一択)。
+        let s = setup();
+        s.insert_node(&bare_node("a", "persona")).unwrap();
+        s.insert_node(&bare_node("b", "persona")).unwrap();
+        s.insert_node(&bare_node("c", "persona")).unwrap();
+        s.insert_edge(&Edge {
+            id: "e_ab".into(),
+            src_node: "a".into(),
+            tgt_node: "b".into(),
+            kind: "routes_to".into(),
+            severity: None,
+            metadata: json!({}),
+            version: 1,
+            prev_id: None,
+        })
+        .unwrap();
+        s.insert_edge(&Edge {
+            id: "e_ca".into(),
+            src_node: "c".into(),
+            tgt_node: "a".into(),
+            kind: "routes_to".into(),
+            severity: None,
+            metadata: json!({}),
+            version: 1,
+            prev_id: None,
+        })
+        .unwrap();
+        // 無関係 edge
+        s.insert_edge(&Edge {
+            id: "e_bc".into(),
+            src_node: "b".into(),
+            tgt_node: "c".into(),
+            kind: "routes_to".into(),
+            severity: None,
+            metadata: json!({}),
+            version: 1,
+            prev_id: None,
+        })
+        .unwrap();
+
+        wire_node_delete(
+            WireDeleteInput {
+                id_or_name: "a".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        // a を参照する edge は両方消える、 無関係 edge は残る
+        assert!(s.get_edge(&"e_ab".to_string()).unwrap().is_none());
+        assert!(s.get_edge(&"e_ca".to_string()).unwrap().is_none());
+        assert!(s.get_edge(&"e_bc".to_string()).unwrap().is_some());
     }
 }

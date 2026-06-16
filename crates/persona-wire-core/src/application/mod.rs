@@ -5,6 +5,8 @@
 //! - [`projection_registry`] — NamedProjection registry (fixed / named axis)
 //! - [`use_cases`]           — wire_init / wire_close / wire_doctor / etc. flows
 
+pub mod merger;
+pub mod persona_pack_resolver;
 pub mod projection_registry;
 pub mod spec_registry;
 pub mod use_cases;
