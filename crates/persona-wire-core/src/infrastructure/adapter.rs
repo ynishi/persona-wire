@@ -642,11 +642,11 @@ mod tests {
     #[test]
     fn parse_mini_app_uri_scope_project_without_root_rejects() {
         // scope=<project-name> + root 不在 = parse error (fail-fast)
-        let r = parse_mini_app_uri("t?scope=algocline&alias=x");
+        let r = parse_mini_app_uri("t?scope=example-project&alias=x");
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();
         assert!(
-            msg.contains("scope='algocline' requires ?root="),
+            msg.contains("scope='example-project' requires ?root="),
             "expected scope+root error, got: {msg}"
         );
     }
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn resolve_dir_scope_project_without_root_defensive_error() {
         // parse 段階で弾く想定だが、 直接 resolve を呼んだ場合の defensive 検査。
-        let r = resolve_mini_app_table_dir("kv", Some("algocline"), None);
+        let r = resolve_mini_app_table_dir("kv", Some("example-project"), None);
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("requires ?root="));
     }
