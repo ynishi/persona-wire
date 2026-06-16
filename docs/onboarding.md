@@ -71,12 +71,86 @@ with a `source_uri`. Add an edge from the persona node for traceability
 - `mini-app://<table_name>` — opens `~/.mini-app/<table>/<table>.db` via the
   `mini-app-core` SDK and lists all rows. `MINI_APP_USER_DIR` overrides the
   base directory.
+- `mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<dir>]`
+  — alias path (see §2b). Resolves through a pre-registered mini-app
+  `_aliases` entry so filter / sort / limit live on the mini-app side.
 - `file://<path>` or `file:<path>` — `std::fs::read`. `~/` is expanded.
   Directory paths return the newest mtime child (handy for
   `handoff/YYYY-MM-DD.md` patterns).
 
 Bulk-insert through `wire_nodes_create_batch` / `wire_edges_create_batch`
 when you have many axes at once.
+
+## 2b. Alias path — filtered / paginated fetches via mini-app `_aliases`
+
+When the consumer wants a filtered, sorted, or paginated subset (not the
+full table dump), point the wiring entry's `source_uri` at a pre-registered
+**mini-app alias** instead of the bare table. The filter / sort / limit
+semantics live entirely on the mini-app side; `persona-wire` delegates the
+resolution to the `mini-app-core` SDK and never interprets them.
+
+### URI form
+
+```
+mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<dir>]
+```
+
+- `alias=<name>` — required for this path. Resolved against the table's
+  `_aliases` (registered in mini-app, see below).
+- `<k>=<v>` — bind variables consumed by the alias template
+  (e.g. `?alias=unread_for&persona=alpha`).
+- `limit=<n>` — caps the row count returned by the alias body.
+- `scope=user|<project-name>` (reserved key) — selects the mini-app
+  installation. `scope=user` reads from the user-scoped store
+  (`MINI_APP_USER_DIR`, default `~/.mini-app/<table>/<table>.db`).
+  `scope=<project-name>` **requires** `root=<dir>` and resolves
+  `<root>/<table>/<table>.db`. Parse fails fast when `root` is missing.
+- `root=<dir>` (reserved key) — explicit base directory. `~/` is expanded
+  against `$HOME`. Without `scope` it acts as a `root_override` (legacy
+  fallback, kept for backward compat).
+
+### Register the alias once (mini-app side)
+
+Aliases are owned by mini-app, not by `persona-wire`. Register them
+through the sibling MCP server before wiring entries reference them:
+
+```
+mcp__mini-app__alias_create({
+  table: "<table>",
+  name:  "<alias name>",
+  body:  { /* filter / sort / limit JSON per mini-app alias schema */ }
+})
+
+mcp__mini-app__alias_list({ table: "<table>" })   // verify registration
+```
+
+Refer to the mini-app server's own onboarding for the alias body schema.
+Once the alias exists in `_aliases`, every `mini-app://<table>?alias=<name>…`
+URI in a wiring entry resolves through it.
+
+### Example — filter-baked wiring entry
+
+```jsonc
+// mini-app side (do this once, then re-use across personas)
+mcp__mini-app__alias_create({
+  table: "mailbox",
+  name:  "unread_for",
+  body:  { /* filter: persona = $persona AND status = "unread", limit = 5 */ }
+})
+
+// persona-wire side — wiring entry references the alias
+{ "id":   "alpha.mailbox",
+  "type": "outline_node",
+  "metadata": {
+    "persona":    "alpha",
+    "axis":       "mailbox",
+    "source_uri": "mini-app://mailbox?alias=unread_for&persona=alpha&limit=5"
+  } }
+```
+
+With the alias in place, the projection template renders only the
+filtered + capped subset, so no consumer-side wake skill is needed to
+bridge a missing filter on the wire side.
 
 ## 3. Register the Specification and NamedProjection (template = data)
 
