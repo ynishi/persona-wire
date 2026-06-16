@@ -36,5 +36,8 @@ schemars = "1"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# URI parse (Adapter source_uri query string)
+url = "2"
+
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.1.0" }
