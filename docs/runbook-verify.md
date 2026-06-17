@@ -1,6 +1,6 @@
 # persona-wire — 動作検証 Runbook
 
-手順 SoT (本 file = commit 対象、 version-track)。 verify 結果 trace は別 layer で `TC-NNN: PASS/FAIL @ <commit> / <date>` form で 1 行 append 運用 (2 layer 分離: 本 file = 手順 / 別 layer = 実績)。
+本 file は persona-wire の動作検証手順を TC ID 別に列挙する **手順 SoT** (version-track 対象、 commit に乗る)。 各 TC は contributor が手動 / 自動 (`cargo` recipe) で実行し、 結果は `TC-NNN: PASS/FAIL @ <commit> / <date>` form で記録する想定。 実績 log そのものの保存場所は本 file の責務外で contributor 各自運用 (= 手順 spec と実行 log は責務分離、 本 file は spec 側のみ保持)。
 
 ## 前提
 
