@@ -1,6 +1,6 @@
 # persona-wire — 動作検証 Runbook
 
-手順 SoT (本 file = commit 対象、 version-track)。 verify 結果 trace は別 layer (internal workspace journal、 gitignored) で `TC-NNN: PASS/FAIL @ <commit> / <date>` form で 1 行 append 運用 (2 layer 分離: 本 file = 手順 / 別 layer = 実績)。
+手順 SoT (本 file = commit 対象、 version-track)。 verify 結果 trace は別 layer で `TC-NNN: PASS/FAIL @ <commit> / <date>` form で 1 行 append 運用 (2 layer 分離: 本 file = 手順 / 別 layer = 実績)。
 
 ## 前提
 
