@@ -166,6 +166,95 @@ cascade=true 時、 `trigger.kind = metadata_changed` かつ `watch_spec` が
 
 ---
 
+## 6.5. wire_workflow_check (audit sibling)
+
+§5 の `wire_workflow_register / list / fire / delete` が「Workflow を data
+として宣言 + 発火」 軸だったのに対し、 本節は **「宣言 (declared maintenance
+plan) と実配線 (actual workflow_def + spec) の差分」 を audit する read 軸**。
+onboarding §6b の「Loop / review / update-check」 UC が「発火 path」 だとし
+たら、 本節は「発火 path が宣言通りに張れているかの coverage check」 で補完
+関係にある。
+
+LoopCheck と呼んでもよいが、 wire の同居 concept に寄せて
+**`wire_workflow_check`** を canonical 名とする。
+
+### 6.5.1 CheckTrigger declarative form (Node metadata)
+
+任意 Node に「この Node は <X> で更新される予定」 を Node 側 metadata に
+declarative に宣言する。 `source_uri` と同 form、 = 「ここでやろうとしてる」
+を data 化する装置。
+
+```jsonc
+{
+  "id":   "alpha.handoff",
+  "type": "outline_node",
+  "metadata": {
+    "persona":    "alpha",
+    "axis":       "handoff",
+    "source_uri": "file:~/persona/alpha/handoff/",
+    "maintained_by": {
+      "event":        "session_close",   // 期待 trigger event (Workflow 側と照合)
+      "workflow_ref": "alpha.workflow.review_close"  // optional: 特定 workflow_def を名指し
+    }
+  }
+}
+```
+
+opt-out: Node が静的 SoT で更新不要なら明示的に:
+
+```jsonc
+"metadata": { "maintenance_exempt": true, "maintenance_exempt_reason": "<理由>" }
+```
+
+### 6.5.2 Check semantics (初期 scope = サックリ)
+
+各 Node について以下を audit:
+
+| Node の状態 | verdict |
+|---|---|
+| `maintained_by` 宣言あり + `workflow_ref` 実在 + その workflow の action が当該 Node を spec で hit する | **declared_covered** |
+| `maintained_by` 宣言あり + `workflow_ref` 実在 + spec が当該 Node を hit しない | **declared_uncovered** (= spec gap、 配線意図はあるが実配線が穴) |
+| `maintained_by` 宣言あり + `workflow_ref` 不在 (or `event` のみで matching workflow_def なし) | **declared_uncovered** (= 宣言だけあって発火元が無い) |
+| `maintained_by` 宣言なし + `maintenance_exempt != true` | **undeclared** (= 保守計画ゼロ) |
+| `maintenance_exempt: true` | **exempt** |
+
+= 「宣言と実配線の差分」 を 3 bucket (covered / uncovered / undeclared) に
+分類する。 carry 軸 (= サックリで切る):
+
+- (c) `verified_at` を Node metadata に持っておけば 「宣言通りに発火してない」
+  = stale 検出が可能。 これは **P5-b 以降** の carry (= verified_at の
+  bookkeeping = fire 時に自動更新する仕組み込みで)
+- (d) `maintained_by.cadence` ("7d" 等) を入れれば「次回 due 」 まで判定可
+
+### 6.5.3 Tool surface
+
+```
+mcp__persona-wire__wire_workflow_check({
+  persona_id?:       string,    // metadata.persona で scope 絞り
+  include_exempt?:   boolean,   // default false
+  include_covered?:  boolean    // default false (= uncovered + undeclared のみ返す)
+}) -> {
+  total_nodes:        N,
+  declared_covered:   K,
+  declared_uncovered: [{ node_id, reasons: [...] }],
+  undeclared:         [{ node_id, type, axis }],
+  exempt:             [{ node_id, reason }],
+  workflows_observed: M
+}
+```
+
+= invoke して uncovered / undeclared list が出たら、 そこに対して §5
+`wire_workflow_register` で workflow_def を register する → 再 invoke で
+list が減るのを確認、 という運用 loop が成立する。
+
+### 6.5.4 UC との関係
+
+| UC | wire_workflow_check の使い方 |
+|---|---|
+| 持ち場の audit | persona_id 指定で「対象 persona の全 Node のうち保守計画が穴の箇所」 を 1 発で取得 |
+| onboarding §6b workflow 登録の動機材料 | undeclared list = 次に register すべき workflow の候補 |
+| concept-2026-06-14.md §4 残課題 #3 (Lifecycle scan) | daemon (P3a/P3c) 着地時に本 tool 結果を Output channel に flush する path |
+
 ## 7. UC mapping (onboarding §6b との対応)
 
 | UC | 設計上の表現 |
@@ -211,14 +300,15 @@ Workflow は **graph 上の Node** なので既存 surface でそのまま観察
 
 | step | scope | rationale |
 |---|---|---|
-| P5-a | Node type `workflow` を type_registry に追加 + register/list/delete Tool (= on_demand のみ動く) | 既存 primitive で 90% 賄える、 ~150 行規模 |
-| P5-b | `wire_workflow_fire` で `on_event` / `on_demand` の 2 trigger × `emit_projection` / `no_op` の 2 action を land | UC1-3 のうち UC1/UC2 が即動く |
-| P5-c | `wire_update` + `trigger.kind = metadata_changed` + `action.kind = set_metadata` | cross-ref UC が動く、 cascade fence の test 重要 |
-| P5-d | `cron` trigger を data として受理 (daemon 未着地時は silent skip)、 doc 反映 | P3a land 時に caller 側変更ゼロで自走化 |
-| P5-e (optional) | `fire_mailbox` action (Adapter write-path)。 mini-app side との contract 整理が要るので必要に応じて | P3a/P3c land 後の方が自然 |
+| P5-a | Node type `workflow_def` を流用 + register/list/delete + fire (on_demand/on_event × no_op/emit_projection) | **land 済** (commit 9c56e46) |
+| P5-a' | `wire_workflow_check` (§6.5) — CheckTrigger declarative form + uncovered/undeclared audit | sibling、 P5-a と同程度の規模感 |
+| P5-b | `wire_update` + `trigger.kind = metadata_changed` + `action.kind = set_metadata` | cross-ref UC が動く、 cascade fence の test 重要 |
+| P5-c | `cron` trigger を data として受理 (daemon 未着地時は silent skip)、 doc 反映 | P3a land 時に caller 側変更ゼロで自走化 |
+| P5-d (optional) | `fire_mailbox` action (Adapter write-path)。 mini-app side との contract 整理が要るので必要に応じて | P3a/P3c land 後の方が自然 |
+| P5-e (carry) | `verified_at` 自動 bookkeeping + stale 検出 (§6.5.2 (c) 軸) | wire_workflow_check stale 拡張 |
 
-P5-a + P5-b で onboarding §6b の UC1/UC2 が caller 側 1 行で書ける状態に
-なる = 最小 useful land 単位。
+P5-a + P5-a' で onboarding §6b の UC1/UC2 が caller 側 1 行で書ける + 配線
+穴を audit できる状態になる = 最小 useful land 単位。
 
 ---
 
