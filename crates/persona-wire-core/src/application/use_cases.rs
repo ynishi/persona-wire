@@ -970,11 +970,7 @@ pub fn wire_workflow_fire(
             }
         }
         // Trigger gating
-        let trigger_kind = w
-            .trigger
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let trigger_kind = w.trigger.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(ev) = event {
             // event-driven fire path: skip non-on_event workflows
             if trigger_kind != "on_event" {
@@ -984,7 +980,11 @@ pub fn wire_workflow_fire(
                 ));
                 continue;
             }
-            let wf_event = w.trigger.get("event").and_then(|v| v.as_str()).unwrap_or("");
+            let wf_event = w
+                .trigger
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if wf_event != ev {
                 skipped.push((
                     w.id.clone(),
@@ -1195,7 +1195,11 @@ pub fn wire_workflow_check(
                     if kind != "on_event" {
                         continue;
                     }
-                    let ev = w.trigger.get("event").and_then(|v| v.as_str()).unwrap_or("");
+                    let ev = w
+                        .trigger
+                        .get("event")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     if ev != want_event {
                         continue;
                     }
@@ -1261,8 +1265,7 @@ pub fn wire_workflow_check(
                 ));
             } else {
                 reasons.push(
-                    "maintained_by present but neither event nor workflow_ref declared"
-                        .to_string(),
+                    "maintained_by present but neither event nor workflow_ref declared".to_string(),
                 );
             }
 
@@ -1285,11 +1288,7 @@ pub fn wire_workflow_check(
         });
     }
 
-    let exempt_out = if include_exempt {
-        exempt
-    } else {
-        Vec::new()
-    };
+    let exempt_out = if include_exempt { exempt } else { Vec::new() };
     Ok(WireWorkflowCheckOutput {
         total_nodes,
         declared_covered_count,
@@ -1901,10 +1900,15 @@ mod tests {
         }
     }
 
-    fn register_emit_workflow(s: &SqliteStorage, id: &str, persona: &str, event: &str, axes: &[&str]) {
-        let axes_json = serde_json::Value::Array(
-            axes.iter().map(|a| serde_json::json!(a)).collect(),
-        );
+    fn register_emit_workflow(
+        s: &SqliteStorage,
+        id: &str,
+        persona: &str,
+        event: &str,
+        axes: &[&str],
+    ) {
+        let axes_json =
+            serde_json::Value::Array(axes.iter().map(|a| serde_json::json!(a)).collect());
         wire_workflow_register(
             WireWorkflowRegisterInput {
                 id: id.into(),
@@ -1921,7 +1925,13 @@ mod tests {
     #[test]
     fn workflow_check_buckets_a_node_as_declared_covered_when_workflow_matches() {
         let s = setup();
-        register_emit_workflow(&s, "alpha.workflow.close", "alpha", "session_close", &["handoff"]);
+        register_emit_workflow(
+            &s,
+            "alpha.workflow.close",
+            "alpha",
+            "session_close",
+            &["handoff"],
+        );
         s.insert_node(&make_outline_node(
             "alpha.handoff",
             "alpha",
@@ -1941,7 +1951,10 @@ mod tests {
         assert_eq!(out.total_nodes, 1);
         assert_eq!(out.declared_covered_count, 1);
         assert_eq!(out.declared_covered.len(), 1);
-        assert_eq!(out.declared_covered[0].covering_workflow_id, "alpha.workflow.close");
+        assert_eq!(
+            out.declared_covered[0].covering_workflow_id,
+            "alpha.workflow.close"
+        );
         assert!(out.declared_uncovered.is_empty());
         assert!(out.undeclared.is_empty());
     }
@@ -1950,7 +1963,13 @@ mod tests {
     fn workflow_check_flags_declared_uncovered_when_event_has_no_matching_workflow() {
         let s = setup();
         // workflow exists but for a *different* event
-        register_emit_workflow(&s, "alpha.workflow.open", "alpha", "session_open", &["handoff"]);
+        register_emit_workflow(
+            &s,
+            "alpha.workflow.open",
+            "alpha",
+            "session_open",
+            &["handoff"],
+        );
         s.insert_node(&make_outline_node(
             "alpha.handoff",
             "alpha",
@@ -1999,7 +2018,13 @@ mod tests {
     fn workflow_check_flags_declared_uncovered_when_axis_not_in_projection_names() {
         let s = setup();
         // Workflow covers axis "active", but Node declares axis "handoff"
-        register_emit_workflow(&s, "alpha.workflow.close", "alpha", "session_close", &["active"]);
+        register_emit_workflow(
+            &s,
+            "alpha.workflow.close",
+            "alpha",
+            "session_close",
+            &["active"],
+        );
         s.insert_node(&make_outline_node(
             "alpha.handoff",
             "alpha",
@@ -2077,7 +2102,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out2.exempt.len(), 1);
-        assert_eq!(out2.exempt[0].reason.as_deref(), Some("external static SoT"));
+        assert_eq!(
+            out2.exempt[0].reason.as_deref(),
+            Some("external static SoT")
+        );
     }
 
     #[test]
@@ -2118,8 +2146,10 @@ mod tests {
     #[test]
     fn workflow_check_persona_scope_filters_other_personas() {
         let s = setup();
-        s.insert_node(&make_outline_node("alpha.h", "alpha", "handoff", json!({}))).unwrap();
-        s.insert_node(&make_outline_node("beta.h", "beta", "handoff", json!({}))).unwrap();
+        s.insert_node(&make_outline_node("alpha.h", "alpha", "handoff", json!({})))
+            .unwrap();
+        s.insert_node(&make_outline_node("beta.h", "beta", "handoff", json!({})))
+            .unwrap();
         let out = wire_workflow_check(
             WireWorkflowCheckInput {
                 persona_id: Some("alpha".into()),
@@ -2137,7 +2167,13 @@ mod tests {
     #[test]
     fn workflow_check_excludes_workflow_def_nodes_from_total() {
         let s = setup();
-        register_emit_workflow(&s, "alpha.workflow.x", "alpha", "session_close", &["handoff"]);
+        register_emit_workflow(
+            &s,
+            "alpha.workflow.x",
+            "alpha",
+            "session_close",
+            &["handoff"],
+        );
         s.insert_node(&make_outline_node(
             "alpha.handoff",
             "alpha",

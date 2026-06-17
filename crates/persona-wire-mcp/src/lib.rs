@@ -703,8 +703,8 @@ impl WireServer {
         &self,
         Parameters(p): Parameters<WireWorkflowRegisterParams>,
     ) -> Result<String, String> {
-        let trigger: serde_json::Value = serde_json::from_str(&p.trigger)
-            .map_err(|e| format!("parse trigger JSON: {e}"))?;
+        let trigger: serde_json::Value =
+            serde_json::from_str(&p.trigger).map_err(|e| format!("parse trigger JSON: {e}"))?;
         let action: serde_json::Value =
             serde_json::from_str(&p.action).map_err(|e| format!("parse action JSON: {e}"))?;
         let s = self.storage.lock().map_err(|e| e.to_string())?;
@@ -946,10 +946,34 @@ impl WireServer {
 
 /// Full end-to-end onboarding guide bundled with the MCP server.
 ///
-/// Source: `docs/onboarding.md`. The contents are embedded at build time so
-/// that the binary always ships a self-describing copy and a client can fetch
-/// it through `read_resource` without filesystem access.
-pub const ONBOARDING_GUIDE: &str = include_str!("../../../docs/onboarding.md");
+/// # Sync policy (must not edit only one side)
+///
+/// - **Canonical**: `docs/onboarding.md` (workspace root, human-navigable
+///   from project root, cross-referenced by other docs / READMEs).
+/// - **Bundled copy**: `crates/persona-wire-mcp/onboarding.md` (= the file
+///   `include_str!`-ed below). This copy exists because `cargo publish`
+///   only packages files within the crate's own directory tree —
+///   `include_str!("../../../docs/onboarding.md")` worked for local builds
+///   but broke `cargo publish --dry-run` (= file outside the packaged
+///   tarball). Hence the in-crate mirror.
+///
+/// **Editing rule**: always edit the canonical workspace copy
+/// (`docs/onboarding.md`), then run `cp docs/onboarding.md
+/// crates/persona-wire-mcp/onboarding.md` to refresh the bundled copy.
+///
+/// **Safety nets enforcing this rule**:
+/// 1. `include_str!("../onboarding.md")` here → cargo build / publish
+///    error out if the bundled copy is missing.
+/// 2. `crates/persona-wire-mcp/build.rs` byte-compares the two copies on
+///    every dev build and `panic!`s with a one-line fix command if they
+///    diverge. Published-tarball builds (= workspace doc absent) skip
+///    this check — they ship only the bundled copy.
+///
+/// Background: introduced in commit `37e7cec` with the original
+/// `../../../docs/onboarding.md` path; the workspace-relative path silently
+/// broke `cargo publish` until P5-a' work surfaced it via publish-checker
+/// invoke (see `docs/wire-workflow-spec.md` §10).
+pub const ONBOARDING_GUIDE: &str = include_str!("../onboarding.md");
 
 const ONBOARDING_URI: &str = "wire-guide://onboarding";
 

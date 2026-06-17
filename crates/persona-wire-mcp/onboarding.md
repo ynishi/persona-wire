@@ -1,0 +1,447 @@
+# Onboarding — Wiring a new persona end-to-end
+
+This guide walks through the full workflow for adding a new persona to
+persona-wire, from a fresh install to a working `wire_prompt_context` call
+and a sample Skill / Prompt that consumes it.
+
+It is also exposed through the MCP server as a resource at
+`wire-guide://onboarding`, so a client (Claude Code Skill, CLI agent, etc.)
+can fetch it with `read_resource` without leaving the session.
+
+## 0. Mental model in one paragraph
+
+The graph holds **wiring entries** — one `Node` per axis you want to expose
+for the persona. Each wiring entry carries a `metadata.source_uri` that
+points at the real Source-of-Truth (mini-app table, file, …). A
+**Specification** picks the wiring entries; a **NamedProjection** binds the
+Specification to a handlebars template and a target form. `wire_render`
+fetches the source fresh through the Layer 6 Adapter and renders the
+template. `wire_prompt_context` walks every axis for the persona, optionally
+filtered by `projection_names`, and concatenates the rendered blocks into a
+single PromptContext string. Optional per-persona overlays live in
+persona-pack under `[extra.persona_wire.projections.<axis>]` and are folded
+into the base template through a `MergeStrategy`.
+
+## 1. Install + run
+
+```sh
+# Build / install the unified binary (CLI + `mcp` subcommand)
+cargo install --path crates/persona-wire
+
+# Inspect / mutate the graph from the shell
+persona-wire init
+persona-wire wire-doctor
+
+# Start the MCP server (stdio transport)
+persona-wire mcp
+```
+
+The default SQLite database lives at `~/.persona-wire/store.db` (override
+with `--db <path>` or the `PERSONA_WIRE_DB` env var). The MCP server
+exposes the `wire_*` tools listed in the server `instructions` and the
+guide resource at `wire-guide://onboarding`.
+
+## 2. Set up a persona's wiring entries (one Node per axis)
+
+Pick the axes you want (`active` / `ng` / `trigger` / `handoff` / `toolmap`
+is one common shape, but anything works). For each axis create one node
+with a `source_uri`. Add an edge from the persona node for traceability
+(optional but recommended).
+
+```jsonc
+// MCP: wire_node_create
+{ "id": "alpha",                "type": "persona",
+  "metadata": { "display": "alpha" } }
+
+{ "id": "alpha.active",         "type": "outline_node",
+  "metadata": { "persona": "alpha", "axis": "active",
+                "source_uri": "mini-app://alpha_active_context" } }
+
+{ "id": "alpha.handoff",        "type": "outline_node",
+  "metadata": { "persona": "alpha", "axis": "handoff",
+                "source_uri": "file:~/path/to/alpha/handoff/" } }
+
+// MCP: wire_edge_create
+{ "id": "e.alpha.active",  "src": "alpha", "tgt": "alpha.active",  "kind": "routes_to" }
+{ "id": "e.alpha.handoff", "src": "alpha", "tgt": "alpha.handoff", "kind": "routes_to" }
+```
+
+`source_uri` schemes supported today:
+
+- `mini-app://<table_name>` — opens `~/.mini-app/<table>/<table>.db` via the
+  `mini-app-core` SDK and lists all rows. `MINI_APP_USER_DIR` overrides the
+  base directory.
+- `mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<dir>]`
+  — alias path (see §2b). Resolves through a pre-registered mini-app
+  `_aliases` entry so filter / sort / limit live on the mini-app side.
+- `file://<path>` or `file:<path>` — `std::fs::read`. `~/` is expanded.
+  Directory paths return the newest mtime child (handy for
+  `handoff/YYYY-MM-DD.md` patterns).
+
+Bulk-insert through `wire_nodes_create_batch` / `wire_edges_create_batch`
+when you have many axes at once.
+
+## 2b. Alias path — filtered / paginated fetches
+
+> **Status**: Both global alias storage and per-table `_aliases` are
+> resolved. As of mini-app v0.12.1+ the default destination of
+> `alias_create` is **global storage** (`<base>/_global.db` →
+> `_global_aliases` table), and `wire` resolves it first; legacy
+> per-table `_aliases` rows still resolve via fallback (see §URI form
+> below). Tracking issue
+> `8904d808-cff2-4788-b047-a77b21981492` (mini-app issue table) is
+> resolved on the wire side — the `scope=user` / `scope=<project>`
+> reserved keys now redirect the alias lookup to the corresponding
+> `_global.db` instead of being dead-code. The remaining wire-side
+> scope-outs (aggregator / multi-source / pattern source) are listed
+> in §Known limitations below.
+
+### Step 0 — Pick a storage and register the alias
+
+The mini-app installation owns two alias storages:
+
+- **global** (`<base>/_global.db` → `_global_aliases`): default for
+  new aliases since mini-app v0.12.1. Alias name is **unique within
+  a scope across all tables**, so multiple tables sharing the same
+  alias name in the same scope is rejected with `ALIAS_ALREADY_EXISTS`.
+  Use a `<table>_for_<persona>` / `<persona>_<purpose>` convention
+  to avoid collisions (the mailbox / friend_map smoke uses
+  `for_shi` / `friend_for_shi`).
+- **per-table** (`<base>/<table>/<table>.db` → `_aliases`): legacy
+  layout. Still resolved via fallback when the legacy URI form
+  (`?scope=` omitted) does not find the alias in the User-scope
+  `_global.db`.
+
+Standard registration via the mini-app MCP server:
+
+```
+mcp__mini-app__info({ table: "<table>" })          # field definitions
+mcp__mini-app__alias_list({ table: "<table>" })    # existing aliases (both storages)
+mcp__mini-app__alias_create({                       # writes to global by default
+  table: "<table>",
+  name:  "<alias_name>",
+  filter: { "type": "eq", "field": "to", "value": "<persona>" },
+  scope: "user",                                    # "project" | "user"
+  limit: 30
+})
+```
+
+If your callers already have aliases in the per-table `_aliases`
+layout, they keep working through the legacy fallback path — no
+migration is required to start using `wire`.
+
+### URI form
+
+```
+mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<dir>]
+```
+
+- `alias=<name>` — required for this path. Resolution order depends
+  on `scope`:
+
+  | URI form                                | lookup target                                                                            |
+  |-----------------------------------------|------------------------------------------------------------------------------------------|
+  | `?alias=N` (no `scope`)                 | User-scope `_global.db` first; on miss, per-table `<table>.db._aliases` (legacy fallback) |
+  | `?scope=user&alias=N`                   | User-scope `_global.db` only (hard target, no fallback)                                  |
+  | `?scope=<project-name>&root=<dir>&alias=N` | Project-scope `<dir>/_global.db` only (hard target, no fallback)                      |
+
+- `<k>=<v>` — bind variables consumed by the alias body
+  (e.g. `?alias=unread_for&persona=alpha`).
+- `limit=<n>` — caps the row count returned by the alias body.
+- `scope=user|<project-name>` (reserved key) — selects a hard target
+  in `_global.db`. Per-table `_aliases` fallback is **not** consulted
+  when `scope` is set.
+- `root=<dir>` (reserved key) — explicit base directory (`~/` is
+  expanded against `$HOME`). Required when `scope=<project-name>` is
+  set (parse fails fast otherwise). For `scope=user` / `scope=` omitted
+  it overrides `$MINI_APP_USER_DIR` / `~/.mini-app/` and resolves to
+  `<root>/<table>/<table>.db` for per-table fetches plus
+  `<root>/_global.db` for global alias resolution.
+
+### Example — global alias (mini-app v0.12.1+ default)
+
+```jsonc
+// 1. Register the alias in global storage.
+// mcp__mini-app__alias_create({
+//   table: "mailbox", name: "for_shi", scope: "user",
+//   filter: { "type": "eq", "field": "to", "value": "shi" }, limit: 30
+// })
+
+// 2. Reference it from a wiring entry. `?scope=user` is optional —
+//    the legacy URI form (no `?scope=`) falls back to global first.
+{ "id":   "shi.mailbox",
+  "type": "outline_node",
+  "metadata": {
+    "persona":    "shi",
+    "axis":       "mailbox",
+    "source_uri": "mini-app://mailbox?alias=for_shi"
+  } }
+```
+
+If `wire_prompt_context` returns
+`alias '<name>' not found in _global.db (User scope) nor per-table
+<table>._aliases fallback`, neither storage has the alias — re-check
+the registration or the alias name (global names are scope-unique
+across tables, so a collision on a different table surfaces as a
+different error: `execute_alias_run failed: table not found: <other>`).
+
+### Known limitations — aggregator / multi-source / pattern source
+
+`wire`'s `Layer 6 Adapter::fetch_via_alias` is scoped to
+**Single-source, non-aggregator** aliases. The following alias shapes
+exist in mini-app but are intentionally rejected with a clear error on
+the wire side, tracked as P3b carry:
+
+- aliases with an `aggregator` (`Count` / `Sum` / `Avg` / `Min` /
+  `Max` / `GroupBy`) — wire returns
+  `alias '<name>' has aggregator — wire scope 外 (P3b carry)`.
+- aliases with `SourceSpec::Multi(...)` (multiple source tables) —
+  wire returns
+  `alias '<name>' has Multi / Pattern source — wire scope 外 (P3b carry)`.
+- aliases with `SourceSpec::Pattern(...)` (glob over multiple tables) —
+  same error as Multi.
+
+For these shapes, either keep the alias for direct mini-app callers
+and add a Single-source / `Rows` mirror alias for `wire`, or use the
+bare `mini-app://<table>` form and push the aggregation / cross-table
+join to the NamedProjection template (handlebars `{{#each}}` +
+`{{#if}}`) or a sibling consumer skill.
+
+## 3. Register the Specification and NamedProjection (template = data)
+
+There is no hard-coded projection list inside the crate. Every projection
+is data, registered through the same tool surface.
+
+```jsonc
+// MCP: wire_spec_register — picks one wiring entry per axis
+{
+  "name": "alpha.spec.active",
+  "json": "{\"And\":[{\"TypeIs\":\"outline_node\"},{\"MetadataEq\":{\"path\":\"persona\",\"value\":\"alpha\"}},{\"MetadataEq\":{\"path\":\"axis\",\"value\":\"active\"}}]}"
+}
+
+// MCP: wire_projection_register
+{
+  "name": "alpha.section.active",
+  "spec_ref": "alpha.spec.active",
+  "target_form": "markdown",
+  "template": "## Active set\n{{#each entries}}{{#each this.fetched_data.rows}}- [{{#if this.data.pin}}pin{{else}}-{{/if}}] {{this.id}} — {{this.data.label}}\n{{/each}}{{/each}}"
+}
+```
+
+The render-time context has:
+
+- `count`, `persona_id`, `axis`
+- `entries`: `[ { wiring_entry: { axis, source_uri }, fetched_data: <Adapter return value> } ]`
+- `nodes`: legacy projection of the matched nodes (kept for ad-hoc use cases)
+
+Handlebars features available: `{{var}}`, `{{a.b.c}}`, `{{#each list}}…{{/each}}`,
+`{{#if cond}}…{{else}}…{{/if}}`. HTML escaping is disabled. A parse failure
+returns `{{render-error: <message>}} <raw template>` so the failure is visible
+in the rendered output instead of disappearing into a panic.
+
+## 4. Optional — persona-pack overlay
+
+When a persona needs to deviate from the registered base template (a
+register-specific emote, a header line, a different target form), drop an
+overlay into `~/persona-pack/<persona_id>/prompt.toml`:
+
+```toml
+[extra.persona_wire.projections.active]
+template = "(^_^) Active set sweep\n{{> base }}"   # `base` placeholder is illustrative
+target   = "markdown"        # optional, default = "markdown"
+strategy = "append"          # replace | append | prepend | section:<name>
+```
+
+The resolver walks `[extra.persona_wire.projections.*]` once per call,
+turns each entry into a `ProjectionOverlay { template, target_form, strategy }`,
+and the use case folds the overlay into the base template through
+`MergeStrategy::merge(base, overlay)` before rendering. `Section(name)`
+replaces a `{{!-- <name> --}}` marker inside the base template; it falls
+back to `Append` when the marker is absent.
+
+## 5. Smoke-test the persona
+
+```sh
+# CLI smoke
+persona-wire wire-doctor
+persona-wire query --spec '{"And":[{"TypeIs":"outline_node"},{"MetadataEq":{"path":"persona","value":"alpha"}}]}'
+```
+
+```jsonc
+// MCP: wire_prompt_context — renders every registered axis for the persona
+{ "persona_id": "alpha" }
+
+// MCP: wire_prompt_context — explicit subset
+{ "persona_id": "alpha", "projection_names": ["active"] }
+```
+
+Successful output looks like:
+
+```json
+{
+  "persona_id": "alpha",
+  "projections": [
+    { "name": "alpha.section.active", "target_form": "Markdown",
+      "rendered": "## Active set\n- [pin] item-1 — label-1\n…" }
+  ],
+  "prompt_context": "## Active set\n- [pin] item-1 — label-1\n…",
+  "warnings": []
+}
+```
+
+If a wiring entry has no matching projection registered (or the optional
+overlay refers to an unknown axis), it surfaces in the `warnings` array
+and the rest of the call still succeeds.
+
+## 6. Wire it into a Skill / Prompt
+
+The wake-time pattern is to call `wire_prompt_context` once and inline the
+resulting `prompt_context` block into the session. A minimal Skill body:
+
+```
+1. Call `mcp__persona-wire__wire_prompt_context({ persona_id: "<id>" })`.
+2. Emit the returned `prompt_context` verbatim as a single block in the
+   output, before any summary / checklist line.
+3. If `warnings[]` is non-empty, surface them as `⚠ persona_wire: <warning>`.
+```
+
+A handy subset call for narrower steps:
+
+```
+mcp__persona-wire__wire_prompt_context({
+  persona_id: "<id>",
+  projection_names: ["handoff"]
+})
+```
+
+## 6b. Loop / review / update-check trigger pattern
+
+A common ask is "for this Node, surface an update-check instruction the
+next time the persona wakes / closes a session / runs a periodic tick".
+There is no dedicated `wire_workflow_*` Tool yet (carry under
+`concept-2026-06-14.md` P5 — WorkflowEngine seed + `wire_update`); until
+then the same intent composes cleanly from the existing
+Query / Projection / Adapter primitives.
+
+### Use cases
+
+- UC1 — *session-close review*: at session end, list Nodes whose
+  `review_due` is past or whose `last_verified_at` is older than a
+  cadence threshold.
+- UC2 — *wake-time pending list*: at session start, inject a short
+  "check these before you start" block.
+- UC3 — *stale node surfacing*: periodically (cron / launchd / Hook) call
+  the same projection and route its output to a notification channel.
+
+All three are the same shape: a Projection over Nodes whose metadata says
+"I need to be revisited". Only the trigger (who calls it) differs.
+
+### Recipe — metadata + Specification + Projection
+
+1. Tag Nodes at creation time. The current Specification AST is leaf =
+   `TypeIs` / `MetadataEq` and composite = `And` / `Or` / `Not` (see
+   `docs/wire-query-spec.md`) — there is no time-aware `MetadataLte` yet,
+   so model "needs review" as a plain boolean / enum flag in metadata:
+
+   ```jsonc
+   // MCP: wire_node_create
+   {
+     "id":   "alpha.handoff",
+     "type": "outline_node",
+     "metadata": {
+       "persona":         "alpha",
+       "axis":            "handoff",
+       "source_uri":      "file:~/persona/alpha/handoff/",
+       "review_on_close": true,
+       "review_note":     "drop the next handoff file before /work-close"
+     }
+   }
+   ```
+
+   (Cadence-driven freshness — "older than 7d" — is best done one layer
+   out: keep `last_verified_at` in metadata, run the date comparison in
+   the consuming Skill or in a `mini-app://` Adapter that filters
+   server-side, and let wire_query stay shape-pure with `MetadataEq`.)
+
+2. Register a "review_pending" Specification and Projection:
+
+   ```jsonc
+   // MCP: wire_spec_register
+   {
+     "name": "alpha.spec.review_pending",
+     "json": "{\"And\":[{\"MetadataEq\":{\"path\":\"persona\",\"value\":\"alpha\"}},{\"MetadataEq\":{\"path\":\"review_on_close\",\"value\":true}}]}"
+   }
+
+   // MCP: wire_projection_register
+   {
+     "name":        "alpha.section.review_pending",
+     "spec_ref":    "alpha.spec.review_pending",
+     "target_form": "markdown",
+     "template":    "## Review pending\n{{#each entries}}- **{{this.wiring_entry.axis}}** — {{this.wiring_entry.source_uri}}{{#if this.wiring_entry.metadata.review_note}} _(note: {{this.wiring_entry.metadata.review_note}})_{{/if}}\n{{/each}}"
+   }
+   ```
+
+3. Call the projection from whichever Trigger fits — the Tool surface is
+   identical regardless of who pulls the trigger:
+
+   ```jsonc
+   mcp__persona-wire__wire_prompt_context({
+     persona_id:       "alpha",
+     projection_names: ["review_pending"]   // ← axis name, NOT full projection name
+   })
+   ```
+
+   Two conventions to keep aligned (else the projection is silently
+   skipped with a warning):
+
+   - The Node's `metadata.axis` value must match the suffix used in the
+     projection name. `wire_prompt_context` iterates the persona's Nodes
+     and for each one looks up a projection literally named
+     `<persona>.section.<axis>` — the example above needs Node axis
+     `review_pending` + projection name `alpha.section.review_pending`.
+   - `projection_names[]` takes **axis names**, not the full projection
+     name (so `"review_pending"`, not `"alpha.section.review_pending"`).
+
+### Trigger layer (generic — Skill / Command / Hook / cron)
+
+The wire side only emits the rendered block; *what fires the call* is a
+caller-side concern and intentionally not modeled inside wire. Common
+trigger surfaces:
+
+- **session-close Skill / Command** — a project's own close-session
+  routine calls `wire_prompt_context({ projection_names: ["...review_pending"] })`
+  and inlines the result before writing the handoff.
+- **wake Skill** — the same call at session start, before the persona
+  takes its first action.
+- **Hook (e.g. UserPromptSubmit, SessionStart)** — wire the call into a
+  harness Hook so the prompt is injected without an explicit user step.
+- **cron / launchd / external scheduler** — call the MCP tool from a
+  scheduled job and route the rendered Markdown to a notification sink
+  (mail, mini-app row, log file).
+
+All four share one wire call; the loop / cadence lives in the Trigger.
+
+### Forward-looking — `wire_workflow_*` (P5, not yet implemented)
+
+`concept-2026-06-14.md` P5 carries a declarative WorkflowEngine where
+cadence (`every 7d`), trigger (`on session_close`), and action (`emit
+projection X`) can be registered as data inside wire itself, instead of
+being assembled on the caller side. Until that lands, the recipe above
+is the canonical way to express the same UCs.
+
+## 7. Add another persona
+
+The whole flow above is the same per persona — register the Node(s),
+register the Specification(s), register the NamedProjection(s), optionally
+add a persona-pack overlay. Nothing in `persona-wire-core` needs to be
+recompiled to support a new persona; it is entirely data.
+
+## 8. Reference
+
+- Crate-level Rustdoc (architecture, layer split, persistence schema):
+  `cargo doc --workspace --open -p persona-wire-core`
+- Specification AST: [`persona_wire_core::domain::specification`]
+- Render flow + prompt-context flow: top of
+  `crates/persona-wire-core/src/lib.rs`
+- MCP server instructions: `get_info().instructions`
+- This guide as MCP resource: `wire-guide://onboarding`
