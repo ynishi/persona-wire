@@ -314,6 +314,121 @@ mcp__persona-wire__wire_prompt_context({
 })
 ```
 
+## 6b. Loop / review / update-check trigger pattern
+
+A common ask is "for this Node, surface an update-check instruction the
+next time the persona wakes / closes a session / runs a periodic tick".
+There is no dedicated `wire_workflow_*` Tool yet (carry under
+`concept-2026-06-14.md` P5 — WorkflowEngine seed + `wire_update`); until
+then the same intent composes cleanly from the existing
+Query / Projection / Adapter primitives.
+
+### Use cases
+
+- UC1 — *session-close review*: at session end, list Nodes whose
+  `review_due` is past or whose `last_verified_at` is older than a
+  cadence threshold.
+- UC2 — *wake-time pending list*: at session start, inject a short
+  "check these before you start" block.
+- UC3 — *stale node surfacing*: periodically (cron / launchd / Hook) call
+  the same projection and route its output to a notification channel.
+
+All three are the same shape: a Projection over Nodes whose metadata says
+"I need to be revisited". Only the trigger (who calls it) differs.
+
+### Recipe — metadata + Specification + Projection
+
+1. Tag Nodes at creation time. The current Specification AST is leaf =
+   `TypeIs` / `MetadataEq` and composite = `And` / `Or` / `Not` (see
+   `docs/wire-query-spec.md`) — there is no time-aware `MetadataLte` yet,
+   so model "needs review" as a plain boolean / enum flag in metadata:
+
+   ```jsonc
+   // MCP: wire_node_create
+   {
+     "id":   "alpha.handoff",
+     "type": "outline_node",
+     "metadata": {
+       "persona":         "alpha",
+       "axis":            "handoff",
+       "source_uri":      "file:~/persona/alpha/handoff/",
+       "review_on_close": true,
+       "review_note":     "drop the next handoff file before /work-close"
+     }
+   }
+   ```
+
+   (Cadence-driven freshness — "older than 7d" — is best done one layer
+   out: keep `last_verified_at` in metadata, run the date comparison in
+   the consuming Skill or in a `mini-app://` Adapter that filters
+   server-side, and let wire_query stay shape-pure with `MetadataEq`.)
+
+2. Register a "review_pending" Specification and Projection:
+
+   ```jsonc
+   // MCP: wire_spec_register
+   {
+     "name": "alpha.spec.review_pending",
+     "json": "{\"And\":[{\"MetadataEq\":{\"path\":\"persona\",\"value\":\"alpha\"}},{\"MetadataEq\":{\"path\":\"review_on_close\",\"value\":true}}]}"
+   }
+
+   // MCP: wire_projection_register
+   {
+     "name":        "alpha.section.review_pending",
+     "spec_ref":    "alpha.spec.review_pending",
+     "target_form": "markdown",
+     "template":    "## Review pending\n{{#each entries}}- **{{this.wiring_entry.axis}}** — {{this.wiring_entry.source_uri}}{{#if this.wiring_entry.metadata.review_note}} _(note: {{this.wiring_entry.metadata.review_note}})_{{/if}}\n{{/each}}"
+   }
+   ```
+
+3. Call the projection from whichever Trigger fits — the Tool surface is
+   identical regardless of who pulls the trigger:
+
+   ```jsonc
+   mcp__persona-wire__wire_prompt_context({
+     persona_id:       "alpha",
+     projection_names: ["review_pending"]   // ← axis name, NOT full projection name
+   })
+   ```
+
+   Two conventions to keep aligned (else the projection is silently
+   skipped with a warning):
+
+   - The Node's `metadata.axis` value must match the suffix used in the
+     projection name. `wire_prompt_context` iterates the persona's Nodes
+     and for each one looks up a projection literally named
+     `<persona>.section.<axis>` — the example above needs Node axis
+     `review_pending` + projection name `alpha.section.review_pending`.
+   - `projection_names[]` takes **axis names**, not the full projection
+     name (so `"review_pending"`, not `"alpha.section.review_pending"`).
+
+### Trigger layer (generic — Skill / Command / Hook / cron)
+
+The wire side only emits the rendered block; *what fires the call* is a
+caller-side concern and intentionally not modeled inside wire. Common
+trigger surfaces:
+
+- **session-close Skill / Command** — a project's own close-session
+  routine calls `wire_prompt_context({ projection_names: ["...review_pending"] })`
+  and inlines the result before writing the handoff.
+- **wake Skill** — the same call at session start, before the persona
+  takes its first action.
+- **Hook (e.g. UserPromptSubmit, SessionStart)** — wire the call into a
+  harness Hook so the prompt is injected without an explicit user step.
+- **cron / launchd / external scheduler** — call the MCP tool from a
+  scheduled job and route the rendered Markdown to a notification sink
+  (mail, mini-app row, log file).
+
+All four share one wire call; the loop / cadence lives in the Trigger.
+
+### Forward-looking — `wire_workflow_*` (P5, not yet implemented)
+
+`concept-2026-06-14.md` P5 carries a declarative WorkflowEngine where
+cadence (`every 7d`), trigger (`on session_close`), and action (`emit
+projection X`) can be registered as data inside wire itself, instead of
+being assembled on the caller side. Until that lands, the recipe above
+is the canonical way to express the same UCs.
+
 ## 7. Add another persona
 
 The whole flow above is the same per persona — register the Node(s),

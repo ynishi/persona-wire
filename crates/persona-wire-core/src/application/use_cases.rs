@@ -658,6 +658,372 @@ pub fn wire_edges_create_batch(
     })
 }
 
+// ---- wire_workflow_* (P5-a seed) ---------------------------------------
+//
+// `docs/wire-workflow-spec.md` の declarative WorkflowEngine seed。 Workflow を
+// 既存 Node type `workflow_def` に metadata で trigger + action を埋める form で
+// 表現する (新 store / 新 type 追加なし)。
+//
+// 本 P5-a scope:
+//   - register / list / delete + fire の resolution (= どの workflow が hit し
+//     て、 どんな action を取るか の descriptor 返却)
+//   - trigger: on_demand / on_event の 2 kind
+//   - action: no_op / emit_projection の 2 kind (validate のみ、 emit_projection
+//     の実 invocation は呼び出し側 = MCP layer が wire_prompt_context を叩く)
+//
+// carry (P5-b 以降):
+//   - cron / metadata_changed trigger (daemon 前提)
+//   - set_metadata / fire_mailbox action
+//   - wire_update (cross-ref 自動維持)
+
+const WORKFLOW_TYPE: &str = "workflow_def";
+const TRIGGER_KINDS_P5A: &[&str] = &["on_demand", "on_event"];
+const ACTION_KINDS_P5A: &[&str] = &["no_op", "emit_projection"];
+
+#[derive(Debug)]
+pub struct WireWorkflowRegisterInput {
+    pub id: String,
+    pub persona_id: Option<String>,
+    pub trigger: serde_json::Value,
+    pub action: serde_json::Value,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug)]
+pub struct WireWorkflowRegisterOutput {
+    pub id: String,
+}
+
+/// Register a Workflow as a `workflow_def` Node. Validates the trigger /
+/// action shape (P5-a kind subset) and stores `{persona, trigger, action,
+/// enabled}` in `metadata`. Implementation = thin wrapper around
+/// `storage.insert_node` so observability via `wire_query({TypeIs:
+/// "workflow_def"})` works out of the box.
+pub fn wire_workflow_register(
+    input: WireWorkflowRegisterInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireWorkflowRegisterOutput> {
+    let trigger_kind = read_kind(&input.trigger, "trigger")?;
+    if !TRIGGER_KINDS_P5A.contains(&trigger_kind.as_str()) {
+        return Err(crate::domain::error::WireError::InvalidSpec(format!(
+            "trigger.kind '{trigger_kind}' not supported in P5-a (allowed: {:?})",
+            TRIGGER_KINDS_P5A
+        )));
+    }
+    if trigger_kind == "on_event" {
+        require_string_field(&input.trigger, "event", "trigger.event")?;
+    }
+
+    let action_kind = read_kind(&input.action, "action")?;
+    if !ACTION_KINDS_P5A.contains(&action_kind.as_str()) {
+        return Err(crate::domain::error::WireError::InvalidSpec(format!(
+            "action.kind '{action_kind}' not supported in P5-a (allowed: {:?})",
+            ACTION_KINDS_P5A
+        )));
+    }
+    if action_kind == "emit_projection" {
+        let names = input
+            .action
+            .get("projection_names")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                crate::domain::error::WireError::InvalidSpec(
+                    "action.projection_names (array) is required for action.kind \
+                     'emit_projection'"
+                        .to_string(),
+                )
+            })?;
+        if names.is_empty() {
+            return Err(crate::domain::error::WireError::InvalidSpec(
+                "action.projection_names must contain at least one axis name".to_string(),
+            ));
+        }
+        for n in names {
+            if !n.is_string() {
+                return Err(crate::domain::error::WireError::InvalidSpec(
+                    "action.projection_names entries must all be strings".to_string(),
+                ));
+            }
+        }
+    }
+
+    let mut metadata = serde_json::Map::new();
+    if let Some(p) = input.persona_id.as_ref() {
+        metadata.insert("persona".to_string(), serde_json::json!(p));
+    }
+    metadata.insert("trigger".to_string(), input.trigger);
+    metadata.insert("action".to_string(), input.action);
+    metadata.insert(
+        "enabled".to_string(),
+        serde_json::json!(input.enabled.unwrap_or(true)),
+    );
+
+    let node = Node {
+        id: input.id.clone(),
+        r#type: WORKFLOW_TYPE.to_string(),
+        sot_ref: None,
+        confidence: None,
+        applicability: None,
+        last_verified_at: None,
+        review_due: None,
+        version: 1,
+        prev_id: None,
+        metadata: serde_json::Value::Object(metadata),
+    };
+    storage.insert_node(&node)?;
+    Ok(WireWorkflowRegisterOutput { id: input.id })
+}
+
+fn read_kind(value: &serde_json::Value, label: &str) -> WireResult<String> {
+    value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            crate::domain::error::WireError::InvalidSpec(format!(
+                "{label}.kind (string) is required"
+            ))
+        })
+}
+
+fn require_string_field(value: &serde_json::Value, field: &str, label: &str) -> WireResult<String> {
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            crate::domain::error::WireError::InvalidSpec(format!("{label} (string) is required"))
+        })
+}
+
+#[derive(Debug)]
+pub struct WireWorkflowListInput {
+    pub persona_id: Option<String>,
+    pub trigger_kind: Option<String>,
+    pub enabled_only: Option<bool>,
+}
+
+#[derive(Debug)]
+pub struct WorkflowSummary {
+    pub id: String,
+    pub persona_id: Option<String>,
+    pub trigger: serde_json::Value,
+    pub action: serde_json::Value,
+    pub enabled: bool,
+}
+
+#[derive(Debug)]
+pub struct WireWorkflowListOutput {
+    pub workflows: Vec<WorkflowSummary>,
+}
+
+/// List registered Workflows (= Nodes of type `workflow_def`), with optional
+/// `persona_id` / `trigger.kind` / enabled filtering applied in-memory.
+pub fn wire_workflow_list(
+    input: WireWorkflowListInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireWorkflowListOutput> {
+    let spec = Specification::TypeIs(WORKFLOW_TYPE.to_string());
+    let nodes = collect_matching_nodes(storage, &spec)?;
+    let enabled_only = input.enabled_only.unwrap_or(true);
+    let workflows = nodes
+        .into_iter()
+        .filter_map(|n| node_to_summary(n).ok())
+        .filter(|w| {
+            if enabled_only && !w.enabled {
+                return false;
+            }
+            if let Some(p) = input.persona_id.as_ref() {
+                if w.persona_id.as_deref() != Some(p.as_str()) {
+                    return false;
+                }
+            }
+            if let Some(tk) = input.trigger_kind.as_ref() {
+                if w.trigger.get("kind").and_then(|v| v.as_str()) != Some(tk.as_str()) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    Ok(WireWorkflowListOutput { workflows })
+}
+
+fn node_to_summary(node: Node) -> WireResult<WorkflowSummary> {
+    let meta = node.metadata;
+    let persona_id = meta
+        .get("persona")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let trigger = meta
+        .get("trigger")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let action = meta
+        .get("action")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let enabled = meta
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    Ok(WorkflowSummary {
+        id: node.id,
+        persona_id,
+        trigger,
+        action,
+        enabled,
+    })
+}
+
+#[derive(Debug)]
+pub struct WireWorkflowFireInput {
+    /// Single-workflow fire by id (mutually exclusive with `event`).
+    pub id: Option<String>,
+    /// Event-name fan-out (matches every `on_event` workflow whose
+    /// `trigger.event` equals this value).
+    pub event: Option<String>,
+    /// Optional scoping for event fan-out (matches metadata.persona).
+    pub persona_id: Option<String>,
+    pub dry_run: Option<bool>,
+}
+
+/// A workflow resolved for firing, with its action descriptor surfaced so the
+/// caller (= MCP layer or external orchestrator) can dispatch the side
+/// effect. P5-a keeps action invocation out of core to avoid the
+/// async/Arc<Mutex> coupling — `emit_projection` is dispatched by calling
+/// `wire_prompt_context` from the caller using `action_emit_projection_names`.
+#[derive(Debug)]
+pub struct ResolvedFire {
+    pub id: String,
+    pub persona_id: Option<String>,
+    pub action_kind: String,
+    /// Populated when `action_kind == "emit_projection"`; else None.
+    pub action_emit_projection_names: Option<Vec<String>>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug)]
+pub struct WireWorkflowFireOutput {
+    pub fired: Vec<ResolvedFire>,
+    pub skipped: Vec<(String, String)>, // (id, reason)
+}
+
+/// Resolve the workflows that would fire for the given input. **Does not**
+/// invoke the action itself in P5-a; the returned `ResolvedFire` describes
+/// what should happen so the caller can dispatch (= keeps core sync, keeps
+/// emit_projection's async machinery at the MCP layer).
+pub fn wire_workflow_fire(
+    input: WireWorkflowFireInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireWorkflowFireOutput> {
+    if input.id.is_some() == input.event.is_some() {
+        return Err(crate::domain::error::WireError::InvalidSpec(
+            "exactly one of `id` or `event` is required".to_string(),
+        ));
+    }
+    let dry_run = input.dry_run.unwrap_or(false);
+
+    // Collect candidate workflows.
+    let candidates: Vec<WorkflowSummary> = if let Some(id) = input.id.as_ref() {
+        let Some(node) = storage.get_node(id)? else {
+            return Ok(WireWorkflowFireOutput {
+                fired: vec![],
+                skipped: vec![(id.clone(), "workflow not found".to_string())],
+            });
+        };
+        if node.r#type != WORKFLOW_TYPE {
+            return Ok(WireWorkflowFireOutput {
+                fired: vec![],
+                skipped: vec![(
+                    id.clone(),
+                    format!("node type is '{}', expected '{WORKFLOW_TYPE}'", node.r#type),
+                )],
+            });
+        }
+        vec![node_to_summary(node)?]
+    } else {
+        // event-driven: match every on_event workflow whose trigger.event == event
+        let spec = Specification::TypeIs(WORKFLOW_TYPE.to_string());
+        collect_matching_nodes(storage, &spec)?
+            .into_iter()
+            .filter_map(|n| node_to_summary(n).ok())
+            .collect()
+    };
+
+    let mut fired = Vec::new();
+    let mut skipped = Vec::new();
+    let event = input.event.as_deref();
+
+    for w in candidates {
+        if !w.enabled {
+            skipped.push((w.id.clone(), "enabled=false".to_string()));
+            continue;
+        }
+        if let Some(persona_filter) = input.persona_id.as_ref() {
+            if w.persona_id.as_deref() != Some(persona_filter.as_str()) {
+                skipped.push((
+                    w.id.clone(),
+                    format!("persona scope mismatch (want={persona_filter})"),
+                ));
+                continue;
+            }
+        }
+        // Trigger gating
+        let trigger_kind = w
+            .trigger
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if let Some(ev) = event {
+            // event-driven fire path: skip non-on_event workflows
+            if trigger_kind != "on_event" {
+                skipped.push((
+                    w.id.clone(),
+                    format!("trigger.kind='{trigger_kind}' does not match event fan-out"),
+                ));
+                continue;
+            }
+            let wf_event = w.trigger.get("event").and_then(|v| v.as_str()).unwrap_or("");
+            if wf_event != ev {
+                skipped.push((
+                    w.id.clone(),
+                    format!("trigger.event='{wf_event}' != '{ev}'"),
+                ));
+                continue;
+            }
+        }
+        // Resolve action
+        let action_kind = w
+            .action
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let action_emit_projection_names = if action_kind == "emit_projection" {
+            w.action
+                .get("projection_names")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+        } else {
+            None
+        };
+        fired.push(ResolvedFire {
+            id: w.id,
+            persona_id: w.persona_id,
+            action_kind,
+            action_emit_projection_names,
+            dry_run,
+        });
+    }
+
+    Ok(WireWorkflowFireOutput { fired, skipped })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,6 +1287,312 @@ mod tests {
         assert!(out.deleted);
         // 削除済 projection は wire_init / wire_render の list() から消える
         assert!(ProjectionRegistry::new(&s).list().unwrap().is_empty());
+    }
+
+    // ---- wire_workflow_* (P5-a) tests ----
+
+    #[test]
+    fn workflow_register_round_trips_via_list() {
+        let s = setup();
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "alpha.workflow.review_close".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_event","event":"session_close"}),
+                action: json!({"kind":"emit_projection","projection_names":["review_pending"]}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+        let out = wire_workflow_list(
+            WireWorkflowListInput {
+                persona_id: Some("alpha".into()),
+                trigger_kind: None,
+                enabled_only: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.workflows.len(), 1);
+        let w = &out.workflows[0];
+        assert_eq!(w.id, "alpha.workflow.review_close");
+        assert_eq!(w.persona_id.as_deref(), Some("alpha"));
+        assert!(w.enabled);
+        assert_eq!(w.trigger["kind"], "on_event");
+        assert_eq!(w.action["kind"], "emit_projection");
+    }
+
+    #[test]
+    fn workflow_register_rejects_unsupported_trigger_kind() {
+        let s = setup();
+        let err = wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "x".into(),
+                persona_id: None,
+                trigger: json!({"kind":"cron","cron_spec":"0 9 * * *"}),
+                action: json!({"kind":"no_op"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cron"));
+    }
+
+    #[test]
+    fn workflow_register_rejects_on_event_without_event_field() {
+        let s = setup();
+        let err = wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "x".into(),
+                persona_id: None,
+                trigger: json!({"kind":"on_event"}),
+                action: json!({"kind":"no_op"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("event"));
+    }
+
+    #[test]
+    fn workflow_register_rejects_emit_projection_without_names() {
+        let s = setup();
+        let err = wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "x".into(),
+                persona_id: None,
+                trigger: json!({"kind":"on_demand"}),
+                action: json!({"kind":"emit_projection"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("projection_names"));
+    }
+
+    #[test]
+    fn workflow_list_filters_by_trigger_kind_and_enabled() {
+        let s = setup();
+        for (id, kind, enabled) in [
+            ("w1", "on_demand", true),
+            ("w2", "on_event", true),
+            ("w3", "on_demand", false),
+        ] {
+            let trig = if kind == "on_event" {
+                json!({"kind":"on_event","event":"e"})
+            } else {
+                json!({"kind":"on_demand"})
+            };
+            wire_workflow_register(
+                WireWorkflowRegisterInput {
+                    id: id.into(),
+                    persona_id: None,
+                    trigger: trig,
+                    action: json!({"kind":"no_op"}),
+                    enabled: Some(enabled),
+                },
+                &s,
+            )
+            .unwrap();
+        }
+        // default: enabled_only = true
+        let out = wire_workflow_list(
+            WireWorkflowListInput {
+                persona_id: None,
+                trigger_kind: Some("on_demand".into()),
+                enabled_only: None,
+            },
+            &s,
+        )
+        .unwrap();
+        let ids: Vec<&str> = out.workflows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, vec!["w1"]);
+        // enabled_only=false includes the disabled one
+        let out2 = wire_workflow_list(
+            WireWorkflowListInput {
+                persona_id: None,
+                trigger_kind: Some("on_demand".into()),
+                enabled_only: Some(false),
+            },
+            &s,
+        )
+        .unwrap();
+        let mut ids2: Vec<&str> = out2.workflows.iter().map(|w| w.id.as_str()).collect();
+        ids2.sort();
+        assert_eq!(ids2, vec!["w1", "w3"]);
+    }
+
+    #[test]
+    fn workflow_fire_by_id_returns_resolved_emit_projection() {
+        let s = setup();
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "w1".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_demand"}),
+                action: json!({"kind":"emit_projection","projection_names":["axis_a","axis_b"]}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+        let out = wire_workflow_fire(
+            WireWorkflowFireInput {
+                id: Some("w1".into()),
+                event: None,
+                persona_id: None,
+                dry_run: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.fired.len(), 1);
+        assert!(out.skipped.is_empty());
+        let f = &out.fired[0];
+        assert_eq!(f.id, "w1");
+        assert_eq!(f.action_kind, "emit_projection");
+        assert_eq!(
+            f.action_emit_projection_names.as_deref(),
+            Some(&["axis_a".to_string(), "axis_b".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn workflow_fire_by_event_skips_unrelated_and_disabled() {
+        let s = setup();
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "match_open".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_event","event":"session_open"}),
+                action: json!({"kind":"no_op"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "match_close".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_event","event":"session_close"}),
+                action: json!({"kind":"no_op"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "disabled_close".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_event","event":"session_close"}),
+                action: json!({"kind":"no_op"}),
+                enabled: Some(false),
+            },
+            &s,
+        )
+        .unwrap();
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "demand_only".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_demand"}),
+                action: json!({"kind":"no_op"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+        let out = wire_workflow_fire(
+            WireWorkflowFireInput {
+                id: None,
+                event: Some("session_close".into()),
+                persona_id: Some("alpha".into()),
+                dry_run: None,
+            },
+            &s,
+        )
+        .unwrap();
+        let fired_ids: Vec<&str> = out.fired.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(fired_ids, vec!["match_close"]);
+        // 3 skipped: match_open (event mismatch), disabled_close (enabled=false),
+        // demand_only (trigger kind mismatch)
+        assert_eq!(out.skipped.len(), 3);
+    }
+
+    #[test]
+    fn workflow_fire_requires_exactly_one_of_id_or_event() {
+        let s = setup();
+        let err = wire_workflow_fire(
+            WireWorkflowFireInput {
+                id: None,
+                event: None,
+                persona_id: None,
+                dry_run: None,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("id"));
+    }
+
+    #[test]
+    fn workflow_fire_by_id_handles_missing() {
+        let s = setup();
+        let out = wire_workflow_fire(
+            WireWorkflowFireInput {
+                id: Some("ghost".into()),
+                event: None,
+                persona_id: None,
+                dry_run: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert!(out.fired.is_empty());
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].0, "ghost");
+    }
+
+    #[test]
+    fn workflow_delete_uses_node_delete() {
+        let s = setup();
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "w1".into(),
+                persona_id: None,
+                trigger: json!({"kind":"on_demand"}),
+                action: json!({"kind":"no_op"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+        let out = wire_node_delete(
+            WireDeleteInput {
+                id_or_name: "w1".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert!(out.deleted);
+        // gone from list
+        assert!(wire_workflow_list(
+            WireWorkflowListInput {
+                persona_id: None,
+                trigger_kind: None,
+                enabled_only: Some(false),
+            },
+            &s,
+        )
+        .unwrap()
+        .workflows
+        .is_empty());
     }
 
     #[test]

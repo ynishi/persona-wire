@@ -16,9 +16,10 @@ use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
     wire_node_delete, wire_nodes_create_batch, wire_projection_delete, wire_prompt_context,
-    wire_query, wire_render, wire_spec_delete, WireCloseInput, WireDeleteInput,
-    WireEdgesCreateBatchInput, WireInitInput, WireNodesCreateBatchInput, WirePromptContextInput,
-    WireQueryInput, WireRenderInput,
+    wire_query, wire_render, wire_spec_delete, wire_workflow_fire, wire_workflow_list,
+    wire_workflow_register, WireCloseInput, WireDeleteInput, WireEdgesCreateBatchInput,
+    WireInitInput, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
+    WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -182,6 +183,55 @@ pub struct WirePromptContextParams {
     /// `[extra.persona_wire.sections]`.
     #[serde(default)]
     pub projection_names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireWorkflowRegisterParams {
+    /// Node id for the workflow (e.g. `"alpha.workflow.review_close"`).
+    pub id: String,
+    /// Optional persona scope (stored in `metadata.persona`).
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// Trigger descriptor as JSON string — `{"kind":"on_demand"}` or
+    /// `{"kind":"on_event","event":"<name>"}`. String form mirrors
+    /// `wire_spec_register.json` for transport-friendly schema derivation.
+    pub trigger: String,
+    /// Action descriptor as JSON string — `{"kind":"no_op"}` or
+    /// `{"kind":"emit_projection","projection_names":["..."]}`.
+    pub action: String,
+    /// Defaults to `true`.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireWorkflowListParams {
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// Filter by `trigger.kind` (e.g. `"on_demand"` / `"on_event"`).
+    #[serde(default)]
+    pub trigger_kind: Option<String>,
+    /// Defaults to `true` (= exclude disabled).
+    #[serde(default)]
+    pub enabled_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireWorkflowFireParams {
+    /// Fire a single workflow by id. Mutually exclusive with `event`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Event-name fan-out (matches every enabled `on_event` workflow whose
+    /// `trigger.event` equals this value). Mutually exclusive with `id`.
+    #[serde(default)]
+    pub event: Option<String>,
+    /// Optional persona scope for the event fan-out (matches `metadata.persona`).
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// Defaults to `false`. When `true`, resolved fires are returned but no
+    /// action is dispatched (= rendered output omitted).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +675,178 @@ impl WireServer {
         });
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
+
+    // ---- wire_workflow_* (P5-a seed) ---------------------------------------
+
+    /// Register a Workflow as a `workflow_def` Node (declarative trigger + action).
+    #[tool(
+        name = "wire_workflow_register",
+        description = "Register a Workflow as a `workflow_def` Node. trigger.kind ∈ {on_demand, on_event}; action.kind ∈ {no_op, emit_projection}. See docs/wire-workflow-spec.md."
+    )]
+    async fn wire_workflow_register_tool(
+        &self,
+        Parameters(p): Parameters<WireWorkflowRegisterParams>,
+    ) -> Result<String, String> {
+        let trigger: serde_json::Value = serde_json::from_str(&p.trigger)
+            .map_err(|e| format!("parse trigger JSON: {e}"))?;
+        let action: serde_json::Value =
+            serde_json::from_str(&p.action).map_err(|e| format!("parse action JSON: {e}"))?;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: p.id,
+                persona_id: p.persona_id,
+                trigger,
+                action,
+                enabled: p.enabled,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(format!("registered workflow: {}", out.id))
+    }
+
+    /// List registered Workflows (= `workflow_def` Nodes).
+    #[tool(
+        name = "wire_workflow_list",
+        description = "List registered Workflows with optional persona_id / trigger_kind filters (defaults: enabled_only=true)."
+    )]
+    async fn wire_workflow_list_tool(
+        &self,
+        Parameters(p): Parameters<WireWorkflowListParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_workflow_list(
+            WireWorkflowListInput {
+                persona_id: p.persona_id,
+                trigger_kind: p.trigger_kind,
+                enabled_only: p.enabled_only,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let workflows: Vec<serde_json::Value> = out
+            .workflows
+            .into_iter()
+            .map(|w| {
+                serde_json::json!({
+                    "id": w.id,
+                    "persona_id": w.persona_id,
+                    "enabled": w.enabled,
+                    "trigger": w.trigger,
+                    "action": w.action,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({ "workflows": workflows }))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Delete a Workflow by id (thin alias of `wire_node_delete` for caller clarity).
+    #[tool(
+        name = "wire_workflow_delete",
+        description = "Delete a Workflow by id. Returns {kind, id_or_name, deleted}. Equivalent to wire_node_delete for the workflow's Node id."
+    )]
+    async fn wire_workflow_delete_tool(
+        &self,
+        Parameters(p): Parameters<WireDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_node_delete(
+            WireDeleteInput {
+                id_or_name: p.id_or_name,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "kind": out.kind,
+            "id_or_name": out.id_or_name,
+            "deleted": out.deleted,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    /// Fire one or more Workflows. For `action.kind = emit_projection`,
+    /// invokes `wire_prompt_context` for each fired workflow and includes the
+    /// rendered output in the response (unless `dry_run = true`).
+    #[tool(
+        name = "wire_workflow_fire",
+        description = "Fire a Workflow by `id` (single) or by `event` (fan-out across enabled on_event workflows). Resolves the action; for `emit_projection`, invokes wire_prompt_context and returns the rendered block per fire (unless dry_run=true)."
+    )]
+    async fn wire_workflow_fire_tool(
+        &self,
+        Parameters(p): Parameters<WireWorkflowFireParams>,
+    ) -> Result<String, String> {
+        // Phase 1: resolve under lock (sync core).
+        let resolved = {
+            let s = self.storage.lock().map_err(|e| e.to_string())?;
+            wire_workflow_fire(
+                WireWorkflowFireInput {
+                    id: p.id,
+                    event: p.event,
+                    persona_id: p.persona_id,
+                    dry_run: p.dry_run,
+                },
+                &s,
+            )
+            .map_err(|e| e.to_string())?
+        };
+
+        // Phase 2: dispatch async action per fire (currently emit_projection / no_op).
+        let mut fired_out = Vec::with_capacity(resolved.fired.len());
+        for f in resolved.fired {
+            let rendered = if f.dry_run {
+                serde_json::json!(null)
+            } else if f.action_kind == "emit_projection" {
+                match f.persona_id.clone() {
+                    None => serde_json::json!({
+                        "error": "emit_projection requires metadata.persona to render",
+                    }),
+                    Some(persona_id) => {
+                        let names = f.action_emit_projection_names.clone().unwrap_or_default();
+                        match wire_prompt_context(
+                            WirePromptContextInput {
+                                persona_id,
+                                projection_names: Some(names),
+                            },
+                            self.storage.clone(),
+                        )
+                        .await
+                        {
+                            Ok(pc) => serde_json::json!({
+                                "persona_id": pc.persona_id,
+                                "prompt_context": pc.prompt_context,
+                                "warnings": pc.warnings,
+                            }),
+                            Err(e) => serde_json::json!({ "error": e.to_string() }),
+                        }
+                    }
+                }
+            } else {
+                serde_json::json!({ "kind": "no_op" })
+            };
+            fired_out.push(serde_json::json!({
+                "id": f.id,
+                "persona_id": f.persona_id,
+                "action_kind": f.action_kind,
+                "dry_run": f.dry_run,
+                "result": rendered,
+            }));
+        }
+
+        let skipped_out: Vec<serde_json::Value> = resolved
+            .skipped
+            .into_iter()
+            .map(|(id, reason)| serde_json::json!({ "id": id, "reason": reason }))
+            .collect();
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "fired": fired_out,
+            "skipped": skipped_out,
+        }))
+        .map_err(|e| e.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +881,9 @@ impl ServerHandler for WireServer {
              wire_query / wire_render / wire_prompt_context / wire_node_create / \
              wire_edge_create / wire_nodes_create_batch / wire_edges_create_batch / \
              wire_spec_register / wire_projection_register / wire_node_delete / \
-             wire_edge_delete / wire_spec_delete / wire_projection_delete. \
+             wire_edge_delete / wire_spec_delete / wire_projection_delete / \
+             wire_workflow_register / wire_workflow_list / wire_workflow_fire / \
+             wire_workflow_delete. \
              For the full end-to-end onboarding walkthrough (setup → wire entries → \
              spec / projection → optional persona-pack overlay → wire_prompt_context \
              call → Skill / Prompt wiring) read the bundled resource at \
