@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.2.0] - 2026-06-17
+
+### Added
+
+- **P5-a `wire_workflow_*` declarative trigger/action seed** — register / list / fire / delete tools backed by the existing `workflow_def` node type. Trigger kinds: `on_demand` / `on_event`. Action kinds: `no_op` / `emit_projection`. The `emit_projection` action invokes `wire_prompt_context` internally and returns the rendered Markdown in `result.prompt_context`. Designed in `docs/wire-workflow-spec.md` (new file, P5 design draft).
+- **P5-a' `wire_workflow_check` — graph coverage audit** — classifies each Node into `declared_covered` / `declared_uncovered` / `undeclared` / `exempt` by comparing `metadata.maintained_by` (declared maintenance plan) against the set of enabled `workflow_def` nodes. Coverage semantic: workflow covers node iff `action.kind == "emit_projection"` AND `workflow.persona == node.persona` AND `node.axis ∈ workflow.action.projection_names`. Designed in `docs/wire-workflow-spec.md §6.5`.
+- **`docs/wire-workflow-spec.md`** (new file, ~330 lines): P5 WorkflowEngine seed design — mental model, Workflow Node data model, Trigger / Action forms, Tool surface, `wire_update` outline (P5-b carry), UC mapping to `onboarding §6b`, `wire_workflow_check` audit sibling (§6.5), implementation order (P5-a / P5-a' / P5-b〜P5-e), open questions.
+- **`docs/onboarding.md §6b Loop / review / update-check trigger pattern`** (~120 lines): UC1-3 (session-close review / wake-time pending list / stale node surfacing), recipe using current `Specification` / `NamedProjection` / Adapter primitives, generic trigger layer (Skill / Command / Hook / cron), forward-looking note for `wire_workflow_*` (P5).
 - `MiniAppAdapter::fetch_via_alias` resolves aliases through the mini-app
   `GlobalAliasStorage` (`_global.db`) with scope-aware lookup:
   `?scope=user` hits the User-scope `_global.db` as a hard target,
@@ -36,14 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved, the `?scope=` reserved key is documented as effective
   rather than dead-code, and the remaining wire-side scope-outs
   (aggregator / multi-source / pattern source) are listed as P3b carry.
-
-### Deprecated
-
-### Removed
+- `docs/runbook-verify.md` line 3 rewritten for consumer readability — describes the file as the procedure SoT, contributor invocation pattern, and explicitly scopes execution log location to contributor's own choice. Replaces an earlier internal-doc reference that exposed the gitignored workspace layer.
 
 ### Fixed
 
+- **`crates/persona-wire-mcp` publish path** — the `ONBOARDING_GUIDE` constant resolved `include_str!("../../../docs/onboarding.md")` against the workspace root, but `cargo publish` only packages files inside the crate's own tree, so `cargo publish --dry-run` failed at packaging-verify time. Fixed by bundling a synced copy at `crates/persona-wire-mcp/onboarding.md` and switching the path to `include_str!("../onboarding.md")` (in-crate). The synced copy is ship-only metadata; the canonical workspace `docs/onboarding.md` remains the human-navigable source.
+- **Two-layer safety net for the bundled onboarding sync** — (1) `include_str!` resolution failure makes `cargo build` / `cargo publish` error out when the bundled copy is missing; (2) the new `crates/persona-wire-mcp/build.rs` byte-compares the workspace canonical copy against the bundled copy on every dev build and panics with a one-line `cp` fix command on drift. Published-tarball builds skip the byte compare (the workspace doc is absent there; only the bundled copy ships).
+
 ### Security
+
+- Removed an internal-doc reference from `docs/runbook-verify.md` line 3 (public artifact exposed the gitignored workspace layer's existence; replaced with a consumer-readable description of the file's role).
 
 ## [0.1.0] - 2026-06-15
 
@@ -96,5 +116,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Internal token / persona-literal leak removal**: test fixtures, docs, and README were sanitised of persona-specific identifiers, internal issue IDs, and project labels. Each commit in the 7-commit chain leading to this release was verified by `publish-checker` + `secret-pre-commit-checker` + `content-hygiene-pre-commit-checker` (4-gate sweep).
 
-[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ynishi/persona-wire/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ynishi/persona-wire/compare/441a727...v0.1.0

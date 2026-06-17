@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "handlebars",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "persona-wire-core",
