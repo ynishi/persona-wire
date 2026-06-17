@@ -9,7 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MiniAppAdapter::fetch_via_alias` resolves aliases through the mini-app
+  `GlobalAliasStorage` (`_global.db`) with scope-aware lookup:
+  `?scope=user` hits the User-scope `_global.db` as a hard target,
+  `?scope=<project>&root=<dir>` hits the Project-scope `_global.db`,
+  and the legacy URI form (no `?scope=`) falls back from User-scope
+  global to the per-table `_aliases` SQLite table for backward
+  compatibility. Resolves issue `8904d808-cff2-4788-b047-a77b21981492`
+  (mini-app issue tracker).
+- New E2E test suite `crates/persona-wire/tests/e2e_alias_scope.rs`
+  exercises the scope resolution matrix end-to-end through the real
+  `persona-wire mcp` stdio binary (7 axes: scope=user hit / scope=user
+  miss / scope=&lt;project&gt; hit / scope=&lt;project&gt; without root /
+  legacy URI global hit / legacy URI per-table fallback hit / legacy
+  URI double miss).
+
 ### Changed
+
+- Refactored E2E test fixtures into a shared `tests/common/mod.rs`
+  module so the per-table legacy suite (`e2e_alias_mcp.rs`) and the
+  new scope suite (`e2e_alias_scope.rs`) share `McpClient`, `Layout`,
+  `bootstrap_mini_app_table*`, and `wire_one_axis` helpers without
+  duplication.
+- `docs/onboarding.md §2b` rewritten to reflect the new resolution
+  matrix: both `_global.db` and per-table `_aliases` storages are now
+  resolved, the `?scope=` reserved key is documented as effective
+  rather than dead-code, and the remaining wire-side scope-outs
+  (aggregator / multi-source / pattern source) are listed as P3b carry.
 
 ### Deprecated
 

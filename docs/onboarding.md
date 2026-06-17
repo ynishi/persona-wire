@@ -81,13 +81,54 @@ with a `source_uri`. Add an edge from the persona node for traceability
 Bulk-insert through `wire_nodes_create_batch` / `wire_edges_create_batch`
 when you have many axes at once.
 
-## 2b. Alias path — filtered / paginated fetches via mini-app `_aliases`
+## 2b. Alias path — filtered / paginated fetches
 
-When the consumer wants a filtered, sorted, or paginated subset (not the
-full table dump), point the wiring entry's `source_uri` at a pre-registered
-**mini-app alias** instead of the bare table. The filter / sort / limit
-semantics live entirely on the mini-app side; `persona-wire` delegates the
-resolution to the `mini-app-core` SDK and never interprets them.
+> **Status**: Both global alias storage and per-table `_aliases` are
+> resolved. As of mini-app v0.12.1+ the default destination of
+> `alias_create` is **global storage** (`<base>/_global.db` →
+> `_global_aliases` table), and `wire` resolves it first; legacy
+> per-table `_aliases` rows still resolve via fallback (see §URI form
+> below). Tracking issue
+> `8904d808-cff2-4788-b047-a77b21981492` (mini-app issue table) is
+> resolved on the wire side — the `scope=user` / `scope=<project>`
+> reserved keys now redirect the alias lookup to the corresponding
+> `_global.db` instead of being dead-code. The remaining wire-side
+> scope-outs (aggregator / multi-source / pattern source) are listed
+> in §Known limitations below.
+
+### Step 0 — Pick a storage and register the alias
+
+The mini-app installation owns two alias storages:
+
+- **global** (`<base>/_global.db` → `_global_aliases`): default for
+  new aliases since mini-app v0.12.1. Alias name is **unique within
+  a scope across all tables**, so multiple tables sharing the same
+  alias name in the same scope is rejected with `ALIAS_ALREADY_EXISTS`.
+  Use a `<table>_for_<persona>` / `<persona>_<purpose>` convention
+  to avoid collisions (the mailbox / friend_map smoke uses
+  `for_shi` / `friend_for_shi`).
+- **per-table** (`<base>/<table>/<table>.db` → `_aliases`): legacy
+  layout. Still resolved via fallback when the legacy URI form
+  (`?scope=` omitted) does not find the alias in the User-scope
+  `_global.db`.
+
+Standard registration via the mini-app MCP server:
+
+```
+mcp__mini-app__info({ table: "<table>" })          # field definitions
+mcp__mini-app__alias_list({ table: "<table>" })    # existing aliases (both storages)
+mcp__mini-app__alias_create({                       # writes to global by default
+  table: "<table>",
+  name:  "<alias_name>",
+  filter: { "type": "eq", "field": "to", "value": "<persona>" },
+  scope: "user",                                    # "project" | "user"
+  limit: 30
+})
+```
+
+If your callers already have aliases in the per-table `_aliases`
+layout, they keep working through the legacy fallback path — no
+migration is required to start using `wire`.
 
 ### URI form
 
@@ -95,62 +136,76 @@ resolution to the `mini-app-core` SDK and never interprets them.
 mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<dir>]
 ```
 
-- `alias=<name>` — required for this path. Resolved against the table's
-  `_aliases` (registered in mini-app, see below).
-- `<k>=<v>` — bind variables consumed by the alias template
+- `alias=<name>` — required for this path. Resolution order depends
+  on `scope`:
+
+  | URI form                                | lookup target                                                                            |
+  |-----------------------------------------|------------------------------------------------------------------------------------------|
+  | `?alias=N` (no `scope`)                 | User-scope `_global.db` first; on miss, per-table `<table>.db._aliases` (legacy fallback) |
+  | `?scope=user&alias=N`                   | User-scope `_global.db` only (hard target, no fallback)                                  |
+  | `?scope=<project-name>&root=<dir>&alias=N` | Project-scope `<dir>/_global.db` only (hard target, no fallback)                      |
+
+- `<k>=<v>` — bind variables consumed by the alias body
   (e.g. `?alias=unread_for&persona=alpha`).
 - `limit=<n>` — caps the row count returned by the alias body.
-- `scope=user|<project-name>` (reserved key) — selects the mini-app
-  installation. `scope=user` reads from the user-scoped store
-  (`MINI_APP_USER_DIR`, default `~/.mini-app/<table>/<table>.db`).
-  `scope=<project-name>` **requires** `root=<dir>` and resolves
-  `<root>/<table>/<table>.db`. Parse fails fast when `root` is missing.
-- `root=<dir>` (reserved key) — explicit base directory. `~/` is expanded
-  against `$HOME`. Without `scope` it acts as a `root_override` (legacy
-  fallback, kept for backward compat).
+- `scope=user|<project-name>` (reserved key) — selects a hard target
+  in `_global.db`. Per-table `_aliases` fallback is **not** consulted
+  when `scope` is set.
+- `root=<dir>` (reserved key) — explicit base directory (`~/` is
+  expanded against `$HOME`). Required when `scope=<project-name>` is
+  set (parse fails fast otherwise). For `scope=user` / `scope=` omitted
+  it overrides `$MINI_APP_USER_DIR` / `~/.mini-app/` and resolves to
+  `<root>/<table>/<table>.db` for per-table fetches plus
+  `<root>/_global.db` for global alias resolution.
 
-### Register the alias once (mini-app side)
-
-Aliases are owned by mini-app, not by `persona-wire`. Register them
-through the sibling MCP server before wiring entries reference them:
-
-```
-mcp__mini-app__alias_create({
-  table: "<table>",
-  name:  "<alias name>",
-  body:  { /* filter / sort / limit JSON per mini-app alias schema */ }
-})
-
-mcp__mini-app__alias_list({ table: "<table>" })   // verify registration
-```
-
-Refer to the mini-app server's own onboarding for the alias body schema.
-Once the alias exists in `_aliases`, every `mini-app://<table>?alias=<name>…`
-URI in a wiring entry resolves through it.
-
-### Example — filter-baked wiring entry
+### Example — global alias (mini-app v0.12.1+ default)
 
 ```jsonc
-// mini-app side (do this once, then re-use across personas)
-mcp__mini-app__alias_create({
-  table: "mailbox",
-  name:  "unread_for",
-  body:  { /* filter: persona = $persona AND status = "unread", limit = 5 */ }
-})
+// 1. Register the alias in global storage.
+// mcp__mini-app__alias_create({
+//   table: "mailbox", name: "for_shi", scope: "user",
+//   filter: { "type": "eq", "field": "to", "value": "shi" }, limit: 30
+// })
 
-// persona-wire side — wiring entry references the alias
-{ "id":   "alpha.mailbox",
+// 2. Reference it from a wiring entry. `?scope=user` is optional —
+//    the legacy URI form (no `?scope=`) falls back to global first.
+{ "id":   "shi.mailbox",
   "type": "outline_node",
   "metadata": {
-    "persona":    "alpha",
+    "persona":    "shi",
     "axis":       "mailbox",
-    "source_uri": "mini-app://mailbox?alias=unread_for&persona=alpha&limit=5"
+    "source_uri": "mini-app://mailbox?alias=for_shi"
   } }
 ```
 
-With the alias in place, the projection template renders only the
-filtered + capped subset, so no consumer-side wake skill is needed to
-bridge a missing filter on the wire side.
+If `wire_prompt_context` returns
+`alias '<name>' not found in _global.db (User scope) nor per-table
+<table>._aliases fallback`, neither storage has the alias — re-check
+the registration or the alias name (global names are scope-unique
+across tables, so a collision on a different table surfaces as a
+different error: `execute_alias_run failed: table not found: <other>`).
+
+### Known limitations — aggregator / multi-source / pattern source
+
+`wire`'s `Layer 6 Adapter::fetch_via_alias` is scoped to
+**Single-source, non-aggregator** aliases. The following alias shapes
+exist in mini-app but are intentionally rejected with a clear error on
+the wire side, tracked as P3b carry:
+
+- aliases with an `aggregator` (`Count` / `Sum` / `Avg` / `Min` /
+  `Max` / `GroupBy`) — wire returns
+  `alias '<name>' has aggregator — wire scope 外 (P3b carry)`.
+- aliases with `SourceSpec::Multi(...)` (multiple source tables) —
+  wire returns
+  `alias '<name>' has Multi / Pattern source — wire scope 外 (P3b carry)`.
+- aliases with `SourceSpec::Pattern(...)` (glob over multiple tables) —
+  same error as Multi.
+
+For these shapes, either keep the alias for direct mini-app callers
+and add a Single-source / `Rows` mirror alias for `wire`, or use the
+bare `mini-app://<table>` form and push the aggregation / cross-table
+join to the NamedProjection template (handlebars `{{#each}}` +
+`{{#if}}`) or a sibling consumer skill.
 
 ## 3. Register the Specification and NamedProjection (template = data)
 

@@ -8,10 +8,11 @@
 //! - `mini-app://<table_name>[?scope=user|<project-name>&root=<dir>&alias=<name>&<k>=<v>*&limit=<n>]`
 //!   — mini-app-core SDK 経由で table を open + list / QueryAlias 実行。 reserved query keys
 //!   は `scope` (= `user` → `AliasScope::User` / 任意 project identifier → `AliasScope::Project`、
-//!   省略時 = legacy fallback)、 `root` (= 物理 dir 上書き、 scope=<project-name> 時は必須、
-//!   省略時 = `$MINI_APP_USER_DIR` or `~/.mini-app/`)、 `alias` (= per-table `_aliases` 名、
-//!   グローバル alias storage / Multi / Pattern source / aggregator は P3b carry)、 `limit`
-//!   (= list 上限 override)。 render / parse / list は SDK
+//!   省略時 = global storage (User scope) → per-table `_aliases` fallback)、 `root` (= 物理 dir
+//!   上書き、 scope=<project-name> 時は必須、 省略時 = `$MINI_APP_USER_DIR` or `~/.mini-app/`)、
+//!   `alias` (= global `_global.db` 内 `_global_aliases` (mini-app v0.12.1+ default) +
+//!   legacy per-table `_aliases` (backward compat) 双方解決対応、 Multi / Pattern source /
+//!   aggregator は P3b carry)、 `limit` (= list 上限 override)。 render / parse / list は SDK
 //!   (`mini_app_core::alias_run::execute_alias_run`) に完全委譲、 wire は filter / MiniJinja /
 //!   ListFilter 意味論を一切解釈しない (= reframe-gate §1 architecture 軸、 Resource × 取り出し方
 //!   の連携 layer 役)。
@@ -209,66 +210,67 @@ impl MiniAppAdapter {
         }))
     }
 
-    /// `mini-app://<table>?alias=<name>[&k=v]*[&limit=<n>]` を受けて、
+    /// `mini-app://<table>?alias=<name>[&scope=<s>&root=<dir>&k=v]*[&limit=<n>]` を受けて、
     /// mini-app QueryAlias 機能を叩いて filter 済 rows を取得する。
     /// render + parse + list は SDK (mini-app-core v0.12+ `execute_alias_run`) に
     /// 完全委譲、 wire 側に MiniJinja / ListFilter / aggregator 認識は持ち込まない。
     ///
-    /// wire scope: per-table `_aliases` (Single source by definition) のみ対応、
-    /// グローバル alias storage (`_global.db` / Multi / Pattern source / aggregator)
-    /// は P3b carry。
+    /// alias storage 解決経路 (issue 8904d808 fix、 mini-app v0.12.1 + 整合):
+    /// - `scope=user`           → `_global.db` (User scope) のみ叩く (hard fail on miss)
+    /// - `scope=<project-name>` → `_global.db` (Project scope = `?root=<dir>`) のみ叩く (hard fail on miss)
+    /// - `scope=None` (legacy)  → `_global.db` (User scope) → per-table `_aliases` fallback
+    ///   (backward compat: 旧 per-table 経由 alias 経路を温存)
+    ///
+    /// wire scope: Single source + 非 aggregator alias のみ対応。 Multi / Pattern source / aggregator は
+    /// P3b carry (= clear error message で hard fail、 SDK 側で同 carry path を NotImpl 化済)。
     ///
     /// 内部 helper、 公開 surface は `fetch_via_adapter` / `Adapter::fetch` 経由。
     ///
     /// 流れ:
-    /// 1. `Store::open` + `Store::alias_get(name)` で per-table `_aliases` record 取得
-    /// 2. per-table `store::AliasRecord` を `alias_storage::AliasRecord` (global form) に変換
-    ///    (sources=Single("")、 aggregator=None、 scope=None で legacy fallback path に乗せる)
-    /// 3. `TableRegistry::from_entries` で 1 table 分の registry を組み立て
-    /// 4. `execute_alias_run(...)` SDK 1 call で render + parse + list を完全委譲
-    /// 5. `AliasRunValue::Rows` を取り出して既存戻り値 shape に整形
+    /// 1. `GlobalAliasStorage::open` (project_dir / user_dir 決定済) + scope 軸別 alias 取得、
+    ///    miss + scope=None 時のみ per-table `store.alias_get(name)` fallback
+    /// 2. Single source + 非 aggregator 軸の wire scope check
+    /// 3. per-table `Store::open` + schema load (TableRegistry 構築用)
+    /// 4. `TableRegistry::from_entries` で 1 table 分の registry を組み立て
+    /// 5. `execute_alias_run(...)` SDK 1 call で render + parse + list を完全委譲
+    /// 6. `AliasRunValue::Rows` を取り出して既存戻り値 shape に整形
     async fn fetch_via_alias(&self, spec: &MiniAppUriSpec) -> WireResult<serde_json::Value> {
         let alias_name = spec
             .alias
             .as_deref()
             .ok_or_else(|| WireError::Storage("mini-app adapter: alias key missing".to_string()))?;
+
+        // Step 1: alias record 取得 (global-first、 scope=None 時のみ per-table fallback)
+        let global_rec = resolve_alias_record(
+            &spec.table,
+            spec.scope.as_deref(),
+            spec.root.as_deref(),
+            alias_name,
+        )
+        .await?;
+
+        // Step 2: wire scope check (Single source + 非 aggregator のみ対応、 残りは P3b carry)
+        if global_rec.aggregator.is_some() {
+            return Err(WireError::Storage(format!(
+                "mini-app adapter: alias '{alias_name}' has aggregator — wire scope 外 (P3b carry)"
+            )));
+        }
+        match &global_rec.sources {
+            mini_app_core::aggregator::SourceSpec::Single(_) => {}
+            mini_app_core::aggregator::SourceSpec::Multi(_)
+            | mini_app_core::aggregator::SourceSpec::Pattern(_) => {
+                return Err(WireError::Storage(format!(
+                    "mini-app adapter: alias '{alias_name}' has Multi / Pattern source — \
+                     wire scope 外 (P3b carry)"
+                )));
+            }
+        }
+
+        // Step 3: per-table store + schema open (TableRegistry 構築用)
         let (db_path, store) =
             open_mini_app_store(&spec.table, spec.scope.as_deref(), spec.root.as_deref()).await?;
 
-        // Step 1: alias_get (per-table _aliases)
-        let per_table_rec = store.alias_get(alias_name).await.map_err(|e| {
-            WireError::Storage(format!(
-                "mini-app adapter: alias_get('{alias_name}') failed: {e}"
-            ))
-        })?;
-
-        // Step 2: per-table store::AliasRecord → alias_storage::AliasRecord (global form)
-        // legacy fallback path で execute_alias_run に乗せるため sources は empty Single
-        // sentinel + table_fallback に table 名を渡す form。
-        //
-        // scope mapping:
-        //   - spec.scope = Some("user")           → Some(AliasScope::User)
-        //   - spec.scope = Some(<project-name>)   → Some(AliasScope::Project)
-        //   - spec.scope = None                   → None (legacy fallback、 既存 path 維持)
-        let global_scope = spec.scope.as_deref().map(|s| {
-            if s == "user" {
-                mini_app_core::alias_storage::AliasScope::User
-            } else {
-                mini_app_core::alias_storage::AliasScope::Project
-            }
-        });
-        let global_rec = mini_app_core::alias_storage::AliasRecord {
-            name: per_table_rec.name,
-            sources: mini_app_core::aggregator::SourceSpec::Single(String::new()),
-            aggregator: None,
-            filter: per_table_rec.filter,
-            default_limit: per_table_rec.default_limit,
-            description: per_table_rec.description,
-            params_schema: per_table_rec.params_schema,
-            scope: global_scope,
-        };
-
-        // Step 3: schema 再取得 + 1-table registry 組み立て
+        // Step 4: schema 再取得 + 1-table registry 組み立て
         let schema_path = db_path
             .parent()
             .ok_or_else(|| {
@@ -292,7 +294,7 @@ impl MiniAppAdapter {
         let registry =
             mini_app_core::registry::TableRegistry::from_entries(entries, Some(spec.table.clone()));
 
-        // Step 4: SDK execute_alias_run 1 call (= render + parse + list を SDK に完全委譲)
+        // Step 5: SDK execute_alias_run 1 call (= render + parse + list を SDK に完全委譲)
         // params は wire side が URI query から組んだ json object (alias / limit 除外済)。
         let value = mini_app_core::alias_run::execute_alias_run(
             &registry,
@@ -310,9 +312,9 @@ impl MiniAppAdapter {
             ))
         })?;
 
-        // Step 5: AliasRunValue::Rows を取り出して既存戻り値 shape に整形。
-        // wire は plain Rows path 専用 (= per-table _aliases の aggregator=None 前提)、
-        // Aggregate variant は将来 carry。
+        // Step 6: AliasRunValue::Rows を取り出して既存戻り値 shape に整形。
+        // wire は plain Rows path 専用 (Step 2 wire scope check で aggregator=None 強制済)、
+        // Aggregate variant は P3b carry (defensive で error 化)。
         let rows = match value {
             mini_app_core::alias_run::AliasRunValue::Rows(r) => r,
             mini_app_core::alias_run::AliasRunValue::Aggregate(_) => {
@@ -427,6 +429,144 @@ fn resolve_mini_app_table_dir(
         }
     };
     Ok(base.join(table))
+}
+
+/// `_global.db` (User scope) を保持する dir を解決する helper。
+/// `resolve_mini_app_table_dir` と違い、 末尾に `<table>` を join しない (= global storage は
+/// table 配下ではなく user_dir / project_dir の **直下** に置かれる)。
+///
+/// 環境変数 / default 解決規則は `resolve_mini_app_table_dir` と同型:
+///   1. `MINI_APP_USER_DIR`        (default `~/.mini-app/`)
+///   2. `$HOME/.mini-app`           (fallback)
+fn resolve_mini_app_user_dir() -> WireResult<PathBuf> {
+    match std::env::var("MINI_APP_USER_DIR") {
+        Ok(p) if !p.is_empty() => Ok(PathBuf::from(p)),
+        _ => {
+            let home = std::env::var("HOME")
+                .map_err(|_| WireError::Storage("mini-app adapter: HOME unset".to_string()))?;
+            Ok(PathBuf::from(home).join(".mini-app"))
+        }
+    }
+}
+
+/// alias record 解決 (issue 8904d808 fix): global-first、 scope=None 時のみ per-table fallback。
+///
+/// scope mapping:
+/// - `scope = Some("user")`           → `GlobalAliasStorage(user_dir).alias_get_scope(User, name)`
+///   (User scope hard target、 miss = `AliasNotFoundIn(User scope _global.db)` の literal error)
+/// - `scope = Some(<project-name>)`   → `GlobalAliasStorage(project_dir = root).alias_get_scope(Project, name)`
+///   (Project scope hard target、 `?root=<dir>` 必須 (parse 段階で弾く想定)、 miss = literal error)
+/// - `scope = None` (legacy URI)      → `GlobalAliasStorage(user_dir).alias_get(name)` →
+///   `AliasNotFound` 時のみ per-table `Store::alias_get(name)` fallback (backward compat)
+///
+/// fallback 経路 (per-table) は 旧 mini-app `<table>.db._aliases` に書かれた alias を救う互換 path。
+/// mini-app v0.12.1+ default は `_global.db` 経路 = 新規 alias は global、 旧 alias は本 fallback で救う。
+async fn resolve_alias_record(
+    table: &str,
+    scope: Option<&str>,
+    root_override: Option<&std::path::Path>,
+    alias_name: &str,
+) -> WireResult<mini_app_core::alias_storage::AliasRecord> {
+    // 1. GlobalAliasStorage を scope 軸に合わせて open
+    let (project_dir, user_dir): (Option<PathBuf>, Option<PathBuf>) = match scope {
+        Some("user") => (None, Some(resolve_mini_app_user_dir()?)),
+        Some(s) => {
+            let root = root_override.ok_or_else(|| {
+                WireError::Storage(format!(
+                    "mini-app adapter: scope='{s}' requires ?root=<dir> for _global.db resolve"
+                ))
+            })?;
+            (Some(root.to_path_buf()), None)
+        }
+        None => (None, Some(resolve_mini_app_user_dir()?)),
+    };
+    let global_storage = mini_app_core::alias_storage::GlobalAliasStorage::open(
+        project_dir.as_deref(),
+        user_dir.as_deref(),
+    )
+    .map_err(|e| {
+        WireError::Storage(format!(
+            "mini-app adapter: GlobalAliasStorage::open failed: {e}"
+        ))
+    })?;
+
+    // 2. scope 軸別 alias resolve
+    match scope {
+        Some("user") => {
+            let rec = global_storage
+                .alias_get_scope(mini_app_core::alias_storage::AliasScope::User, alias_name)
+                .await
+                .map_err(|e| {
+                    WireError::Storage(format!(
+                        "mini-app adapter: alias_get_scope(User, '{alias_name}') failed: {e}"
+                    ))
+                })?;
+            rec.ok_or_else(|| {
+                WireError::Storage(format!(
+                    "mini-app adapter: alias '{alias_name}' not found in User scope _global.db"
+                ))
+            })
+        }
+        Some(s) => {
+            let rec = global_storage
+                .alias_get_scope(
+                    mini_app_core::alias_storage::AliasScope::Project,
+                    alias_name,
+                )
+                .await
+                .map_err(|e| {
+                    WireError::Storage(format!(
+                        "mini-app adapter: alias_get_scope(Project, '{alias_name}') failed: {e}"
+                    ))
+                })?;
+            rec.ok_or_else(|| {
+                WireError::Storage(format!(
+                    "mini-app adapter: alias '{alias_name}' not found in Project scope _global.db (scope='{s}')"
+                ))
+            })
+        }
+        None => {
+            // 3. legacy URI: global → per-table fallback
+            match global_storage.alias_get(alias_name).await {
+                Ok(rec) => Ok(rec),
+                Err(mini_app_core::error::MiniAppError::AliasNotFound { .. }) => {
+                    // per-table fallback (旧 mini-app `<table>.db._aliases` 互換 path)
+                    fetch_per_table_alias_as_global(table, scope, root_override, alias_name).await
+                }
+                Err(e) => Err(WireError::Storage(format!(
+                    "mini-app adapter: GlobalAliasStorage::alias_get('{alias_name}') failed: {e}"
+                ))),
+            }
+        }
+    }
+}
+
+/// per-table `<table>.db._aliases` から alias を取得し `alias_storage::AliasRecord` (global form)
+/// に変換する legacy fallback helper。 sources=Single("") 哨戒値 + table_fallback を SDK に渡す
+/// form で `execute_alias_run` に乗せる (= 既存 backward compat path 継承)。
+async fn fetch_per_table_alias_as_global(
+    table: &str,
+    scope: Option<&str>,
+    root_override: Option<&std::path::Path>,
+    alias_name: &str,
+) -> WireResult<mini_app_core::alias_storage::AliasRecord> {
+    let (_db_path, store) = open_mini_app_store(table, scope, root_override).await?;
+    let per_table_rec = store.alias_get(alias_name).await.map_err(|e| {
+        WireError::Storage(format!(
+            "mini-app adapter: alias '{alias_name}' not found in _global.db (User scope) nor \
+             per-table {table}._aliases fallback: {e}"
+        ))
+    })?;
+    Ok(mini_app_core::alias_storage::AliasRecord {
+        name: per_table_rec.name,
+        sources: mini_app_core::aggregator::SourceSpec::Single(String::new()),
+        aggregator: None,
+        filter: per_table_rec.filter,
+        default_limit: per_table_rec.default_limit,
+        description: per_table_rec.description,
+        params_schema: per_table_rec.params_schema,
+        scope: None,
+    })
 }
 
 // ---- file adapter (std::fs) ----
