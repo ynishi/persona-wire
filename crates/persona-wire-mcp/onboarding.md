@@ -431,13 +431,59 @@ trigger surfaces:
 
 All four share one wire call; the loop / cadence lives in the Trigger.
 
-### Forward-looking — `wire_workflow_*` (P5, not yet implemented)
+### Implemented — `wire_workflow_*` (P5-a/a')
 
-`concept-2026-06-14.md` P5 carries a declarative WorkflowEngine where
-cadence (`every 7d`), trigger (`on session_close`), and action (`emit
-projection X`) can be registered as data inside wire itself, instead of
-being assembled on the caller side. Until that lands, the recipe above
-is the canonical way to express the same UCs.
+The trigger / action portion of P5 (`wire_workflow_fire` /
+`wire_workflow_check`) is implemented. A workflow is a Node carrying
+`metadata.maintained_by.event = "<event>"`; firing the event runs the
+declared action and the check tool reports coverage.
+
+```jsonc
+// MCP: wire_workflow_fire — invoke every workflow whose
+// metadata.maintained_by.event matches the given event for this persona.
+{ "event": "session_close", "persona_id": "alpha" }
+//   → { "fired": [ { "node_id": "...", "result": { "prompt_context": "..." } } ],
+//       "skipped": [ ... ] }
+
+// MCP: wire_workflow_check — coverage audit between declared maintenance
+// plans (Nodes that say "I expect to be maintained by X") and the
+// actually-wired workflow Nodes.
+{ "persona_id": "alpha" }
+//   → { "covered": N, "uncovered": N, "undeclared": N, "exempt": N,
+//       "declared_uncovered": [ ... ] }
+```
+
+The remainder of P5 (declarative cadence like `every 7d`, `wire_update`
+write-side helpers) is still carry under `concept-2026-06-14.md`; until
+those land, model time-aware cadence one layer out as described in the
+recipe above and use `wire_workflow_*` for the discrete-event trigger.
+
+## 6c. Migrating from a per-persona config layer
+
+If a project's wake / session-close skill previously read per-persona
+Management Scope from a custom config layer (e.g., a project-specific
+`[extra.persona_work]` block on persona-pack, or a side-file under
+`~/my-personas/<id>/work-config.toml`), the canonical wire-side path
+collapses to three steps:
+
+1. Register one wire Node per axis (active / handoff / toolmap /
+   priorities / tick_log / mailbox / …) — see §2. The Node holds only
+   the `source_uri`; the data still lives in its SoT (mini-app row /
+   file / outline node).
+2. Call `wire_prompt_context(persona_id="<id>")` from the wake skill —
+   it iterates the persona's registered axes, fresh-fetches each
+   `source_uri` through the Layer 6 Adapter, and returns one
+   concatenated PromptContext literal. The wake skill no longer needs a
+   per-persona Management Scope read.
+3. For session-close maintenance (handoff emit, tick log append, brief
+   refresh), register a workflow Node with
+   `metadata.maintained_by.event = "session_close"` and call
+   `wire_workflow_fire({ event: "session_close", persona_id: "<id>" })`
+   from the close skill — see §6b for the workflow tool shape.
+
+`projection_names: ["axis"]` lets the caller subset the inject (handoff
+only at close, full set at wake), so the same wiring serves both ends
+of the session without skill-side branching.
 
 ## 7. Add another persona
 
