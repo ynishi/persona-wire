@@ -16,10 +16,11 @@ use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
     wire_node_delete, wire_nodes_create_batch, wire_projection_delete, wire_prompt_context,
-    wire_query, wire_render, wire_spec_delete, wire_workflow_fire, wire_workflow_list,
-    wire_workflow_register, WireCloseInput, WireDeleteInput, WireEdgesCreateBatchInput,
-    WireInitInput, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
-    WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
+    wire_query, wire_render, wire_spec_delete, wire_workflow_check, wire_workflow_fire,
+    wire_workflow_list, wire_workflow_register, WireCloseInput, WireDeleteInput,
+    WireEdgesCreateBatchInput, WireInitInput, WireNodesCreateBatchInput, WirePromptContextInput,
+    WireQueryInput, WireRenderInput, WireWorkflowCheckInput, WireWorkflowFireInput,
+    WireWorkflowListInput, WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -214,6 +215,21 @@ pub struct WireWorkflowListParams {
     /// Defaults to `true` (= exclude disabled).
     #[serde(default)]
     pub enabled_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireWorkflowCheckParams {
+    /// Optional persona scope (filters by Node `metadata.persona`).
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// Include `exempt` nodes (`metadata.maintenance_exempt=true`) in the
+    /// response. Defaults to `false` (= count only).
+    #[serde(default)]
+    pub include_exempt: Option<bool>,
+    /// Include the full `declared_covered` list in the response. Defaults
+    /// to `false` (= count only; uncovered + undeclared are always listed).
+    #[serde(default)]
+    pub include_covered: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -767,6 +783,81 @@ impl WireServer {
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
 
+    /// Audit graph coverage — classify Nodes into declared_covered /
+    /// declared_uncovered / undeclared / exempt based on
+    /// `metadata.maintained_by` / `metadata.maintenance_exempt` and the set
+    /// of enabled workflow_def Nodes.
+    #[tool(
+        name = "wire_workflow_check",
+        description = "Audit graph coverage: classify each Node (excluding workflow_def) into declared_covered / declared_uncovered / undeclared / exempt by comparing metadata.maintained_by (declared maintenance plan) against the set of enabled workflow_def Nodes. See docs/wire-workflow-spec.md §6.5."
+    )]
+    async fn wire_workflow_check_tool(
+        &self,
+        Parameters(p): Parameters<WireWorkflowCheckParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: p.persona_id,
+                include_exempt: p.include_exempt,
+                include_covered: p.include_covered,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let declared_uncovered: Vec<serde_json::Value> = out
+            .declared_uncovered
+            .into_iter()
+            .map(|u| {
+                serde_json::json!({
+                    "node_id": u.node_id,
+                    "type": u.r#type,
+                    "persona": u.persona,
+                    "axis": u.axis,
+                    "reasons": u.reasons,
+                })
+            })
+            .collect();
+        let undeclared: Vec<serde_json::Value> = out
+            .undeclared
+            .into_iter()
+            .map(|u| {
+                serde_json::json!({
+                    "node_id": u.node_id,
+                    "type": u.r#type,
+                    "persona": u.persona,
+                    "axis": u.axis,
+                })
+            })
+            .collect();
+        let exempt: Vec<serde_json::Value> = out
+            .exempt
+            .into_iter()
+            .map(|e| serde_json::json!({ "node_id": e.node_id, "reason": e.reason }))
+            .collect();
+        let declared_covered: Vec<serde_json::Value> = out
+            .declared_covered
+            .into_iter()
+            .map(|c| {
+                serde_json::json!({
+                    "node_id": c.node_id,
+                    "axis": c.axis,
+                    "covering_workflow_id": c.covering_workflow_id,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({
+            "total_nodes": out.total_nodes,
+            "declared_covered_count": out.declared_covered_count,
+            "declared_covered": declared_covered,
+            "declared_uncovered": declared_uncovered,
+            "undeclared": undeclared,
+            "exempt": exempt,
+            "workflows_observed": out.workflows_observed,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
     /// Fire one or more Workflows. For `action.kind = emit_projection`,
     /// invokes `wire_prompt_context` for each fired workflow and includes the
     /// rendered output in the response (unless `dry_run = true`).
@@ -883,7 +974,7 @@ impl ServerHandler for WireServer {
              wire_spec_register / wire_projection_register / wire_node_delete / \
              wire_edge_delete / wire_spec_delete / wire_projection_delete / \
              wire_workflow_register / wire_workflow_list / wire_workflow_fire / \
-             wire_workflow_delete. \
+             wire_workflow_delete / wire_workflow_check. \
              For the full end-to-end onboarding walkthrough (setup → wire entries → \
              spec / projection → optional persona-pack overlay → wire_prompt_context \
              call → Skill / Prompt wiring) read the bundled resource at \

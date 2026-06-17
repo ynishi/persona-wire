@@ -1024,6 +1024,283 @@ pub fn wire_workflow_fire(
     Ok(WireWorkflowFireOutput { fired, skipped })
 }
 
+// ---- wire_workflow_check (P5-a' audit sibling) -------------------------
+//
+// `docs/wire-workflow-spec.md §6.5` — 「宣言された maintenance plan と実配線
+// (workflow_def + spec) の差分」 を audit する read tool。 onboarding §6b
+// workflow が「発火 path」 だったのに対し、 本 check は「発火 path が宣言通り
+// に張れているかの coverage」 を担う sibling。
+//
+// Coverage semantic (= 初期 scope サックリ版):
+//   workflow が Node X を cover する iff
+//     workflow.action.kind == "emit_projection"
+//   AND workflow.metadata.persona == X.metadata.persona
+//   AND X.metadata.axis ∈ workflow.action.projection_names
+//
+// = 既存 wire_prompt_context の Node iteration semantic (= persona scope
+// + axis 名 match) と整合させている。 完全な Spec 評価は将来 carry。
+//
+// Stale 検出 (verified_at / cadence 経過判定) は P5-e carry。
+
+#[derive(Debug)]
+pub struct WireWorkflowCheckInput {
+    pub persona_id: Option<String>,
+    pub include_exempt: Option<bool>,
+    pub include_covered: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UncoveredNode {
+    pub node_id: String,
+    pub r#type: String,
+    pub persona: Option<String>,
+    pub axis: Option<String>,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UndeclaredNode {
+    pub node_id: String,
+    pub r#type: String,
+    pub persona: Option<String>,
+    pub axis: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExemptNode {
+    pub node_id: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoveredNode {
+    pub node_id: String,
+    pub axis: Option<String>,
+    pub covering_workflow_id: String,
+}
+
+#[derive(Debug)]
+pub struct WireWorkflowCheckOutput {
+    pub total_nodes: usize,
+    pub declared_covered_count: usize,
+    pub declared_covered: Vec<CoveredNode>, // populated only if include_covered=true
+    pub declared_uncovered: Vec<UncoveredNode>,
+    pub undeclared: Vec<UndeclaredNode>,
+    pub exempt: Vec<ExemptNode>, // populated only if include_exempt=true
+    pub workflows_observed: usize,
+}
+
+/// Audit graph coverage: for every Node (optionally scoped to a persona),
+/// classify into declared_covered / declared_uncovered / undeclared / exempt
+/// based on `metadata.maintained_by` / `metadata.maintenance_exempt` and
+/// the set of registered workflow_def Nodes.
+pub fn wire_workflow_check(
+    input: WireWorkflowCheckInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireWorkflowCheckOutput> {
+    let include_exempt = input.include_exempt.unwrap_or(false);
+    let include_covered = input.include_covered.unwrap_or(false);
+
+    // Collect all workflows (enabled only — disabled ones don't count as coverage).
+    let wf_spec = Specification::TypeIs(WORKFLOW_TYPE.to_string());
+    let workflow_nodes = collect_matching_nodes(storage, &wf_spec)?;
+    let workflows: Vec<WorkflowSummary> = workflow_nodes
+        .into_iter()
+        .filter_map(|n| node_to_summary(n).ok())
+        .filter(|w| w.enabled)
+        .collect();
+    let workflows_observed = workflows.len();
+
+    // Collect candidate Nodes — every Node *except* workflow_def. Spec AST
+    // has no NotTypeIs leaf, so we sweep type_registry (kind=node) and union
+    // collect_matching_nodes(TypeIs=<t>) for each non-workflow type. Stable
+    // across schema growth (new types auto-picked up).
+    let mut all_nodes: Vec<Node> = Vec::new();
+    for t in storage.list_types_by_kind("node")? {
+        if t == WORKFLOW_TYPE {
+            continue;
+        }
+        all_nodes.extend(collect_matching_nodes(storage, &Specification::TypeIs(t))?);
+    }
+    // Apply optional persona scope.
+    let candidate_nodes: Vec<Node> = all_nodes
+        .into_iter()
+        .filter(|n| {
+            if let Some(p) = input.persona_id.as_ref() {
+                n.metadata.get("persona").and_then(|v| v.as_str()) == Some(p.as_str())
+            } else {
+                true
+            }
+        })
+        .collect();
+    let total_nodes = candidate_nodes.len();
+
+    let mut declared_covered: Vec<CoveredNode> = Vec::new();
+    let mut declared_covered_count: usize = 0;
+    let mut declared_uncovered: Vec<UncoveredNode> = Vec::new();
+    let mut undeclared: Vec<UndeclaredNode> = Vec::new();
+    let mut exempt: Vec<ExemptNode> = Vec::new();
+
+    for n in candidate_nodes {
+        let persona = n
+            .metadata
+            .get("persona")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let axis = n
+            .metadata
+            .get("axis")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let node_id = n.id.clone();
+        let node_type = n.r#type.clone();
+
+        // Exempt path
+        if n.metadata
+            .get("maintenance_exempt")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let reason = n
+                .metadata
+                .get("maintenance_exempt_reason")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            exempt.push(ExemptNode { node_id, reason });
+            continue;
+        }
+
+        // Declared path
+        let maintained_by = n.metadata.get("maintained_by");
+        if let Some(mb) = maintained_by {
+            let declared_event = mb.get("event").and_then(|v| v.as_str()).map(String::from);
+            let declared_workflow_ref = mb
+                .get("workflow_ref")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            // Find candidate covering workflows
+            let mut covering: Option<&WorkflowSummary> = None;
+            let mut reasons: Vec<String> = Vec::new();
+
+            for w in &workflows {
+                // Explicit workflow_ref takes priority
+                if let Some(want_ref) = declared_workflow_ref.as_ref() {
+                    if &w.id != want_ref {
+                        continue;
+                    }
+                } else if let Some(want_event) = declared_event.as_ref() {
+                    // Match via event
+                    let kind = w.trigger.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                    if kind != "on_event" {
+                        continue;
+                    }
+                    let ev = w.trigger.get("event").and_then(|v| v.as_str()).unwrap_or("");
+                    if ev != want_event {
+                        continue;
+                    }
+                } else {
+                    // No event / workflow_ref declared — cannot match
+                    continue;
+                }
+                // Check action covers this Node (= emit_projection + axis match + persona match)
+                let action_kind = w.action.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if action_kind != "emit_projection" {
+                    continue;
+                }
+                if w.persona_id != persona {
+                    continue;
+                }
+                let axis_match = w
+                    .action
+                    .get("projection_names")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .any(|a| Some(a) == axis.as_deref())
+                    })
+                    .unwrap_or(false);
+                if !axis_match {
+                    continue;
+                }
+                covering = Some(w);
+                break;
+            }
+
+            if let Some(w) = covering {
+                declared_covered_count += 1;
+                if include_covered {
+                    declared_covered.push(CoveredNode {
+                        node_id,
+                        axis,
+                        covering_workflow_id: w.id.clone(),
+                    });
+                }
+                continue;
+            }
+
+            // Diagnose why not covered.
+            if let Some(want_ref) = declared_workflow_ref.as_ref() {
+                if !workflows.iter().any(|w| &w.id == want_ref) {
+                    reasons.push(format!(
+                        "maintained_by.workflow_ref='{want_ref}' not found among enabled workflow_def"
+                    ));
+                } else {
+                    reasons.push(format!(
+                        "workflow '{want_ref}' exists but its action does not cover this Node \
+                         (persona/axis/projection_names mismatch)"
+                    ));
+                }
+            } else if let Some(want_event) = declared_event.as_ref() {
+                reasons.push(format!(
+                    "no enabled on_event workflow with trigger.event='{want_event}' covers \
+                     persona='{persona}' axis='{axis}'",
+                    persona = persona.as_deref().unwrap_or("<none>"),
+                    axis = axis.as_deref().unwrap_or("<none>")
+                ));
+            } else {
+                reasons.push(
+                    "maintained_by present but neither event nor workflow_ref declared"
+                        .to_string(),
+                );
+            }
+
+            declared_uncovered.push(UncoveredNode {
+                node_id,
+                r#type: node_type,
+                persona,
+                axis,
+                reasons,
+            });
+            continue;
+        }
+
+        // Undeclared (no maintained_by, no exempt)
+        undeclared.push(UndeclaredNode {
+            node_id,
+            r#type: node_type,
+            persona,
+            axis,
+        });
+    }
+
+    let exempt_out = if include_exempt {
+        exempt
+    } else {
+        Vec::new()
+    };
+    Ok(WireWorkflowCheckOutput {
+        total_nodes,
+        declared_covered_count,
+        declared_covered,
+        declared_uncovered,
+        undeclared,
+        exempt: exempt_out,
+        workflows_observed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1593,6 +1870,293 @@ mod tests {
         .unwrap()
         .workflows
         .is_empty());
+    }
+
+    // ---- wire_workflow_check (P5-a') tests ----
+
+    fn make_outline_node(id: &str, persona: &str, axis: &str, extra: serde_json::Value) -> Node {
+        let mut meta = serde_json::json!({
+            "persona": persona,
+            "axis": axis,
+            "source_uri": format!("file:~/test/{id}")
+        });
+        if let serde_json::Value::Object(ref mut m) = meta {
+            if let serde_json::Value::Object(extra_map) = extra {
+                for (k, v) in extra_map {
+                    m.insert(k, v);
+                }
+            }
+        }
+        Node {
+            id: id.into(),
+            r#type: "outline_node".into(),
+            sot_ref: None,
+            confidence: None,
+            applicability: None,
+            last_verified_at: None,
+            review_due: None,
+            version: 1,
+            prev_id: None,
+            metadata: meta,
+        }
+    }
+
+    fn register_emit_workflow(s: &SqliteStorage, id: &str, persona: &str, event: &str, axes: &[&str]) {
+        let axes_json = serde_json::Value::Array(
+            axes.iter().map(|a| serde_json::json!(a)).collect(),
+        );
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: id.into(),
+                persona_id: Some(persona.into()),
+                trigger: json!({"kind":"on_event","event":event}),
+                action: json!({"kind":"emit_projection","projection_names": axes_json}),
+                enabled: None,
+            },
+            s,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn workflow_check_buckets_a_node_as_declared_covered_when_workflow_matches() {
+        let s = setup();
+        register_emit_workflow(&s, "alpha.workflow.close", "alpha", "session_close", &["handoff"]);
+        s.insert_node(&make_outline_node(
+            "alpha.handoff",
+            "alpha",
+            "handoff",
+            json!({"maintained_by": {"event": "session_close"}}),
+        ))
+        .unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: Some(true),
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.total_nodes, 1);
+        assert_eq!(out.declared_covered_count, 1);
+        assert_eq!(out.declared_covered.len(), 1);
+        assert_eq!(out.declared_covered[0].covering_workflow_id, "alpha.workflow.close");
+        assert!(out.declared_uncovered.is_empty());
+        assert!(out.undeclared.is_empty());
+    }
+
+    #[test]
+    fn workflow_check_flags_declared_uncovered_when_event_has_no_matching_workflow() {
+        let s = setup();
+        // workflow exists but for a *different* event
+        register_emit_workflow(&s, "alpha.workflow.open", "alpha", "session_open", &["handoff"]);
+        s.insert_node(&make_outline_node(
+            "alpha.handoff",
+            "alpha",
+            "handoff",
+            json!({"maintained_by": {"event": "session_close"}}),
+        ))
+        .unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.declared_uncovered.len(), 1);
+        assert!(out.declared_uncovered[0].reasons[0].contains("session_close"));
+    }
+
+    #[test]
+    fn workflow_check_flags_declared_uncovered_when_workflow_ref_missing() {
+        let s = setup();
+        s.insert_node(&make_outline_node(
+            "alpha.handoff",
+            "alpha",
+            "handoff",
+            json!({"maintained_by": {"workflow_ref": "alpha.workflow.ghost"}}),
+        ))
+        .unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.declared_uncovered.len(), 1);
+        assert!(out.declared_uncovered[0].reasons[0].contains("ghost"));
+        assert!(out.declared_uncovered[0].reasons[0].contains("not found"));
+    }
+
+    #[test]
+    fn workflow_check_flags_declared_uncovered_when_axis_not_in_projection_names() {
+        let s = setup();
+        // Workflow covers axis "active", but Node declares axis "handoff"
+        register_emit_workflow(&s, "alpha.workflow.close", "alpha", "session_close", &["active"]);
+        s.insert_node(&make_outline_node(
+            "alpha.handoff",
+            "alpha",
+            "handoff",
+            json!({"maintained_by": {"event": "session_close"}}),
+        ))
+        .unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.declared_uncovered.len(), 1);
+    }
+
+    #[test]
+    fn workflow_check_classifies_node_without_maintained_by_as_undeclared() {
+        let s = setup();
+        s.insert_node(&make_outline_node(
+            "alpha.handoff",
+            "alpha",
+            "handoff",
+            json!({}),
+        ))
+        .unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.undeclared.len(), 1);
+        assert_eq!(out.undeclared[0].node_id, "alpha.handoff");
+        assert!(out.declared_covered.is_empty());
+        assert!(out.declared_uncovered.is_empty());
+    }
+
+    #[test]
+    fn workflow_check_classifies_exempt_node_and_returns_only_when_include_exempt() {
+        let s = setup();
+        s.insert_node(&make_outline_node(
+            "alpha.static_sot",
+            "alpha",
+            "static_sot",
+            json!({"maintenance_exempt": true, "maintenance_exempt_reason": "external static SoT"}),
+        ))
+        .unwrap();
+        // include_exempt = false → list empty
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert!(out.exempt.is_empty());
+        assert!(out.undeclared.is_empty());
+        // include_exempt = true → returned
+        let out2 = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: Some(true),
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out2.exempt.len(), 1);
+        assert_eq!(out2.exempt[0].reason.as_deref(), Some("external static SoT"));
+    }
+
+    #[test]
+    fn workflow_check_skips_disabled_workflows_when_resolving_coverage() {
+        let s = setup();
+        // Workflow exists but disabled
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "alpha.workflow.close".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_event","event":"session_close"}),
+                action: json!({"kind":"emit_projection","projection_names":["handoff"]}),
+                enabled: Some(false),
+            },
+            &s,
+        )
+        .unwrap();
+        s.insert_node(&make_outline_node(
+            "alpha.handoff",
+            "alpha",
+            "handoff",
+            json!({"maintained_by": {"event": "session_close"}}),
+        ))
+        .unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.workflows_observed, 0);
+        assert_eq!(out.declared_uncovered.len(), 1);
+    }
+
+    #[test]
+    fn workflow_check_persona_scope_filters_other_personas() {
+        let s = setup();
+        s.insert_node(&make_outline_node("alpha.h", "alpha", "handoff", json!({}))).unwrap();
+        s.insert_node(&make_outline_node("beta.h", "beta", "handoff", json!({}))).unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: Some("alpha".into()),
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(out.total_nodes, 1);
+        assert_eq!(out.undeclared.len(), 1);
+        assert_eq!(out.undeclared[0].node_id, "alpha.h");
+    }
+
+    #[test]
+    fn workflow_check_excludes_workflow_def_nodes_from_total() {
+        let s = setup();
+        register_emit_workflow(&s, "alpha.workflow.x", "alpha", "session_close", &["handoff"]);
+        s.insert_node(&make_outline_node(
+            "alpha.handoff",
+            "alpha",
+            "handoff",
+            json!({"maintained_by": {"event": "session_close"}}),
+        ))
+        .unwrap();
+        let out = wire_workflow_check(
+            WireWorkflowCheckInput {
+                persona_id: None,
+                include_exempt: None,
+                include_covered: None,
+            },
+            &s,
+        )
+        .unwrap();
+        // total_nodes counts the outline_node only (not the workflow_def)
+        assert_eq!(out.total_nodes, 1);
+        assert_eq!(out.workflows_observed, 1);
     }
 
     #[test]
