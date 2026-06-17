@@ -337,7 +337,7 @@ mcp__persona-wire__wire_render(projection_ref: "_active")
 
 ## TC-011: DB path resolution (env > flag > fallback)
 
-- **目的**: persona-x family 規約 (persona-work pattern) に揃えた path resolution が env / flag / OS data dir の 3 段優先順で動作することを verify
+- **目的**: env (`PERSONA_WIRE_DB`) > CLI flag (`--db`) > OS data dir (`$XDG_DATA_HOME/persona-wire/store.db` or `$HOME/.persona-wire/store.db`) の 3 段優先順 path resolution が動作することを verify
 - **前提**: `crates/persona-wire-core/src/infrastructure/storage.rs:default_db_path()` + `crates/persona-wire/src/main.rs` 内 path resolution code
 - **手順 (test 内蔵 3 case、 `tests/db_path_resolution.rs`)**:
   1. `fallback_uses_xdg_data_home_when_set`: `XDG_DATA_HOME=/tmp/test-xdg-data` set → `/tmp/test-xdg-data/persona-wire/store.db`
