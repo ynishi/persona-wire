@@ -68,9 +68,19 @@ with a `source_uri`. Add an edge from the persona node for traceability
 
 `source_uri` schemes supported today:
 
-- `mini-app://<table_name>` — opens `~/.mini-app/<table>/<table>.db` via the
-  `mini-app-core` SDK and lists all rows. `MINI_APP_USER_DIR` overrides the
-  base directory.
+- `mini-app://<table_name>[?scope=<scope>&root=<dir>&limit=<n>]` — opens
+  the table via the `mini-app-core` SDK and lists all rows. Default
+  (no `?scope=`) reads `~/.mini-app/<table>/<table>.db`
+  (`MINI_APP_USER_DIR` overrides the base directory). The optional
+  reserved keys redirect the list-all path to a hard target:
+  - `?scope=user` — User-scope `<base>/<table>/<table>.db` (no fallback;
+    `<base>` = `$MINI_APP_USER_DIR` or `~/.mini-app/`, or `?root=<dir>`).
+  - `?scope=<project-name>&root=<dir>` — Project-scope
+    `<dir>/<table>/<table>.db`. `root` is **required** when
+    `scope=<project-name>` is set (parse fails fast otherwise). Use this
+    to wire a project-scoped mini-app table that lives outside
+    `~/.mini-app/` — e.g. `mini-app://<table>?scope=<project>&root=<path-to-mini-app>`.
+  - `?limit=<n>` — caps the row count (default `1000`).
 - `mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<dir>]`
   — alias path (see §2b). Resolves through a pre-registered mini-app
   `_aliases` entry so filter / sort / limit live on the mini-app side.

@@ -753,6 +753,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_mini_app_uri_plain_form_with_scope_project_and_root() {
+        // plain form (alias 不在) + scope=<project>&root=<dir> = project-scope list-all path。
+        let spec =
+            parse_mini_app_uri("example_table?scope=example-project&root=/tmp/example-mini-app")
+                .unwrap();
+        assert_eq!(spec.table, "example_table");
+        assert_eq!(spec.scope.as_deref(), Some("example-project"));
+        assert_eq!(
+            spec.root.as_deref(),
+            Some(std::path::Path::new("/tmp/example-mini-app"))
+        );
+        assert_eq!(spec.alias, None);
+        assert_eq!(spec.limit, None);
+        assert_eq!(spec.params, serde_json::json!({}));
+    }
+
+    #[test]
+    fn parse_mini_app_uri_plain_form_scope_project_without_root_rejects() {
+        // plain form + scope=<project-name> + root 不在 = parse error (alias 経路と同様 fail-fast)
+        let r = parse_mini_app_uri("example_table?scope=example-project");
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("scope='example-project' requires ?root="),
+            "expected scope+root error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_mini_app_uri_plain_form_with_scope_user_and_limit() {
+        // plain form + scope=user + limit = User-scope list-all with limit override
+        let spec = parse_mini_app_uri("mailbox?scope=user&limit=50").unwrap();
+        assert_eq!(spec.table, "mailbox");
+        assert_eq!(spec.scope.as_deref(), Some("user"));
+        assert_eq!(spec.alias, None);
+        assert_eq!(spec.limit, Some(50));
+    }
+
+    #[test]
     fn parse_mini_app_uri_with_scope_user() {
         let spec = parse_mini_app_uri("mailbox?scope=user&alias=unread").unwrap();
         assert_eq!(spec.scope.as_deref(), Some("user"));
