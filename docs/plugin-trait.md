@@ -263,6 +263,12 @@ let registry = PluginRegistry::default_builder_for_wire()
 + caller 側 chain form に移行)。 deprecated free fn `fetch_via_adapter` も同 commit
 で削除 (0.3.0 切替予定の自然な区切り)。
 
+同 day land で `persona-wire-adapter-sqlite-x` 新規 crate (scheme `"sqlite"`、 任意
+SQLite file 対象の generic adapter、 16 test PASS) を追加。 mini-app schema convention
+非依存の rail を確保し、 Fly.io self-hosting / single-binary 配布で「mini-app 入れない」
+道を physically 保証 = §1 Platform 中立 / Infra 路線の P3b 段階での裏付け。 caller
+boot (MCP / CLI) で `MiniAppAdapter` + `SqliteAdapter` の 2 軸 chain を default 配線済。
+
 ## 7. Done Criteria
 
 - **P3a Phase 1 (本 land)**:
