@@ -7,6 +7,8 @@
 
 pub mod merger;
 pub mod persona_pack_resolver;
+pub mod plugin_registry;
+pub mod projection;
 pub mod projection_registry;
 pub mod spec_registry;
 pub mod use_cases;

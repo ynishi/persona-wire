@@ -1098,6 +1098,7 @@ name = "persona-wire-core"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "handlebars",
  "mini-app-core",
  "persona-pack",

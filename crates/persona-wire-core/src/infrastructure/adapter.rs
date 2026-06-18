@@ -24,11 +24,21 @@
 use std::path::PathBuf;
 
 use crate::domain::error::{WireError, WireResult};
+use async_trait::async_trait;
 
-/// Adapter trait. async fn を持つので async-trait の代わりに `Pin<Box<Future>>`
-/// 返却で表現 (wire-core を async-trait dep から守るため)。
-#[allow(async_fn_in_trait)]
+/// Adapter trait — Plugin 軸 1 / 3 (SoT Adapter)。
+///
+/// dyn-compatible にするため `#[async_trait]` で `Pin<Box<Future>>` 化。 PluginRegistry
+/// が `Arc<dyn Adapter>` で複数 impl を一様に保持する前提。
+#[async_trait]
 pub trait Adapter: Send + Sync {
+    /// このアダプタが扱う URI scheme 識別子 (例: `"mini-app"` / `"file"` / `"pg"`).
+    ///
+    /// `PluginRegistry` (application 層) が `source_uri` の prefix と突き合わせて
+    /// dispatch 判定に使う。 1 scheme = 1 impl が原則 (collision は registry build 時に
+    /// fail-fast)。
+    fn scheme(&self) -> &'static str;
+
     /// `source_uri` を scheme 別に解釈し、 fresh data を `serde_json::Value` で返す。
     async fn fetch(&self, source_uri: &str) -> WireResult<serde_json::Value>;
 }
@@ -137,6 +147,18 @@ fn resolve_root_path(raw: &str) -> WireResult<PathBuf> {
 
 /// Dispatch helper: `source_uri` の scheme prefix を見て対応 Adapter を呼ぶ。
 /// `wire_init` use case から 1 行で呼べる shim。
+///
+/// # Deprecated (P3a Phase 2 (b))
+///
+/// The use_case layer now dispatches through [`PluginRegistry`](crate::application::plugin_registry::PluginRegistry).
+/// New callers should obtain an adapter via `registry.adapter_for_uri(uri)`
+/// instead of going through this free function. Kept for backward compat with
+/// external callers; will be removed at the end of P3a (after Phase 3 external
+/// crate animation proof).
+#[deprecated(
+    since = "0.3.0",
+    note = "use PluginRegistry::adapter_for_uri(uri).fetch(uri) instead — see crate::application::plugin_registry"
+)]
 pub async fn fetch_via_adapter(source_uri: &str) -> WireResult<serde_json::Value> {
     if let Some(rest) = source_uri.strip_prefix("mini-app://") {
         let spec = parse_mini_app_uri(rest)?;
@@ -347,7 +369,12 @@ impl MiniAppAdapter {
     }
 }
 
+#[async_trait]
 impl Adapter for MiniAppAdapter {
+    fn scheme(&self) -> &'static str {
+        "mini-app"
+    }
+
     async fn fetch(&self, source_uri: &str) -> WireResult<serde_json::Value> {
         let rest = source_uri.strip_prefix("mini-app://").ok_or_else(|| {
             WireError::Storage(format!("mini-app adapter: bad uri: {source_uri}"))
@@ -605,7 +632,12 @@ impl FileAdapter {
     }
 }
 
+#[async_trait]
 impl Adapter for FileAdapter {
+    fn scheme(&self) -> &'static str {
+        "file"
+    }
+
     async fn fetch(&self, source_uri: &str) -> WireResult<serde_json::Value> {
         let rest = source_uri
             .strip_prefix("file://")
@@ -653,6 +685,7 @@ fn newest_child(dir: &std::path::Path) -> WireResult<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // internal tests exercise the legacy free-fn surface
 mod tests {
     use super::*;
 

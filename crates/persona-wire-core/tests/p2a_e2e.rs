@@ -7,6 +7,7 @@
 //!   public storage API, Spec registered + evaluated via Projection render,
 //!   totals confirmed via wire_doctor).
 
+use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
 };
@@ -138,6 +139,9 @@ fn wire_doctor_with_dynamic_specification_e2e() {
             spec_ref: "active_personas".into(),
             template: "Active personas ({{count}}): {{names}}".into(),
             target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         })
         .unwrap();
 
@@ -147,6 +151,7 @@ fn wire_doctor_with_dynamic_specification_e2e() {
             persona_id: "p1".into(),
         },
         &s,
+        &PluginRegistry::default_for_wire().unwrap(),
     )
     .unwrap();
     assert_eq!(init.projections.len(), 1);

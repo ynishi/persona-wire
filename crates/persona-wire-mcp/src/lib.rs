@@ -9,18 +9,20 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
-    wire_node_delete, wire_nodes_create_batch, wire_projection_delete, wire_prompt_context,
-    wire_query, wire_render, wire_spec_delete, wire_workflow_check, wire_workflow_fire,
-    wire_workflow_list, wire_workflow_register, WireCloseInput, WireDeleteInput,
-    WireEdgesCreateBatchInput, WireInitInput, WireNodesCreateBatchInput, WirePromptContextInput,
-    WireQueryInput, WireRenderInput, WireWorkflowCheckInput, WireWorkflowFireInput,
-    WireWorkflowListInput, WireWorkflowRegisterInput,
+    wire_node_delete, wire_node_update, wire_nodes_create_batch, wire_projection_delete,
+    wire_prompt_context, wire_query, wire_render, wire_spec_delete, wire_workflow_check,
+    wire_workflow_fire, wire_workflow_list, wire_workflow_register, WireCloseInput,
+    WireDeleteInput, WireEdgesCreateBatchInput, WireInitInput, WireNodeUpdateInput,
+    WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
+    WireRenderInput, WireWorkflowCheckInput, WireWorkflowFireInput, WireWorkflowListInput,
+    WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -30,6 +32,11 @@ use persona_wire_core::infrastructure::storage::SqliteStorage;
 #[derive(Clone)]
 pub struct WireServer {
     storage: Arc<Mutex<SqliteStorage>>,
+    /// P3a Phase 2 (b) — Plugin Registry built once at boot (core defaults =
+    /// FileAdapter + MiniAppAdapter + HandlebarsEngine + StaticProjection).
+    /// External plugins (e.g. `wire-adapter-pg`) are injected by replacing the
+    /// `new()` constructor with a builder-aware one in a future Phase.
+    registry: Arc<PluginRegistry>,
     /// Consumed indirectly by `#[tool_handler]`-generated code.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -39,6 +46,9 @@ impl WireServer {
     pub fn new(storage: SqliteStorage) -> Self {
         Self {
             storage: Arc::new(Mutex::new(storage)),
+            registry: Arc::new(
+                PluginRegistry::default_for_wire().expect("default plugin registry build"),
+            ),
             tool_router: Self::tool_router(),
         }
     }
@@ -177,6 +187,20 @@ pub struct WireDeleteParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireNodeUpdateParams {
+    /// Node id to update. NotFound error if the row does not exist.
+    pub id: String,
+    /// JSON object whose top-level keys patch the existing node metadata.
+    /// In `merge` mode (default), `null` values DELETE the matching key
+    /// (RFC 7396); other values overwrite. In `replace` mode the existing
+    /// metadata is fully replaced by this object.
+    pub metadata_patch: serde_json::Value,
+    /// One of `"merge"` (default) or `"replace"`.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct WirePromptContextParams {
     pub persona_id: String,
     /// Optional subset of axis names to render (e.g. `["active", "ng"]`).
@@ -271,6 +295,7 @@ impl WireServer {
                 persona_id: p.persona_id,
             },
             &s,
+            &self.registry,
         )
         .map_err(|e| e.to_string())?;
         let json = serde_json::json!({
@@ -466,6 +491,7 @@ impl WireServer {
                 projection_ref: p.projection_ref,
             },
             &s,
+            &self.registry,
         )
         .map_err(|e| e.to_string())?;
         let json = serde_json::json!({
@@ -550,9 +576,49 @@ impl WireServer {
                 spec_ref: p.spec_ref,
                 template: p.template,
                 target_form: tf,
+                // P3a Phase 2 (a) — MCP wire_projection_register surface does
+                // not yet accept the 3 new Plugin hint fields; Phase 2 (c) will
+                // extend `WireProjectionRegisterParams` to expose them.
+                template_engine: None,
+                projection_kind: None,
+                projection_config: None,
             })
             .map_err(|e| e.to_string())?;
         Ok(format!("registered projection: {}", p.name))
+    }
+
+    /// Patch a node's metadata in place (merge or replace). Use for tuning
+    /// wiring entries (e.g. appending `&limit=10` to `metadata.source_uri`)
+    /// without delete + re-create cycles that would lose the node id.
+    #[tool(
+        name = "wire_node_update",
+        description = "Patch a node's metadata in place. `mode=\"merge\"` (default) applies an RFC 7396 shallow merge — top-level keys in `metadata_patch` overwrite the existing metadata; `null` values delete the matching key. `mode=\"replace\"` swaps the metadata wholesale. Other node fields (type / sot_ref / lifecycle) are immutable on this path; delete + re-create to change them. Returns {id, mode, metadata}."
+    )]
+    async fn wire_node_update_tool(
+        &self,
+        Parameters(p): Parameters<WireNodeUpdateParams>,
+    ) -> Result<String, String> {
+        let mode_str = p.mode.as_deref().unwrap_or("merge");
+        let mode = WireNodeUpdateMode::parse(mode_str).map_err(|e| e.to_string())?;
+        // rmcp harness が top-level Value field を文字列化する挙動を吸収
+        // (mia 2026-06-14 Finding 1 sibling — `normalize_metadata` 経由で recover)。
+        let patch = normalize_metadata(Some(p.metadata_patch));
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_node_update(
+            WireNodeUpdateInput {
+                id: p.id,
+                metadata_patch: patch,
+                mode,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let json = serde_json::json!({
+            "id": out.id,
+            "mode": out.mode.as_str(),
+            "metadata": out.metadata,
+        });
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
 
     /// Delete a node by id. Edges are not cascade-deleted (wire_doctor surfaces
@@ -651,6 +717,7 @@ impl WireServer {
                 projection_names: p.projection_names,
             },
             storage,
+            &self.registry,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -902,6 +969,7 @@ impl WireServer {
                                 projection_names: Some(names),
                             },
                             self.storage.clone(),
+                            &self.registry,
                         )
                         .await
                         {

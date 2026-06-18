@@ -23,4 +23,5 @@ persona-pack = "0.4"
 toml = "0.8"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
 url.workspace = true
+async-trait.workspace = true
 

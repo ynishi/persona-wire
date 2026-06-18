@@ -6,6 +6,7 @@
 //! - `limit` / `offset` paginate the result correctly
 //! - validation: spec + spec_ref are mutually exclusive; one is required
 
+use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
 };
@@ -239,6 +240,9 @@ fn wire_render_evaluates_registered_projection_by_name() {
             spec_ref: "active_personas".into(),
             template: "Active personas ({{count}}): {{names}}".into(),
             target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         })
         .unwrap();
 
@@ -247,6 +251,7 @@ fn wire_render_evaluates_registered_projection_by_name() {
             projection_ref: "_active".into(),
         },
         &s,
+        &PluginRegistry::default_for_wire().unwrap(),
     )
     .unwrap();
 
@@ -272,6 +277,7 @@ fn wire_render_errors_on_unknown_projection_and_dangling_spec() {
             projection_ref: "does_not_exist".into(),
         },
         &s,
+        &PluginRegistry::default_for_wire().unwrap(),
     )
     .expect_err("expected not-found");
     assert!(err.to_string().to_lowercase().contains("projection"));
@@ -283,6 +289,9 @@ fn wire_render_errors_on_unknown_projection_and_dangling_spec() {
             spec_ref: "missing_spec".into(),
             template: "x".into(),
             target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         })
         .unwrap();
     let err = wire_render(
@@ -290,6 +299,7 @@ fn wire_render_errors_on_unknown_projection_and_dangling_spec() {
             projection_ref: "broken".into(),
         },
         &s,
+        &PluginRegistry::default_for_wire().unwrap(),
     )
     .expect_err("expected dangling spec_ref error");
     assert!(err

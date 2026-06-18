@@ -14,6 +14,22 @@ pub struct NamedProjection {
     /// Template body — minimal mustache-like substitution (see infrastructure::rendering).
     pub template: String,
     pub target_form: TargetForm,
+
+    // P3a Phase 2 (a) — Plugin dispatch hints. All three are `Option`; when
+    // `None`, the use-case layer falls back to PluginRegistry defaults
+    // (`template_engine` = `"handlebars"`, `projection_kind` = `"static"`,
+    // `projection_config` = `null`). Existing rows persisted before Phase 2
+    // load with `None` for all three and therefore preserve prior behaviour.
+    /// Identifier of the `TemplateEngine` impl to render with (e.g. `"handlebars"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_engine: Option<String>,
+    /// Identifier of the `Projection` impl to dispatch through (e.g. `"static"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_kind: Option<String>,
+    /// Projection-specific config (LLM endpoint, cache TTL, …). Schema is
+    /// owned by the consuming `Projection` impl; wire-core is opaque.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,20 +72,47 @@ impl<'a> ProjectionRegistry<'a> {
     }
 
     pub fn register(&self, p: &NamedProjection) -> WireResult<()> {
-        self.storage
-            .upsert_projection(&p.name, &p.spec_ref, &p.template, p.target_form.as_str())
+        // `projection_config` is stored as the canonical JSON string form so
+        // any `Value` shape round-trips losslessly through SQLite TEXT.
+        let cfg_text = match &p.projection_config {
+            Some(v) => {
+                Some(serde_json::to_string(v).map_err(|e| WireError::Storage(e.to_string()))?)
+            }
+            None => None,
+        };
+        self.storage.upsert_projection(
+            &p.name,
+            &p.spec_ref,
+            &p.template,
+            p.target_form.as_str(),
+            p.template_engine.as_deref(),
+            p.projection_kind.as_deref(),
+            cfg_text.as_deref(),
+        )
     }
 
     pub fn get(&self, name: &str) -> WireResult<Option<NamedProjection>> {
-        let Some((spec_ref, template, target_form_str)) = self.storage.get_projection(name)? else {
+        let Some((spec_ref, template, target_form_str, te, pk, pc)) =
+            self.storage.get_projection(name)?
+        else {
             return Ok(None);
         };
         let target_form = TargetForm::parse(&target_form_str)?;
+        let projection_config = match pc {
+            Some(s) => Some(
+                serde_json::from_str::<serde_json::Value>(&s)
+                    .map_err(|e| WireError::Storage(e.to_string()))?,
+            ),
+            None => None,
+        };
         Ok(Some(NamedProjection {
             name: name.to_string(),
             spec_ref,
             template,
             target_form,
+            template_engine: te,
+            projection_kind: pk,
+            projection_config,
         }))
     }
 
@@ -98,6 +141,9 @@ mod tests {
             spec_ref: "active_personas".into(),
             template: "Active personas ({{count}}): {{names}}".into(),
             target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         };
         reg.register(&p).unwrap();
         let got = reg.get("_persona_toc").unwrap().expect("exists");
@@ -114,6 +160,9 @@ mod tests {
                 spec_ref: "s".into(),
                 template: "t".into(),
                 target_form: TargetForm::Markdown,
+                template_engine: None,
+                projection_kind: None,
+                projection_config: None,
             })
             .unwrap();
         }

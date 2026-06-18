@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
 };
@@ -109,6 +110,20 @@ enum NodeOp {
     List {
         #[arg(long = "type")]
         type_: String,
+    },
+    /// Patch a node's metadata in place (merge or replace).
+    Update {
+        #[arg(long)]
+        id: String,
+        /// JSON object patch. In `merge` mode (default), top-level keys
+        /// overwrite existing metadata; `null` deletes the matching key
+        /// (RFC 7396). In `replace` mode, the existing metadata is replaced
+        /// wholesale.
+        #[arg(long = "metadata-patch")]
+        metadata_patch: String,
+        /// One of `merge` (default) or `replace`.
+        #[arg(long, default_value = "merge")]
+        mode: String,
     },
 }
 
@@ -313,6 +328,33 @@ fn main() -> Result<()> {
                 let nodes = s.list_nodes_by_type(&type_)?;
                 println!("{}", serde_json::to_string_pretty(&nodes)?);
             }
+            NodeOp::Update {
+                id,
+                metadata_patch,
+                mode,
+            } => {
+                use persona_wire_core::application::use_cases::{
+                    wire_node_update, WireNodeUpdateInput, WireNodeUpdateMode,
+                };
+                let s = SqliteStorage::open(&db)?;
+                let mode = WireNodeUpdateMode::parse(&mode)?;
+                let patch: serde_json::Value = serde_json::from_str(&metadata_patch)
+                    .context("parse --metadata-patch as JSON")?;
+                let out = wire_node_update(
+                    WireNodeUpdateInput {
+                        id,
+                        metadata_patch: patch,
+                        mode,
+                    },
+                    &s,
+                )?;
+                let json = serde_json::json!({
+                    "id": out.id,
+                    "mode": out.mode.as_str(),
+                    "metadata": out.metadata,
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            }
         },
 
         Command::Edge { op } => match op {
@@ -388,6 +430,12 @@ fn main() -> Result<()> {
                     spec_ref,
                     template,
                     target_form: tf,
+                    // P3a Phase 2 (a) — CLI `projection register` does not yet
+                    // accept the 3 new Plugin hint fields; Phase 2 (c) will
+                    // expose them via additional flags.
+                    template_engine: None,
+                    projection_kind: None,
+                    projection_config: None,
                 })?;
                 println!("registered projection: {name}");
             }
@@ -411,11 +459,13 @@ fn main() -> Result<()> {
 
         Command::WireInit(args) => {
             let s = SqliteStorage::open(&db)?;
+            let registry = PluginRegistry::default_for_wire()?;
             let out = wire_init(
                 WireInitInput {
                     persona_id: args.persona_id,
                 },
                 &s,
+                &registry,
             )?;
             for w in &out.warnings {
                 eprintln!("warn: {w}");
@@ -482,11 +532,13 @@ fn main() -> Result<()> {
 
         Command::Render(args) => {
             let s = SqliteStorage::open(&db)?;
+            let registry = PluginRegistry::default_for_wire()?;
             let out = wire_render(
                 WireRenderInput {
                     projection_ref: args.projection_ref,
                 },
                 &s,
+                &registry,
             )?;
             let json = serde_json::json!({
                 "name": out.name,

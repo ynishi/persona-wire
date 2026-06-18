@@ -1,12 +1,95 @@
 //! Use cases — orchestration of Domain + Infrastructure for wire_* flows.
 
+use crate::application::plugin_registry::PluginRegistry;
+use crate::application::projection::ProjectionInput;
 use crate::application::projection_registry::{ProjectionRegistry, TargetForm};
 use crate::application::spec_registry::SpecRegistry;
-use crate::domain::error::WireResult;
+use crate::domain::error::{WireError, WireResult};
 use crate::domain::graph::Node;
 use crate::domain::specification::Specification;
-use crate::infrastructure::rendering::render;
 use crate::infrastructure::storage::SqliteStorage;
+
+/// Resolve a `TemplateEngine` from `registry` by id, falling back to the
+/// `"handlebars"` default when `hint` is `None`. Surfaces a structured
+/// `WireError::Storage` when neither the hinted id nor the default is
+/// registered. P3a Phase 2 (b) — common helper for the 3 use_case render sites.
+fn resolve_engine_render(
+    registry: &PluginRegistry,
+    hint: Option<&str>,
+    template: &str,
+    data: &serde_json::Value,
+) -> WireResult<String> {
+    let id = hint.unwrap_or("handlebars");
+    let engine = registry
+        .engine(id)
+        .ok_or_else(|| WireError::Storage(format!("template engine '{id}' not registered")))?;
+    engine.render(template, data)
+}
+
+/// Assert that `projection_kind` is one of the synchronous-safe values
+/// (`None` or `Some("static")`). Returns a structured error otherwise so the
+/// caller surfaces a clear "use the async path" message instead of silently
+/// falling back to the engine-direct sync path.
+///
+/// P3a Phase 2 (c) — guards `wire_init` / `wire_render` (both sync). Any
+/// `projection_kind` other than `"static"` only animates through
+/// `wire_prompt_context`, which is async.
+fn assert_static_projection_kind(
+    projection_name: &str,
+    projection_kind: Option<&str>,
+) -> WireResult<()> {
+    match projection_kind {
+        None | Some("static") => Ok(()),
+        Some(other) => Err(WireError::Other(format!(
+            "projection '{projection_name}' has projection_kind '{other}' — \
+             non-static kinds require the async path; use wire_prompt_context instead"
+        ))),
+    }
+}
+
+/// Async render path that dispatches through `PluginRegistry`'s `Projection`
+/// axis. Used by `wire_prompt_context` (already async). Sync use cases
+/// short-circuit through `resolve_engine_render` after
+/// `assert_static_projection_kind`.
+///
+/// Resolution order:
+/// - `template_engine_hint` (defaults to `"handlebars"`)
+/// - `projection_kind_hint` (defaults to `"static"`)
+///
+/// Both must be registered in `registry`; missing ids surface a structured
+/// `WireError::Storage`.
+///
+/// P3a Phase 2 (c) — the actual consumer of `NamedProjection.projection_kind`.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_projection_render_async(
+    registry: &PluginRegistry,
+    template_engine_hint: Option<&str>,
+    projection_kind_hint: Option<&str>,
+    template: &str,
+    target_form: TargetForm,
+    spec_result: &serde_json::Value,
+    persona_id: Option<&str>,
+    config: Option<&serde_json::Value>,
+) -> WireResult<String> {
+    let engine_id = template_engine_hint.unwrap_or("handlebars");
+    let engine = registry.engine(engine_id).ok_or_else(|| {
+        WireError::Storage(format!("template engine '{engine_id}' not registered"))
+    })?;
+    let kind_id = projection_kind_hint.unwrap_or("static");
+    let projection = registry
+        .projection(kind_id)
+        .ok_or_else(|| WireError::Storage(format!("projection kind '{kind_id}' not registered")))?;
+    let null = serde_json::Value::Null;
+    let input = ProjectionInput {
+        spec_result,
+        template,
+        template_engine: engine.as_ref(),
+        target_form,
+        persona_id,
+        config: config.unwrap_or(&null),
+    };
+    projection.render(input).await
+}
 
 // ---- wire_init ----
 
@@ -32,7 +115,11 @@ pub struct WireInitOutput {
 /// を render する旧 path。 新規 `wire_prompt_context` (async + Adapter 経由) で
 /// Layer 6 Adapter fresh fetch 経路に置き換える前提、 本 fn は P1 contract / test
 /// 維持のため sync で残す。
-pub fn wire_init(input: WireInitInput, storage: &SqliteStorage) -> WireResult<WireInitOutput> {
+pub fn wire_init(
+    input: WireInitInput,
+    storage: &SqliteStorage,
+    registry: &PluginRegistry,
+) -> WireResult<WireInitOutput> {
     let spec_reg = SpecRegistry::new(storage);
     let proj_reg = ProjectionRegistry::new(storage);
 
@@ -69,7 +156,17 @@ pub fn wire_init(input: WireInitInput, storage: &SqliteStorage) -> WireResult<Wi
             "nodes": nodes_json,
             "persona_id": input.persona_id,
         });
-        let rendered = render(proj.target_form, &proj.template, &data);
+        // P3a Phase 2 (c) — sync path only permits `static` (or unset) kinds.
+        // Non-static kinds are async-only and surface a structured error so
+        // the caller hops to `wire_prompt_context` instead of silently
+        // falling back to engine-direct.
+        assert_static_projection_kind(&proj.name, proj.projection_kind.as_deref())?;
+        let rendered = resolve_engine_render(
+            registry,
+            proj.template_engine.as_deref(),
+            &proj.template,
+            &data,
+        )?;
         projections.push(RenderedProjection {
             name: proj.name,
             target_form: proj.target_form,
@@ -109,6 +206,18 @@ struct CollectedAxis {
     source_uri: String,
     target_form: TargetForm,
     template: String,
+    /// P3a Phase 2 (b) — NamedProjection 由来の `template_engine` を Phase 2
+    /// render dispatch まで運ぶ。 None → `"handlebars"` default。
+    template_engine: Option<String>,
+    /// P3a Phase 2 (c) — NamedProjection 由来の `projection_kind` を Phase 2
+    /// render dispatch まで運ぶ。 None → `"static"` default。
+    projection_kind: Option<String>,
+    /// P3a Phase 2 (c) — NamedProjection 由来の `projection_config` を Phase 2
+    /// render dispatch まで運ぶ (例: LLM endpoint / cache TTL)。
+    projection_config: Option<serde_json::Value>,
+    /// Projection 名 (= `<persona>.section.<axis>`)。 エラー / warning メッセージで
+    /// projection を指し示すのに使う。
+    projection_name: String,
 }
 
 /// 全 builtin axis (or projection_names で subset) を iterate し、 各 axis の
@@ -126,6 +235,7 @@ struct CollectedAxis {
 pub async fn wire_prompt_context(
     input: WirePromptContextInput,
     storage: std::sync::Arc<std::sync::Mutex<SqliteStorage>>,
+    registry: &PluginRegistry,
 ) -> WireResult<WirePromptContextOutput> {
     use crate::application::persona_pack_resolver::read_projection_overlays;
 
@@ -183,18 +293,27 @@ pub async fn wire_prompt_context(
             // base template = wire DB 動的 register `<persona>.section.<axis>` のみ。
             //                 不在は skip + warning (= builtin hardcode 廃止)。
             let projection_name = format!("{}.section.{}", input.persona_id, axis);
-            let (base_template, base_target) = match proj_reg.get(&projection_name)? {
-                Some(proj) => (proj.template, proj.target_form),
-                None => {
-                    warnings.push(format!(
-                        "axis '{axis}' has no registered projection \
-                         '{projection_name}' — axis skipped"
-                    ));
-                    continue;
-                }
-            };
+            let (base_template, base_target, base_engine, base_kind, base_config) =
+                match proj_reg.get(&projection_name)? {
+                    Some(proj) => (
+                        proj.template,
+                        proj.target_form,
+                        proj.template_engine,
+                        proj.projection_kind,
+                        proj.projection_config,
+                    ),
+                    None => {
+                        warnings.push(format!(
+                            "axis '{axis}' has no registered projection \
+                             '{projection_name}' — axis skipped"
+                        ));
+                        continue;
+                    }
+                };
 
-            // overlay merge (MergeStrategy 経由)
+            // overlay merge (MergeStrategy 経由)。 template_engine / projection_kind
+            // / projection_config は overlay schema にまだ field がないため、
+            // NamedProjection 由来をそのまま運ぶ (P3a Phase 2 (c))。
             let (final_template, final_target) = if let Some(o) = overlays.get(axis) {
                 (o.strategy.merge(&base_template, &o.template), o.target_form)
             } else {
@@ -206,20 +325,33 @@ pub async fn wire_prompt_context(
                 source_uri: source_uri.to_string(),
                 target_form: final_target,
                 template: final_template,
+                template_engine: base_engine,
+                projection_kind: base_kind,
+                projection_config: base_config,
+                projection_name: projection_name.clone(),
             });
         }
         out
     };
 
-    // ---- Phase 2: async fetch + render (Adapter 経由) ----
+    // ---- Phase 2: async fetch + render (PluginRegistry 経由) ----
     let mut projections = Vec::new();
     for c in collected {
-        let fetched = match crate::infrastructure::adapter::fetch_via_adapter(&c.source_uri).await {
-            Ok(v) => v,
-            Err(e) => {
+        let fetched = match registry.adapter_for_uri(&c.source_uri) {
+            Some(adapter) => match adapter.fetch(&c.source_uri).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warnings.push(format!(
+                        "adapter fetch failed for axis '{}' (uri={}): {e}",
+                        c.axis, c.source_uri
+                    ));
+                    serde_json::Value::Null
+                }
+            },
+            None => {
                 warnings.push(format!(
-                    "adapter fetch failed for axis '{}' (uri={}): {e}",
-                    c.axis, c.source_uri
+                    "no adapter registered for scheme in uri '{}' — axis '{}' skipped",
+                    c.source_uri, c.axis
                 ));
                 serde_json::Value::Null
             }
@@ -237,9 +369,23 @@ pub async fn wire_prompt_context(
             "entries": entries,
             "persona_id": input.persona_id,
         });
-        let rendered = render(c.target_form, &c.template, &data);
+        // P3a Phase 2 (c) — async path uses full `Projection` trait dispatch.
+        // `projection_kind` defaults to `"static"` (= `StaticProjection` =
+        // engine-direct equivalent); external Projection plugins (e.g. `llm`)
+        // animate from here without touching the sync use cases.
+        let rendered = resolve_projection_render_async(
+            registry,
+            c.template_engine.as_deref(),
+            c.projection_kind.as_deref(),
+            &c.template,
+            c.target_form,
+            &data,
+            Some(input.persona_id.as_str()),
+            c.projection_config.as_ref(),
+        )
+        .await?;
         projections.push(RenderedProjection {
-            name: format!("{}.section.{}", input.persona_id, c.axis),
+            name: c.projection_name.clone(),
             target_form: c.target_form,
             rendered,
         });
@@ -482,6 +628,7 @@ pub struct WireRenderOutput {
 pub fn wire_render(
     input: WireRenderInput,
     storage: &SqliteStorage,
+    registry: &PluginRegistry,
 ) -> WireResult<WireRenderOutput> {
     let proj = ProjectionRegistry::new(storage)
         .get(&input.projection_ref)?
@@ -516,12 +663,146 @@ pub fn wire_render(
         "names": names.join(", "),
         "nodes": nodes_json,
     });
-    let rendered = render(proj.target_form, &proj.template, &data);
+    // P3a Phase 2 (c) — sync path: non-static kinds are async-only.
+    assert_static_projection_kind(&proj.name, proj.projection_kind.as_deref())?;
+    let rendered = resolve_engine_render(
+        registry,
+        proj.template_engine.as_deref(),
+        &proj.template,
+        &data,
+    )?;
     Ok(WireRenderOutput {
         name: proj.name,
         target_form: proj.target_form,
         rendered,
     })
+}
+
+// ---- wire_node_update (P3a Phase 2 (d) — wiring-entry metadata tuning) ----
+
+/// Merge strategy for `wire_node_update`. Mirrors RFC 7396 shallow merge for
+/// `Merge` and a full replacement for `Replace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireNodeUpdateMode {
+    /// Shallow merge: top-level keys in `metadata_patch` overwrite the
+    /// corresponding keys on the existing node metadata; keys absent from the
+    /// patch are preserved. `null` values in the patch DELETE the matching key
+    /// (RFC 7396 §1).
+    Merge,
+    /// Full replacement: the existing metadata is discarded and the patch
+    /// becomes the new metadata.
+    Replace,
+}
+
+impl WireNodeUpdateMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WireNodeUpdateMode::Merge => "merge",
+            WireNodeUpdateMode::Replace => "replace",
+        }
+    }
+
+    pub fn parse(s: &str) -> WireResult<Self> {
+        match s {
+            "merge" => Ok(WireNodeUpdateMode::Merge),
+            "replace" => Ok(WireNodeUpdateMode::Replace),
+            other => Err(WireError::Other(format!(
+                "unknown wire_node_update mode '{other}' — expected 'merge' or 'replace'"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WireNodeUpdateInput {
+    pub id: String,
+    /// Object whose top-level keys are applied to the existing node metadata
+    /// per `mode`. Non-object values are rejected.
+    pub metadata_patch: serde_json::Value,
+    pub mode: WireNodeUpdateMode,
+}
+
+#[derive(Debug)]
+pub struct WireNodeUpdateOutput {
+    pub id: String,
+    pub mode: WireNodeUpdateMode,
+    /// Final metadata after the update (= what is now persisted on the node).
+    pub metadata: serde_json::Value,
+}
+
+/// Update a node's `metadata` in place.
+///
+/// `mode = Merge`: shallow top-level merge over the existing metadata
+/// (RFC 7396); `null` values in the patch delete the matching key.
+/// `mode = Replace`: full replacement of the node metadata with `metadata_patch`.
+///
+/// Other node fields (`type` / `sot_ref` / lifecycle timestamps) are NOT
+/// touched on this path — the UC backing this surface is wiring-entry tuning
+/// (`source_uri` / `axis` / `maintained_by`), which is metadata-only. To
+/// change the node type or lifecycle fields, delete + re-create.
+///
+/// Errors:
+/// - `metadata_patch` is not a JSON object
+/// - `id` does not match any existing node row (returns `WireError::NotFound`)
+pub fn wire_node_update(
+    input: WireNodeUpdateInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireNodeUpdateOutput> {
+    if !input.metadata_patch.is_object() {
+        return Err(WireError::Other(format!(
+            "wire_node_update: metadata_patch must be a JSON object, got {}",
+            type_name_of(&input.metadata_patch)
+        )));
+    }
+    let Some(existing) = storage.get_node(&input.id)? else {
+        return Err(WireError::NotFound(format!("node: {}", input.id)));
+    };
+
+    let final_metadata = match input.mode {
+        WireNodeUpdateMode::Replace => input.metadata_patch.clone(),
+        WireNodeUpdateMode::Merge => {
+            let mut base = match existing.metadata {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            if let serde_json::Value::Object(patch_obj) = &input.metadata_patch {
+                for (k, v) in patch_obj {
+                    if v.is_null() {
+                        base.remove(k);
+                    } else {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            serde_json::Value::Object(base)
+        }
+    };
+
+    let updated = storage.update_node_metadata(&input.id, &final_metadata)?;
+    if !updated {
+        // Defensive: get_node saw a row but UPDATE matched 0 — should not
+        // happen under single-writer SQLite, but surface explicitly if it does.
+        return Err(WireError::Storage(format!(
+            "wire_node_update: row '{}' vanished between read and write",
+            input.id
+        )));
+    }
+    Ok(WireNodeUpdateOutput {
+        id: input.id,
+        mode: input.mode,
+        metadata: final_metadata,
+    })
+}
+
+fn type_name_of(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 // ---- delete surface (P2c-bis、 メンテ運用必須) ----
@@ -1314,6 +1595,10 @@ mod tests {
         s
     }
 
+    fn default_registry() -> PluginRegistry {
+        PluginRegistry::default_for_wire().unwrap()
+    }
+
     fn bare_node(id: &str, type_: &str) -> Node {
         Node {
             id: id.into(),
@@ -1337,6 +1622,7 @@ mod tests {
                 persona_id: "alpha".into(),
             },
             &s,
+            &default_registry(),
         )
         .unwrap();
         assert_eq!(out.persona_id, "alpha");
@@ -1361,6 +1647,9 @@ mod tests {
                 spec_ref: "active_personas".into(),
                 template: "Personas ({{count}}): {{names}}".into(),
                 target_form: TargetForm::Prompt,
+                template_engine: None,
+                projection_kind: None,
+                projection_config: None,
             })
             .unwrap();
 
@@ -1369,6 +1658,7 @@ mod tests {
                 persona_id: "alpha".into(),
             },
             &s,
+            &default_registry(),
         )
         .unwrap();
         assert_eq!(out.projections.len(), 1);
@@ -1390,6 +1680,9 @@ mod tests {
                 spec_ref: "no_such_spec".into(),
                 template: "x".into(),
                 target_form: TargetForm::Prompt,
+                template_engine: None,
+                projection_kind: None,
+                projection_config: None,
             })
             .unwrap();
         let out = wire_init(
@@ -1397,6 +1690,7 @@ mod tests {
                 persona_id: "alpha".into(),
             },
             &s,
+            &default_registry(),
         )
         .unwrap();
         assert!(out.projections.is_empty());
@@ -1550,6 +1844,9 @@ mod tests {
                 spec_ref: "p".into(),
                 template: "x".into(),
                 target_form: TargetForm::Prompt,
+                template_engine: None,
+                projection_kind: None,
+                projection_config: None,
             })
             .unwrap();
         let out = wire_projection_delete(
@@ -2249,5 +2546,248 @@ mod tests {
         assert!(s.get_edge(&"e_ab".to_string()).unwrap().is_none());
         assert!(s.get_edge(&"e_ca".to_string()).unwrap().is_none());
         assert!(s.get_edge(&"e_bc".to_string()).unwrap().is_some());
+    }
+
+    // ---- P3a Phase 2 (c) — projection_kind dispatch ----
+
+    #[test]
+    fn wire_init_rejects_non_static_projection_kind() {
+        // P3a Phase 2 (c) — sync use_cases (wire_init / wire_render) only
+        // permit projection_kind None / Some("static"). Non-static kinds
+        // surface a structured error so the caller hops to wire_prompt_context.
+        let s = setup();
+        SpecRegistry::new(&s)
+            .register("p", &Specification::TypeIs("persona".into()))
+            .unwrap();
+        ProjectionRegistry::new(&s)
+            .register(&NamedProjection {
+                name: "async_only".into(),
+                spec_ref: "p".into(),
+                template: "x".into(),
+                target_form: TargetForm::Prompt,
+                template_engine: None,
+                projection_kind: Some("llm".into()),
+                projection_config: None,
+            })
+            .unwrap();
+        let result = wire_init(
+            WireInitInput {
+                persona_id: "alpha".into(),
+            },
+            &s,
+            &default_registry(),
+        );
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected non-static projection_kind to fail"),
+        };
+        assert!(err.contains("async_only"), "err: {err}");
+        assert!(err.contains("llm"), "err: {err}");
+        assert!(err.contains("wire_prompt_context"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_render_rejects_non_static_projection_kind() {
+        let s = setup();
+        SpecRegistry::new(&s)
+            .register("p", &Specification::TypeIs("persona".into()))
+            .unwrap();
+        ProjectionRegistry::new(&s)
+            .register(&NamedProjection {
+                name: "summarized".into(),
+                spec_ref: "p".into(),
+                template: "x".into(),
+                target_form: TargetForm::Prompt,
+                template_engine: None,
+                projection_kind: Some("cache".into()),
+                projection_config: None,
+            })
+            .unwrap();
+        let result = wire_render(
+            WireRenderInput {
+                projection_ref: "summarized".into(),
+            },
+            &s,
+            &default_registry(),
+        );
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected non-static projection_kind to fail"),
+        };
+        assert!(err.contains("summarized"), "err: {err}");
+        assert!(err.contains("cache"), "err: {err}");
+        assert!(err.contains("wire_prompt_context"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_init_accepts_explicit_static_projection_kind() {
+        // explicit Some("static") must behave identically to None (= default).
+        let s = setup();
+        s.insert_node(&bare_node("alpha", "persona")).unwrap();
+        SpecRegistry::new(&s)
+            .register("p", &Specification::TypeIs("persona".into()))
+            .unwrap();
+        ProjectionRegistry::new(&s)
+            .register(&NamedProjection {
+                name: "explicit_static".into(),
+                spec_ref: "p".into(),
+                template: "n={{count}}".into(),
+                target_form: TargetForm::Prompt,
+                template_engine: None,
+                projection_kind: Some("static".into()),
+                projection_config: None,
+            })
+            .unwrap();
+        let out = wire_init(
+            WireInitInput {
+                persona_id: "alpha".into(),
+            },
+            &s,
+            &default_registry(),
+        )
+        .unwrap();
+        assert_eq!(out.projections.len(), 1);
+        assert_eq!(out.projections[0].rendered, "n=1");
+    }
+
+    // ---- P3a Phase 2 (d) — wire_node_update ----
+
+    fn seed_wiring_node(s: &SqliteStorage, id: &str, source_uri: &str) {
+        s.insert_node(&Node {
+            id: id.into(),
+            r#type: "outline_node".into(),
+            sot_ref: None,
+            confidence: Some(1.0),
+            applicability: None,
+            last_verified_at: None,
+            review_due: None,
+            version: 1,
+            prev_id: None,
+            metadata: json!({
+                "persona": "shi",
+                "axis": "mailbox",
+                "source_uri": source_uri,
+            }),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn node_update_merge_overwrites_one_key_preserves_others() {
+        let s = setup();
+        seed_wiring_node(&s, "shi.mailbox", "mini-app://mailbox?alias=for_shi");
+        let out = wire_node_update(
+            WireNodeUpdateInput {
+                id: "shi.mailbox".into(),
+                metadata_patch: json!({
+                    "source_uri": "mini-app://mailbox?alias=for_shi&limit=10",
+                }),
+                mode: WireNodeUpdateMode::Merge,
+            },
+            &s,
+        )
+        .unwrap();
+        // source_uri が新値に、 persona / axis は維持される
+        assert_eq!(out.id, "shi.mailbox");
+        assert_eq!(out.mode, WireNodeUpdateMode::Merge);
+        assert_eq!(
+            out.metadata["source_uri"].as_str().unwrap(),
+            "mini-app://mailbox?alias=for_shi&limit=10"
+        );
+        assert_eq!(out.metadata["persona"].as_str().unwrap(), "shi");
+        assert_eq!(out.metadata["axis"].as_str().unwrap(), "mailbox");
+        // 永続化検証
+        let stored = s.get_node(&"shi.mailbox".to_string()).unwrap().unwrap();
+        assert_eq!(
+            stored.metadata["source_uri"].as_str().unwrap(),
+            "mini-app://mailbox?alias=for_shi&limit=10"
+        );
+    }
+
+    #[test]
+    fn node_update_merge_null_value_deletes_key() {
+        let s = setup();
+        seed_wiring_node(&s, "shi.tmp", "mini-app://x");
+        let out = wire_node_update(
+            WireNodeUpdateInput {
+                id: "shi.tmp".into(),
+                metadata_patch: json!({"axis": null}),
+                mode: WireNodeUpdateMode::Merge,
+            },
+            &s,
+        )
+        .unwrap();
+        // axis key は消える、 persona と source_uri は残る
+        assert!(out.metadata.get("axis").is_none());
+        assert_eq!(out.metadata["persona"].as_str().unwrap(), "shi");
+        assert_eq!(out.metadata["source_uri"].as_str().unwrap(), "mini-app://x");
+    }
+
+    #[test]
+    fn node_update_replace_swaps_metadata_wholesale() {
+        let s = setup();
+        seed_wiring_node(&s, "shi.tmp", "mini-app://x");
+        let out = wire_node_update(
+            WireNodeUpdateInput {
+                id: "shi.tmp".into(),
+                metadata_patch: json!({"only_field": 42}),
+                mode: WireNodeUpdateMode::Replace,
+            },
+            &s,
+        )
+        .unwrap();
+        // 全 key が新値で置き換わる
+        assert_eq!(out.metadata, json!({"only_field": 42}));
+        assert!(out.metadata.get("persona").is_none());
+    }
+
+    #[test]
+    fn node_update_unknown_id_returns_not_found() {
+        let s = setup();
+        let result = wire_node_update(
+            WireNodeUpdateInput {
+                id: "does.not.exist".into(),
+                metadata_patch: json!({"x": 1}),
+                mode: WireNodeUpdateMode::Merge,
+            },
+            &s,
+        );
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected NotFound"),
+        };
+        assert!(err.contains("does.not.exist"), "err: {err}");
+    }
+
+    #[test]
+    fn node_update_rejects_non_object_patch() {
+        let s = setup();
+        seed_wiring_node(&s, "shi.tmp", "mini-app://x");
+        let result = wire_node_update(
+            WireNodeUpdateInput {
+                id: "shi.tmp".into(),
+                metadata_patch: json!("not an object"),
+                mode: WireNodeUpdateMode::Merge,
+            },
+            &s,
+        );
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected non-object patch to fail"),
+        };
+        assert!(err.contains("must be a JSON object"), "err: {err}");
+    }
+
+    #[test]
+    fn node_update_mode_parse_rejects_unknown() {
+        assert_eq!(
+            WireNodeUpdateMode::parse("merge").unwrap(),
+            WireNodeUpdateMode::Merge
+        );
+        assert_eq!(
+            WireNodeUpdateMode::parse("replace").unwrap(),
+            WireNodeUpdateMode::Replace
+        );
+        assert!(WireNodeUpdateMode::parse("upsert").is_err());
     }
 }

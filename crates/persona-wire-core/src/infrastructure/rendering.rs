@@ -13,7 +13,16 @@ use handlebars::{no_escape, Handlebars};
 
 /// Render `template` against `data` using a handlebars engine.
 ///
-/// Behaviour:
+/// # Deprecated (P3a Phase 2 (b))
+///
+/// The use_case layer now resolves the engine via
+/// [`PluginRegistry`](crate::application::plugin_registry::PluginRegistry).
+/// New callers should obtain `registry.engine("handlebars")` and call
+/// `engine.render(template, data)` instead of going through this free function.
+/// Kept for backward compat with external callers; will be removed at the end
+/// of P3a (after Phase 3 external crate animation proof).
+///
+/// Behaviour (unchanged):
 /// - Scalar substitution: `{{key.path}}` looks up dotted JSON paths.
 /// - Section iteration: `{{#each list}}{{this.field}}{{/each}}` walks arrays.
 /// - Conditionals: `{{#if cond}}…{{/if}}` evaluates truthiness.
@@ -24,6 +33,10 @@ use handlebars::{no_escape, Handlebars};
 ///   syntax issues at-a-glance (never panics).
 /// - `target_form` is currently informational; future variants (e.g. JSON-array
 ///   wrapping) will dispatch on this.
+#[deprecated(
+    since = "0.3.0",
+    note = "use PluginRegistry::engine(\"handlebars\").render(template, data) instead — see crate::application::plugin_registry / crate::infrastructure::template::HandlebarsEngine"
+)]
 pub fn render(target_form: TargetForm, template: &str, data: &serde_json::Value) -> String {
     let _ = target_form;
     let mut hb = Handlebars::new();
@@ -36,6 +49,7 @@ pub fn render(target_form: TargetForm, template: &str, data: &serde_json::Value)
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // internal tests exercise the legacy free-fn surface
 mod tests {
     use super::*;
     use serde_json::json;

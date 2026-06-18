@@ -39,5 +39,8 @@ clap = { version = "4", features = ["derive"] }
 # URI parse (Adapter source_uri query string)
 url = "2"
 
+# Plugin trait (dyn-compatible async fn — Adapter / Projection)
+async-trait = "0.1"
+
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.2.1" }

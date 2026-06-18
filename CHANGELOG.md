@@ -9,7 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **P3a Plugin trait — Phase 1 (skeleton)**: three pluggable extension surfaces landed as trait + default impl pairs so external crates can extend the engine without forking core.
+  - `infrastructure::adapter::Adapter` — gains a `scheme()` method for URI-based dispatch. `FileAdapter` (`file://`) and `MiniAppAdapter` (`mini-app://`) are now registered via this trait; external crates can ship additional schemes (e.g. `pg://`, `vector://`, `http://`).
+  - `infrastructure::template::TemplateEngine` — new trait for render engines. `HandlebarsEngine` (`id = "handlebars"`) is the default impl; external engines (`jinja`, `tera`, etc.) can be added by implementing the trait.
+  - `application::projection::Projection` + `ProjectionInput<'a>` — new trait for projection kinds. `StaticProjection` (`kind = "static"`) delegates to a `TemplateEngine` and is behaviour-equivalent to the existing `wire_init` / `wire_render` / `wire_prompt_context` path; external kinds (`llm`, `code`, `cache`, …) can be plugged in.
+  - `application::plugin_registry::PluginRegistry` — immutable builder-based registry that aggregates all three axes. `build()` is fail-fast on duplicate scheme / engine id / projection kind.
+- **Public design doc** `docs/plugin-trait.md` — canonical SoT for the Plugin trait surface (rationale, three-axis surface, registry, NamedProjection schema extension carry, plugin-author walkthrough for `wire-adapter-pg`, stability policy, done-criteria).
+- **P3a Plugin trait — Phase 2 (a) — NamedProjection schema extension**: persisted dispatch hints so registered projections can opt into non-default plugins (carry: the use-case layer wiring will land in Phase 2 (b)).
+  - `NamedProjection` gains three optional fields: `template_engine: Option<String>`, `projection_kind: Option<String>`, `projection_config: Option<serde_json::Value>`. When all are `None`, behaviour is identical to v0.2.1.
+  - `projections` SQLite table gains three nullable `TEXT` columns. An idempotent migration (`PRAGMA table_info` + conditional `ALTER TABLE ADD COLUMN`) upgrades pre-existing stores on first open — no manual step required.
+  - Storage round-trip test added covering the three hint fields.
+- **P3a Phase 2 (d) — `wire_node_update` surface for in-place metadata patching**: wiring entries (e.g. `<persona>.<axis>` outline_nodes) can now have their `metadata.source_uri` (and other metadata fields) tuned without a delete + re-create cycle. Backs the "append `&limit=10` to mini-app:// source_uri" operational UC observed when `/wake mia` injected 30 mailbox rows past the useful horizon.
+  - `wire_node_update(id, metadata_patch, mode)` use_case in `application::use_cases`, with `mode = Merge` (RFC 7396 shallow merge: top-level keys overwrite; `null` deletes the matching key) and `mode = Replace` (full metadata swap). Other node fields (`type` / `sot_ref` / lifecycle) intentionally remain immutable on this path.
+  - MCP tool `wire_node_update` exposes the same surface (params: `id`, `metadata_patch`, optional `mode`).
+  - CLI `persona-wire node update --id <id> --metadata-patch <json> [--mode merge|replace]`.
+  - Storage primitive `SqliteStorage::update_node_metadata(id, &Value)` (executes `UPDATE nodes SET metadata = ?`).
+  - 6 new unit tests covering merge / null-delete / replace / NotFound / non-object patch rejection / mode parse.
+- **P3a Plugin trait — Phase 2 (c) — `projection_kind` field is now consumed by the async render path**: external Projection plugins (e.g. an LLM-driven summarizing projection) can now actually animate through `wire_prompt_context`.
+  - `wire_prompt_context` now dispatches its render through `PluginRegistry`'s `Projection` axis. Each per-axis render call goes through `projection.render(ProjectionInput { … }).await`. `projection_kind = None | Some("static")` keeps behaviour identical to v0.2.x (delegates to the registered `TemplateEngine`). `projection_kind = Some("<other>")` resolves the matching `Projection` impl from the registry.
+  - `CollectedAxis` carries the additional `projection_kind` / `projection_config` / `projection_name` hints from the registered `NamedProjection` through to render dispatch.
+  - `wire_init` / `wire_render` (both sync) now reject non-`static` `projection_kind` values with a structured `WireError::Other("… non-static kinds require the async path; use wire_prompt_context instead")`. This fails fast instead of silently dropping the kind hint on the sync path.
+  - 3 new unit tests in `use_cases.rs::tests`: non-static kind rejection on `wire_init`, non-static kind rejection on `wire_render`, explicit `Some("static")` behaves identically to `None`.
+- **P3a Plugin trait — Phase 2 (b) — use-case layer dispatches through PluginRegistry**: the three render use cases now resolve their adapter and template engine through the Plugin Registry instead of calling the legacy free functions directly. External-plugin caller surface unblocked.
+  - `PluginRegistry::default_for_wire()` convenience helper builds the standard 4-plugin set (`FileAdapter` + `MiniAppAdapter` + `HandlebarsEngine` + `StaticProjection`). Boot sites (MCP server + CLI bin + integration tests) call this when they have no external plugins to inject.
+  - `wire_init`, `wire_render`, `wire_prompt_context` each gain a `registry: &PluginRegistry` argument and dispatch adapter / engine through it. Each consults `NamedProjection.template_engine` (Phase 2 (a) field, falling back to `"handlebars"`) when resolving the engine.
+  - `WireServer` caches an `Arc<PluginRegistry>` built once at boot so every MCP tool call shares the same dispatch surface.
+  - `wire_prompt_context` now surfaces a warning when no adapter is registered for a wiring entry's `source_uri` scheme (previously surfaced via free-fn fall-through).
+
+### Deprecated
+
+- `crate::infrastructure::adapter::fetch_via_adapter` and `crate::infrastructure::rendering::render` are marked `#[deprecated(since = "0.3.0")]`. They remain functional and behaviour-equivalent (the use-case layer no longer touches them); new callers should resolve plugins through `PluginRegistry` instead. Removal is scheduled for the end of P3a, after the external `wire-adapter-pg` proof-of-concept lands in Phase 3.
+
 ### Changed
+
+- Workspace dependency `async-trait = "0.1"` added (used to make `Adapter` and `Projection` dyn-compatible so a single `PluginRegistry` can hold heterogeneous trait objects).
 
 ### Deprecated
 

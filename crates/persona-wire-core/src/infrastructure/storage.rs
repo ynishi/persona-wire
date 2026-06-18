@@ -53,6 +53,38 @@ impl SqliteStorage {
         self.conn
             .execute_batch(SCHEMA)
             .map_err(|e| WireError::Storage(e.to_string()))?;
+        // P3a Phase 2 (a) — Idempotent ALTER for pre-existing DBs that were
+        // created before the `template_engine` / `projection_kind` /
+        // `projection_config` columns were introduced on `projections`.
+        // SQLite has no `ADD COLUMN IF NOT EXISTS` — instead, probe via
+        // `PRAGMA table_info(...)` and ADD only when missing.
+        self.add_column_if_missing("projections", "template_engine", "TEXT")?;
+        self.add_column_if_missing("projections", "projection_kind", "TEXT")?;
+        self.add_column_if_missing("projections", "projection_config", "TEXT")?;
+        Ok(())
+    }
+
+    /// Add a column iff `PRAGMA table_info(<table>)` does not list it. Idempotent.
+    fn add_column_if_missing(&self, table: &str, column: &str, type_decl: &str) -> WireResult<()> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let names: Vec<String> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        if names.iter().any(|n| n == column) {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {type_decl}"),
+                [],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -154,6 +186,31 @@ impl SqliteStorage {
             )
             .optional()
             .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Replace a node's `metadata` JSON object in place.
+    ///
+    /// Returns `Ok(true)` when an existing row was updated, `Ok(false)` when
+    /// no row matched `id` (caller decides whether that is an error). The
+    /// `metadata` argument is stored verbatim — callers performing a partial
+    /// patch should compose the merged object beforehand (see
+    /// [`merge_metadata_shallow`] / [`merge_metadata_deep`]).
+    ///
+    /// P3a Phase 2 (d) — primitive backing `wire_node_update`. Other node
+    /// fields (`type` / `sot_ref` / lifecycle timestamps) intentionally stay
+    /// immutable on this path; full-row replacement is out of scope for the
+    /// metadata-patch UC (= wiring-entry `source_uri` tuning).
+    pub fn update_node_metadata(&self, id: &str, metadata: &serde_json::Value) -> WireResult<bool> {
+        let metadata_str =
+            serde_json::to_string(metadata).map_err(|e| WireError::Storage(e.to_string()))?;
+        let n = self
+            .conn
+            .execute(
+                "UPDATE nodes SET metadata = ?1 WHERE id = ?2",
+                params![metadata_str, id],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(n > 0)
     }
 
     pub fn list_nodes_by_type(&self, type_name: &str) -> WireResult<Vec<Node>> {
@@ -319,37 +376,75 @@ impl SqliteStorage {
 
     // ---- Projections ----
 
+    /// Upsert a NamedProjection row. `template_engine` / `projection_kind` /
+    /// `projection_config` are stored as NULL when `None`, signalling that the
+    /// use-case layer should fall back to `PluginRegistry` defaults at
+    /// dispatch time.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_projection(
         &self,
         name: &str,
         spec_ref: &str,
         template: &str,
         target_form: &str,
+        template_engine: Option<&str>,
+        projection_kind: Option<&str>,
+        projection_config: Option<&str>,
     ) -> WireResult<()> {
         self.conn
             .execute(
-                "INSERT INTO projections (name, spec_ref, template, target_form, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, 0) \
+                "INSERT INTO projections (name, spec_ref, template, target_form, created_at, template_engine, projection_kind, projection_config) \
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7) \
                  ON CONFLICT(name) DO UPDATE SET \
                     spec_ref = excluded.spec_ref, \
                     template = excluded.template, \
-                    target_form = excluded.target_form",
-                params![name, spec_ref, template, target_form],
+                    target_form = excluded.target_form, \
+                    template_engine = excluded.template_engine, \
+                    projection_kind = excluded.projection_kind, \
+                    projection_config = excluded.projection_config",
+                params![
+                    name,
+                    spec_ref,
+                    template,
+                    target_form,
+                    template_engine,
+                    projection_kind,
+                    projection_config
+                ],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(())
     }
 
-    pub fn get_projection(&self, name: &str) -> WireResult<Option<(String, String, String)>> {
+    /// Row tuple returned by `get_projection`:
+    /// `(spec_ref, template, target_form, template_engine?, projection_kind?, projection_config?)`.
+    /// The last three are `None` for rows persisted before P3a Phase 2 (a).
+    #[allow(clippy::type_complexity)]
+    pub fn get_projection(
+        &self,
+        name: &str,
+    ) -> WireResult<
+        Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+    > {
         self.conn
             .query_row(
-                "SELECT spec_ref, template, target_form FROM projections WHERE name = ?1",
+                "SELECT spec_ref, template, target_form, template_engine, projection_kind, projection_config FROM projections WHERE name = ?1",
                 params![name],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
@@ -575,11 +670,15 @@ CREATE TABLE IF NOT EXISTS specifications (
 );
 
 CREATE TABLE IF NOT EXISTS projections (
-    name         TEXT PRIMARY KEY,
-    spec_ref     TEXT NOT NULL,
-    template     TEXT NOT NULL,
-    target_form  TEXT NOT NULL CHECK (target_form IN ('prompt', 'markdown', 'json', 'ascii')),
-    created_at   INTEGER NOT NULL DEFAULT 0
+    name              TEXT PRIMARY KEY,
+    spec_ref          TEXT NOT NULL,
+    template          TEXT NOT NULL,
+    target_form       TEXT NOT NULL CHECK (target_form IN ('prompt', 'markdown', 'json', 'ascii')),
+    created_at        INTEGER NOT NULL DEFAULT 0,
+    -- P3a Phase 2 (a) — Plugin dispatch hints. NULL → server defaults ("handlebars" / "static" / null).
+    template_engine   TEXT,
+    projection_kind   TEXT,
+    projection_config TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -892,12 +991,18 @@ mod tests {
             "active_personas",
             "Personas: {{count}}",
             "prompt",
+            None,
+            None,
+            None,
         )
         .unwrap();
         let got = s.get_projection("_persona_toc").unwrap().expect("exists");
         assert_eq!(got.0, "active_personas");
         assert_eq!(got.1, "Personas: {{count}}");
         assert_eq!(got.2, "prompt");
+        assert!(got.3.is_none());
+        assert!(got.4.is_none());
+        assert!(got.5.is_none());
 
         assert!(s
             .list_projections()
@@ -905,7 +1010,34 @@ mod tests {
             .contains(&"_persona_toc".into()));
 
         // Bad target_form is rejected
-        assert!(s.upsert_projection("bad", "any", "tpl", "yaml").is_err());
+        assert!(s
+            .upsert_projection("bad", "any", "tpl", "yaml", None, None, None)
+            .is_err());
+    }
+
+    #[test]
+    fn projection_upsert_roundtrips_plugin_hint_fields() {
+        // P3a Phase 2 (a) — when `template_engine` / `projection_kind` /
+        // `projection_config` are persisted, they round-trip through SQLite
+        // unchanged. NULL ↔ None already covered by the test above.
+        let s = setup();
+        s.upsert_projection(
+            "with_hints",
+            "active_personas",
+            "{{count}}",
+            "prompt",
+            Some("jinja"),
+            Some("llm"),
+            Some(r#"{"endpoint":"http://localhost:8080"}"#),
+        )
+        .unwrap();
+        let got = s.get_projection("with_hints").unwrap().expect("exists");
+        assert_eq!(got.3.as_deref(), Some("jinja"));
+        assert_eq!(got.4.as_deref(), Some("llm"));
+        assert_eq!(
+            got.5.as_deref(),
+            Some(r#"{"endpoint":"http://localhost:8080"}"#)
+        );
     }
 
     #[test]

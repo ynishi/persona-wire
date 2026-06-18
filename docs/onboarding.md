@@ -10,6 +10,23 @@ can fetch it with `read_resource` without leaving the session.
 
 ## 0. Mental model in one paragraph
 
+### Where persona-wire sits
+
+persona-wire is a **routing layer** between two neighbours:
+
+- **persona-pack** — SoT for persona identity / prompt body / per-persona
+  overlay (`[extra.persona_wire.projections.<axis>]`). persona-wire reads
+  it; it does not write back.
+- **per-axis SoT** — mini-app tables (`mailbox`, `brief`, …) or files
+  under `~/my-personas/<persona>/…`. persona-wire never owns these rows;
+  it points at them via `metadata.source_uri` and fetches fresh through
+  Layer 6 Adapters at render time.
+
+The graph itself is a small SQLite store of **wiring entries + Specs +
+NamedProjections** — no persona content lives inside.
+
+### Concept
+
 The graph holds **wiring entries** — one `Node` per axis you want to expose
 for the persona. Each wiring entry carries a `metadata.source_uri` that
 points at the real Source-of-Truth (mini-app table, file, …). A
@@ -80,7 +97,9 @@ with a `source_uri`. Add an edge from the persona node for traceability
     `scope=<project-name>` is set (parse fails fast otherwise). Use this
     to wire a project-scoped mini-app table that lives outside
     `~/.mini-app/` — e.g. `mini-app://<table>?scope=<project>&root=<path-to-mini-app>`.
-  - `?limit=<n>` — caps the row count (default `1000`).
+  - `?limit=<n>` — caps the row count (default `1000`). See §2c for
+    tuning rules of thumb (mailbox-style axes ≈ `10`, latest-snapshot
+    axes ≈ `1`).
 - `mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<dir>]`
   — alias path (see §2b). Resolves through a pre-registered mini-app
   `_aliases` entry so filter / sort / limit live on the mini-app side.
@@ -98,13 +117,10 @@ when you have many axes at once.
 > `alias_create` is **global storage** (`<base>/_global.db` →
 > `_global_aliases` table), and `wire` resolves it first; legacy
 > per-table `_aliases` rows still resolve via fallback (see §URI form
-> below). Tracking issue
-> `8904d808-cff2-4788-b047-a77b21981492` (mini-app issue table) is
-> resolved on the wire side — the `scope=user` / `scope=<project>`
-> reserved keys now redirect the alias lookup to the corresponding
-> `_global.db` instead of being dead-code. The remaining wire-side
-> scope-outs (aggregator / multi-source / pattern source) are listed
-> in §Known limitations below.
+> below). The `scope=user` / `scope=<project>` reserved keys redirect
+> the alias lookup to the corresponding `_global.db`. The remaining
+> wire-side scope-outs (aggregator / multi-source / pattern source)
+> are listed in §Known limitations below.
 
 ### Step 0 — Pick a storage and register the alias
 
@@ -217,6 +233,54 @@ bare `mini-app://<table>` form and push the aggregation / cross-table
 join to the NamedProjection template (handlebars `{{#each}}` +
 `{{#if}}`) or a sibling consumer skill.
 
+## 2c. Tuning an existing wiring entry — `wire_node_update`
+
+Wiring entries are tuned in place via `wire_node_update`. The node
+`id` is preserved, so Specifications and edges referencing the entry
+stay intact — no delete + recreate dance is needed.
+
+```jsonc
+// Default: metadata_patch mode (RFC 7396 shallow merge).
+// Only the listed keys are touched; the rest of `metadata` is kept.
+{
+  "id": "alpha.mailbox",
+  "metadata_patch": {
+    "source_uri": "mini-app://mailbox?alias=for_alpha&limit=10"
+  }
+}
+
+// Optional: full replace mode for a wholesale rewrite.
+{
+  "id": "alpha.mailbox",
+  "metadata": { "persona": "alpha", "axis": "mailbox",
+                "source_uri": "mini-app://mailbox?alias=for_alpha&limit=5" },
+  "mode": "replace"
+}
+```
+
+### `&limit=<n>` tuning pattern
+
+The most common reason to call `wire_node_update` is right-sizing the
+fetch budget on an existing `source_uri`. Rules of thumb:
+
+- **Append the right separator**: if the URI already contains `?`,
+  append `&limit=N`; otherwise start the query string with `?limit=N`.
+  ```
+  mini-app://mailbox?alias=for_alpha       →  + &limit=10
+  mini-app://alpha_brief                   →  + ?limit=1
+  ```
+- **Typical values**:
+  - mailbox-style streams (newest-first inbox) → `&limit=10`
+  - latest-snapshot tables (`*_brief`, `*_state`) → `?limit=1`
+  - small tables (≲ 5 rows total) — leave the default, no `limit` needed
+  - `file://` sources — out of scope (limit applies to mini-app rows only)
+- **No alias rewiring required**: `limit` is honoured both on the bare
+  list path (`mini-app://<table>?limit=N`) and on the alias path
+  (`?alias=<name>&limit=N`). Existing aliases keep working.
+
+After the patch, run `wire_render` (or `wire_prompt_context` end-to-end)
+to confirm the row count and template output reflect the new cap.
+
 ## 3. Register the Specification and NamedProjection (template = data)
 
 There is no hard-coded projection list inside the crate. Every projection
@@ -328,10 +392,10 @@ mcp__persona-wire__wire_prompt_context({
 
 A common ask is "for this Node, surface an update-check instruction the
 next time the persona wakes / closes a session / runs a periodic tick".
-There is no dedicated `wire_workflow_*` Tool yet (carry under
-`concept-2026-06-14.md` P5 — WorkflowEngine seed + `wire_update`); until
-then the same intent composes cleanly from the existing
-Query / Projection / Adapter primitives.
+The dedicated `wire_workflow_*` Tools cover the discrete-event trigger
+(see *Implemented* below); the same intent also composes cleanly from
+the existing Query / Projection / Adapter primitives when a custom
+cadence is needed.
 
 ### Use cases
 
@@ -431,9 +495,9 @@ trigger surfaces:
 
 All four share one wire call; the loop / cadence lives in the Trigger.
 
-### Implemented — `wire_workflow_*` (P5-a/a')
+### Implemented — `wire_workflow_*`
 
-The trigger / action portion of P5 (`wire_workflow_fire` /
+The trigger / action portion (`wire_workflow_fire` /
 `wire_workflow_check`) is implemented. A workflow is a Node carrying
 `metadata.maintained_by.event = "<event>"`; firing the event runs the
 declared action and the check tool reports coverage.
@@ -453,10 +517,10 @@ declared action and the check tool reports coverage.
 //       "declared_uncovered": [ ... ] }
 ```
 
-The remainder of P5 (declarative cadence like `every 7d`, `wire_update`
-write-side helpers) is still carry under `concept-2026-06-14.md`; until
-those land, model time-aware cadence one layer out as described in the
-recipe above and use `wire_workflow_*` for the discrete-event trigger.
+Declarative cadence (e.g. `every 7d`) and write-side helpers are still
+in the carry roadmap; until those land, model time-aware cadence one
+layer out as described in the recipe above and use `wire_workflow_*`
+for the discrete-event trigger.
 
 ## 6c. Migrating from a per-persona config layer
 

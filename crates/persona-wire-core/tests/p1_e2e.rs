@@ -4,6 +4,7 @@
 //! migrate → seed → insert nodes/edges → register Specification → register
 //! NamedProjection → wire_init renders → wire_close reports.
 
+use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
 };
@@ -115,6 +116,9 @@ fn full_pipeline_init_seed_register_render_close() {
             spec_ref: "active_personas".into(),
             template: "Personas ({{count}}): {{names}}".into(),
             target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         })
         .unwrap();
     proj_reg
@@ -123,6 +127,9 @@ fn full_pipeline_init_seed_register_render_close() {
             spec_ref: "outline_review_targets".into(),
             template: "Review targets ({{count}}): {{names}}".into(),
             target_form: TargetForm::Markdown,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         })
         .unwrap();
 
@@ -132,6 +139,7 @@ fn full_pipeline_init_seed_register_render_close() {
             persona_id: "alpha".into(),
         },
         &storage,
+        &PluginRegistry::default_for_wire().unwrap(),
     )
     .expect("wire_init");
     assert_eq!(init_out.projections.len(), 2);
@@ -189,6 +197,9 @@ fn wire_init_warns_on_dangling_spec_ref() {
             spec_ref: "missing_spec".into(),
             template: "shouldn't render".into(),
             target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         })
         .unwrap();
 
@@ -197,6 +208,7 @@ fn wire_init_warns_on_dangling_spec_ref() {
             persona_id: "alpha".into(),
         },
         &storage,
+        &PluginRegistry::default_for_wire().unwrap(),
     )
     .unwrap();
     assert!(out.projections.is_empty());
@@ -240,6 +252,9 @@ fn composed_specification_roundtrips_through_storage_and_evaluates() {
             spec_ref: "personas_owned_by_alpha".into(),
             template: "{{count}} matched: {{names}}".into(),
             target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
         })
         .unwrap();
 
@@ -248,6 +263,7 @@ fn composed_specification_roundtrips_through_storage_and_evaluates() {
             persona_id: "alpha".into(),
         },
         &storage,
+        &PluginRegistry::default_for_wire().unwrap(),
     )
     .unwrap();
     assert_eq!(out.projections.len(), 1);

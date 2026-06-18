@@ -1,0 +1,265 @@
+//! PluginRegistry — 3 軸 Plugin (Adapter / TemplateEngine / Projection) を統合管理。
+//!
+//! server boot 時に register、 runtime mutation なし (= immutable after `build()`)。
+//! Plugin の物理境界は外部 crate (例: `wire-adapter-pg` / `wire-template-jinja` /
+//! `wire-projection-llm`)、 boot 側 (`persona-wire-mcp` / `persona-wire` bin) で
+//! `PluginRegistry::builder()` に流し込んで構築する。
+//!
+//! ## boot 例
+//!
+//! ```ignore
+//! use persona_wire_core::application::plugin_registry::PluginRegistry;
+//! use persona_wire_core::infrastructure::adapter::{FileAdapter, MiniAppAdapter};
+//! use persona_wire_core::infrastructure::template::HandlebarsEngine;
+//! use persona_wire_core::application::projection::StaticProjection;
+//!
+//! let registry = PluginRegistry::builder()
+//!     .with_adapter(FileAdapter)
+//!     .with_adapter(MiniAppAdapter::new(/* ... */))
+//!     .with_engine(HandlebarsEngine::new())
+//!     .with_projection(StaticProjection::new())
+//!     .build()
+//!     .expect("plugin registry build");
+//! ```
+//!
+//! P3a stage: registry skeleton + builder + lookup surface のみ。 use_cases.rs
+//! 側の dispatch 配線 (registry を引数で受け取って fetch / render を引く form)
+//! は P3a 後段で順次差し替え (現状は free fn `fetch_via_adapter` + `rendering::render`
+//! 直呼びを維持、 後方互換)。
+
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+
+use crate::application::projection::Projection;
+use crate::domain::error::{WireError, WireResult};
+use crate::infrastructure::adapter::Adapter;
+use crate::infrastructure::template::TemplateEngine;
+
+/// 3 軸 Plugin を統合管理する immutable registry。
+///
+/// build 後の mutation 不可。 dispatch は scheme / id / kind 文字列引きで O(1)。
+#[derive(Clone, Default)]
+pub struct PluginRegistry {
+    adapters: HashMap<&'static str, Arc<dyn Adapter>>,
+    engines: HashMap<&'static str, Arc<dyn TemplateEngine>>,
+    projections: HashMap<&'static str, Arc<dyn Projection>>,
+}
+
+impl fmt::Debug for PluginRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PluginRegistry")
+            .field("schemes", &self.schemes())
+            .field("engine_ids", &self.engine_ids())
+            .field("projection_kinds", &self.projection_kinds())
+            .finish()
+    }
+}
+
+impl PluginRegistry {
+    /// builder pattern 入口。
+    pub fn builder() -> PluginRegistryBuilder {
+        PluginRegistryBuilder::default()
+    }
+
+    /// Core 同梱 4 plugin を組み立てる convenience 関数。 MCP server / CLI bin /
+    /// integration test が「特に外部 Plugin を inject せず default で立てたい」 場合の
+    /// 入口。 外部 Plugin (`wire-adapter-pg` 等) を入れるときは本 helper を呼ばず
+    /// `PluginRegistry::builder()` から組み立てる。
+    ///
+    /// 同梱内訳:
+    /// - `FileAdapter` (scheme `"file"`)
+    /// - `MiniAppAdapter` (scheme `"mini-app"`)
+    /// - `HandlebarsEngine` (id `"handlebars"`)
+    /// - `StaticProjection` (kind `"static"`)
+    pub fn default_for_wire() -> WireResult<Self> {
+        use crate::application::projection::StaticProjection;
+        use crate::infrastructure::adapter::{FileAdapter, MiniAppAdapter};
+        use crate::infrastructure::template::HandlebarsEngine;
+        Self::builder()
+            .with_adapter(FileAdapter)
+            .with_adapter(MiniAppAdapter)
+            .with_engine(HandlebarsEngine::new())
+            .with_projection(StaticProjection::new())
+            .build()
+    }
+
+    /// `source_uri` の scheme prefix に該当する adapter を引く。
+    /// 未登録 scheme は `None`。
+    pub fn adapter_for_uri(&self, source_uri: &str) -> Option<&Arc<dyn Adapter>> {
+        let scheme = source_uri.split_once(':').map(|(s, _)| s)?;
+        self.adapters.get(scheme)
+    }
+
+    /// scheme literal から adapter を引く。
+    pub fn adapter(&self, scheme: &str) -> Option<&Arc<dyn Adapter>> {
+        self.adapters.get(scheme)
+    }
+
+    /// engine id から template engine を引く。
+    pub fn engine(&self, id: &str) -> Option<&Arc<dyn TemplateEngine>> {
+        self.engines.get(id)
+    }
+
+    /// kind id から projection を引く。
+    pub fn projection(&self, kind: &str) -> Option<&Arc<dyn Projection>> {
+        self.projections.get(kind)
+    }
+
+    /// 登録済 scheme 一覧 (`wire_doctor` 表示用)。
+    pub fn schemes(&self) -> Vec<&'static str> {
+        let mut v: Vec<_> = self.adapters.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// 登録済 engine id 一覧。
+    pub fn engine_ids(&self) -> Vec<&'static str> {
+        let mut v: Vec<_> = self.engines.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// 登録済 projection kind 一覧。
+    pub fn projection_kinds(&self) -> Vec<&'static str> {
+        let mut v: Vec<_> = self.projections.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+}
+
+/// builder。 同一 scheme / id / kind の重複登録は `build()` 時に fail-fast。
+#[derive(Default)]
+pub struct PluginRegistryBuilder {
+    adapters: Vec<Arc<dyn Adapter>>,
+    engines: Vec<Arc<dyn TemplateEngine>>,
+    projections: Vec<Arc<dyn Projection>>,
+}
+
+impl PluginRegistryBuilder {
+    pub fn with_adapter<A: Adapter + 'static>(mut self, adapter: A) -> Self {
+        self.adapters.push(Arc::new(adapter));
+        self
+    }
+
+    pub fn with_engine<E: TemplateEngine + 'static>(mut self, engine: E) -> Self {
+        self.engines.push(Arc::new(engine));
+        self
+    }
+
+    pub fn with_projection<P: Projection + 'static>(mut self, projection: P) -> Self {
+        self.projections.push(Arc::new(projection));
+        self
+    }
+
+    /// fail-fast: 同一 scheme / id / kind が複数あれば error。
+    pub fn build(self) -> WireResult<PluginRegistry> {
+        let mut adapters = HashMap::new();
+        for a in self.adapters {
+            let scheme = a.scheme();
+            if adapters.insert(scheme, a).is_some() {
+                return Err(WireError::Storage(format!(
+                    "plugin registry: duplicate adapter scheme `{scheme}`"
+                )));
+            }
+        }
+        let mut engines = HashMap::new();
+        for e in self.engines {
+            let id = e.id();
+            if engines.insert(id, e).is_some() {
+                return Err(WireError::Storage(format!(
+                    "plugin registry: duplicate template engine id `{id}`"
+                )));
+            }
+        }
+        let mut projections = HashMap::new();
+        for p in self.projections {
+            let kind = p.kind();
+            if projections.insert(kind, p).is_some() {
+                return Err(WireError::Storage(format!(
+                    "plugin registry: duplicate projection kind `{kind}`"
+                )));
+            }
+        }
+        Ok(PluginRegistry {
+            adapters,
+            engines,
+            projections,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::projection::StaticProjection;
+    use crate::infrastructure::adapter::{FileAdapter, MiniAppAdapter};
+    use crate::infrastructure::template::HandlebarsEngine;
+
+    #[test]
+    fn empty_registry_has_no_plugins() {
+        let reg = PluginRegistry::builder().build().unwrap();
+        assert!(reg.schemes().is_empty());
+        assert!(reg.engine_ids().is_empty());
+        assert!(reg.projection_kinds().is_empty());
+    }
+
+    #[test]
+    fn registers_all_three_axes() {
+        let reg = PluginRegistry::builder()
+            .with_adapter(FileAdapter)
+            .with_adapter(MiniAppAdapter)
+            .with_engine(HandlebarsEngine::new())
+            .with_projection(StaticProjection::new())
+            .build()
+            .unwrap();
+        assert_eq!(reg.schemes(), vec!["file", "mini-app"]);
+        assert_eq!(reg.engine_ids(), vec!["handlebars"]);
+        assert_eq!(reg.projection_kinds(), vec!["static"]);
+    }
+
+    #[test]
+    fn adapter_for_uri_dispatches_by_scheme() {
+        let reg = PluginRegistry::builder()
+            .with_adapter(FileAdapter)
+            .build()
+            .unwrap();
+        assert!(reg.adapter_for_uri("file:///tmp/x").is_some());
+        assert!(reg.adapter_for_uri("mini-app://x").is_none());
+        assert!(reg.adapter_for_uri("no-scheme").is_none());
+    }
+
+    #[test]
+    fn duplicate_scheme_fails_build() {
+        let err = PluginRegistry::builder()
+            .with_adapter(FileAdapter)
+            .with_adapter(FileAdapter)
+            .build()
+            .unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("duplicate adapter scheme"));
+        assert!(msg.contains("file"));
+    }
+
+    #[test]
+    fn duplicate_engine_fails_build() {
+        let err = PluginRegistry::builder()
+            .with_engine(HandlebarsEngine::new())
+            .with_engine(HandlebarsEngine::new())
+            .build()
+            .unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("duplicate template engine id"));
+    }
+
+    #[test]
+    fn duplicate_projection_fails_build() {
+        let err = PluginRegistry::builder()
+            .with_projection(StaticProjection::new())
+            .with_projection(StaticProjection::new())
+            .build()
+            .unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("duplicate projection kind"));
+    }
+}
