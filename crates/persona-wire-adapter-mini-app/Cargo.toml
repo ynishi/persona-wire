@@ -1,0 +1,19 @@
+[package]
+name = "persona-wire-adapter-mini-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for mini-app SoT (scheme `mini-app://`). External adapter crate split out from persona-wire-core per P3b roadmap."
+
+[dependencies]
+persona-wire-core.workspace = true
+mini-app-core = "0.12"
+serde_json.workspace = true
+async-trait.workspace = true
+url.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }

@@ -1094,6 +1094,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "persona-wire-adapter-mini-app"
+version = "0.2.2"
+dependencies = [
+ "async-trait",
+ "mini-app-core",
+ "persona-wire-core",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "persona-wire-core"
 version = "0.2.2"
 dependencies = [
