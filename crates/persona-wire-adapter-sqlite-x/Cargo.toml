@@ -1,0 +1,22 @@
+[package]
+name = "persona-wire-adapter-sqlite-x"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for raw SQLite SoT (scheme `sqlite://`). External adapter crate for arbitrary SQLite files outside the mini-app schema convention; suited for Fly.io / single-binary self-hosting where mini-app dependency is undesirable."
+
+[dependencies]
+persona-wire-core.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+url.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"

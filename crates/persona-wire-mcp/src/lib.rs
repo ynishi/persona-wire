@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use persona_wire_adapter_mini_app::MiniAppAdapter;
+use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
@@ -34,8 +35,9 @@ use persona_wire_core::infrastructure::storage::SqliteStorage;
 pub struct WireServer {
     storage: Arc<Mutex<SqliteStorage>>,
     /// P3a Phase 2 (b) / P3b — Plugin Registry built once at boot. Core defaults
-    /// = FileAdapter + HandlebarsEngine + StaticProjection; `MiniAppAdapter` is
-    /// injected from the external `persona-wire-adapter-mini-app` crate.
+    /// = FileAdapter + HandlebarsEngine + StaticProjection; `MiniAppAdapter`
+    /// (mini-app schema-aware) and `SqliteAdapter` (raw SQLite, suited for
+    /// Fly.io / single-binary self-hosting) are injected from external crates.
     /// Additional plugins (e.g. `wire-adapter-pg`) can be injected by replacing
     /// the `new()` constructor with a builder-aware one in a future Phase.
     registry: Arc<PluginRegistry>,
@@ -51,6 +53,7 @@ impl WireServer {
             registry: Arc::new(
                 PluginRegistry::default_builder_for_wire()
                     .with_adapter(MiniAppAdapter)
+                    .with_adapter(SqliteAdapter)
                     .build()
                     .expect("default plugin registry build"),
             ),

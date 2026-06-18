@@ -5,6 +5,7 @@ members = [
     "crates/persona-wire-mcp",
     "crates/persona-wire",
     "crates/persona-wire-adapter-mini-app",
+    "crates/persona-wire-adapter-sqlite-x",
 ]
 
 [workspace.package]
@@ -46,3 +47,4 @@ async-trait = "0.1"
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.2.2" }
 persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.2.2" }
+persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.2.2" }

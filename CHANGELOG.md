@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **P3b — `persona-wire-adapter-mini-app` external crate**: `MiniAppAdapter` + `mini-app://` URI parse + 関連 tests を core (`crates/persona-wire-core`) から外部 crate (`crates/persona-wire-adapter-mini-app`) へ物理 move。 core が `mini-app-core` dep に依存しない状態を達成 = single-binary OSS distribution の前提条件成立。 詳細は `docs/plugin-trait.md` §2.1 / §3 参照。
+- **P3b — `persona-wire-adapter-sqlite-x` external crate**: 任意 SQLite file に対する generic SoT adapter (scheme `sqlite://`)。 URI form `sqlite://<path>?query=<SQL>` (primary) / `?table=<name>&limit=<n>` (sugar) で SELECT 結果を JSON rows として返す。 mini-app schema convention に縛られず、 Fly.io self-hosting (P4) や volume mount 経由の single-binary 配布で「mini-app 入れなくていい」 道を確保する鉄板 adapter (issue `2b734072` P3 Plugin 候補)。
 - **`PluginRegistry::default_builder_for_wire()`**: core 同梱 plugin (FileAdapter + HandlebarsEngine + StaticProjection) を pre-populate した `PluginRegistryBuilder` を返す convenience helper。 caller は `.with_adapter(MiniAppAdapter).build()` のように外部 adapter を chain する。
 
 ### Changed

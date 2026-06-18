@@ -52,6 +52,11 @@ pub trait Adapter: Send + Sync {
   `MiniAppAdapter` (scheme `"mini-app"`) — `mini-app://<table>?scope=&root=&alias=&limit=&...`。
   P3b roadmap (issue `2b734072`) で core から分離、 single-binary OSS distribution
   前提として core が SoT backend 非依存。
+- [`persona-wire-adapter-sqlite-x`](../crates/persona-wire-adapter-sqlite-x/) →
+  `SqliteAdapter` (scheme `"sqlite"`) — `sqlite://<path>?query=<SQL>` (primary) or
+  `?table=<name>&limit=<n>` (sugar)。 任意 SQLite file に対する generic adapter
+  (mini-app schema convention に縛られない)。 Fly.io self-hosting (P4) や volume
+  mount 経由の single-binary 配布で「mini-app 入れない」 道を確保する鉄板 adapter。
 
 **外部 Plugin 例**:
 
