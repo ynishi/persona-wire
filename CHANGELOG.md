@@ -9,11 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **P3b — `persona-wire-adapter-mini-app` external crate**: `MiniAppAdapter` + `mini-app://` URI parse + 関連 tests を core (`crates/persona-wire-core`) から外部 crate (`crates/persona-wire-adapter-mini-app`) へ物理 move。 core が `mini-app-core` dep に依存しない状態を達成 = single-binary OSS distribution の前提条件成立。 詳細は `docs/plugin-trait.md` §2.1 / §3 参照。
+- **`PluginRegistry::default_builder_for_wire()`**: core 同梱 plugin (FileAdapter + HandlebarsEngine + StaticProjection) を pre-populate した `PluginRegistryBuilder` を返す convenience helper。 caller は `.with_adapter(MiniAppAdapter).build()` のように外部 adapter を chain する。
+
 ### Changed
+
+- **`PluginRegistry::default_for_wire()`** から `MiniAppAdapter` を削除 (core 同梱 3 plugin = FileAdapter + HandlebarsEngine + StaticProjection のみ)。 mini-app scheme を含めたい consumer は `default_builder_for_wire()` + `MiniAppAdapter` chain form に切替。
+- Workspace dep `persona-wire-core` / `persona-wire-mcp` の version pin を 0.2.1 → 0.2.2 に揃え (workspace.package.version と整合、 drift fix)。
+- `crates/persona-wire-mcp/onboarding.md` を `docs/onboarding.md` と sync (build.rs guard 整合)。
 
 ### Deprecated
 
 ### Removed
+
+- **`infrastructure::adapter::fetch_via_adapter`** (deprecated since 0.3.0) を削除。 後継は `PluginRegistry::adapter_for_uri(uri).fetch(uri)` (P3a Phase 2 で移行済)。
 
 ### Fixed
 

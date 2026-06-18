@@ -31,11 +31,12 @@ such renderings into a wake-time prompt context.
 
 ```
 persona-wire/
-├── Cargo.toml                  # workspace root
+├── Cargo.toml                          # workspace root
 └── crates/
-    ├── persona-wire-core/      # Domain + Application + Infrastructure (transport-agnostic)
-    ├── persona-wire-mcp/       # rmcp server library (exposes serve_stdio())
-    └── persona-wire/           # unified bin (clap CLI + `mcp` subcommand dispatch)
+    ├── persona-wire-core/              # Domain + Application + Infrastructure (transport-agnostic)
+    ├── persona-wire-adapter-mini-app/  # external Adapter for `mini-app://` SoT scheme
+    ├── persona-wire-mcp/               # rmcp server library (exposes serve_stdio())
+    └── persona-wire/                   # unified bin (clap CLI + `mcp` subcommand dispatch)
 ```
 
 ## Architecture at a glance (DDD + Hexagonal)
@@ -45,7 +46,7 @@ persona-wire/
 | Surface | `mcp` / `cli` | MCP Tool surface, clap subcommands |
 | Application | `core::application` | Use cases; `SpecRegistry` (dynamic) and `ProjectionRegistry` (named) read model; `MergeStrategy`; persona-pack overlay resolver |
 | Domain Core | `core::domain` | `Node` / `Edge`, composable [`Specification`][spec], autoversion, repository trait |
-| Infrastructure | `core::infrastructure` | SQLite storage, handlebars rendering, Layer 6 SoT Adapter (`mini-app://` via the `mini-app-core` SDK; `file:` via `std::fs`) |
+| Infrastructure | `core::infrastructure` | SQLite storage, handlebars rendering, Layer 6 SoT Adapter (`file:` via `std::fs`; `mini-app://` via the external `persona-wire-adapter-mini-app` crate) |
 
 Two complementary query axes, both first-class:
 

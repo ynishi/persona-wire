@@ -45,7 +45,13 @@ pub trait Adapter: Send + Sync {
 **Core 同梱**:
 
 - `FileAdapter` (scheme `"file"`) — `file://...` or `file:...`
-- `MiniAppAdapter` (scheme `"mini-app"`) — `mini-app://<table>?scope=&root=&alias=&limit=&...`
+
+**外部 crate 同梱** (P3b 以降、 動作実例兼任):
+
+- [`persona-wire-adapter-mini-app`](../crates/persona-wire-adapter-mini-app/) →
+  `MiniAppAdapter` (scheme `"mini-app"`) — `mini-app://<table>?scope=&root=&alias=&limit=&...`。
+  P3b roadmap (issue `2b734072`) で core から分離、 single-binary OSS distribution
+  前提として core が SoT backend 非依存。
 
 **外部 Plugin 例**:
 
@@ -141,16 +147,18 @@ impl Projection for LlmProjection {
 mutation なし (= `build()` 後は不変)。
 
 ```rust
-let registry = PluginRegistry::builder()
-    .with_adapter(FileAdapter)                  // core builtin
-    .with_adapter(MiniAppAdapter)               // core builtin
+let registry = PluginRegistry::default_builder_for_wire()  // FileAdapter + Handlebars + Static
+    .with_adapter(MiniAppAdapter)               // 外部 crate (persona-wire-adapter-mini-app)
     .with_adapter(PgAdapter::new(pool))         // 外部 crate
-    .with_engine(HandlebarsEngine::new())       // core builtin
     .with_engine(JinjaEngine::new())            // 外部 crate
-    .with_projection(StaticProjection::new())   // core builtin (default)
     .with_projection(LlmProjection::new(...))   // 外部 crate
     .build()?;                                  // 重複 scheme/id/kind は fail-fast
 ```
+
+`default_builder_for_wire()` は core 同梱 plugin (FileAdapter + HandlebarsEngine +
+StaticProjection) を pre-populate した builder を返す。 mini-app を含めたい場合は
+caller 側で `persona-wire-adapter-mini-app` を dep に入れて `.with_adapter(MiniAppAdapter)`
+を chain する (P3b 以降の標準 form)。
 
 **Lookup surface** (immutable):
 
@@ -229,12 +237,9 @@ impl Adapter for PgAdapter {
 
 ```rust
 // boot 側 (persona-wire bin の main.rs 等)
-let registry = PluginRegistry::builder()
-    .with_adapter(FileAdapter)
-    .with_adapter(MiniAppAdapter)
+let registry = PluginRegistry::default_builder_for_wire()
+    .with_adapter(MiniAppAdapter)               // 外部 crate (persona-wire-adapter-mini-app)
     .with_adapter(PgAdapter::new(pool))         // ← 外部 crate 投入
-    .with_engine(HandlebarsEngine::new())
-    .with_projection(StaticProjection::new())
     .build()?;
 ```
 
@@ -246,10 +251,12 @@ let registry = PluginRegistry::builder()
 | trait の既存 method 形を変更 / 削除 | **major bump** |
 | `ProjectionInput<'a>` に新 field 追加 (pub) | minor bump (struct 直接構築する caller は影響受けるため future-proof 化検討) |
 | 新 Plugin 軸を追加 | minor bump |
-| Core 同梱 impl (`FileAdapter` / `MiniAppAdapter` / `HandlebarsEngine` / `StaticProjection`) を crate 外に切り出し | minor bump (feature gate で後方互換) |
+| Core 同梱 impl (`FileAdapter` / `HandlebarsEngine` / `StaticProjection`) を crate 外に切り出し | minor bump (feature gate で後方互換) |
 
-P3b で `MiniAppAdapter` を `wire-adapter-mini-app` 別 crate に切り出す予定
-(default features から外す)。 同じ semver policy で minor bump。
+**P3b 実績 (2026-06-18 land)**: `MiniAppAdapter` を `persona-wire-adapter-mini-app`
+別 crate に切り出し済 (`default_for_wire()` から外し、 `default_builder_for_wire()`
++ caller 側 chain form に移行)。 deprecated free fn `fetch_via_adapter` も同 commit
+で削除 (0.3.0 切替予定の自然な区切り)。
 
 ## 7. Done Criteria
 
