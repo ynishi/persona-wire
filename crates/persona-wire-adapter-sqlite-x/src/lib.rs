@@ -162,10 +162,7 @@ impl SqliteAdapter {
             )));
         }
         let conn = rusqlite::Connection::open(&spec.path).map_err(|e| {
-            WireError::Storage(format!(
-                "sqlite adapter: open {}: {e}",
-                spec.path.display()
-            ))
+            WireError::Storage(format!("sqlite adapter: open {}: {e}", spec.path.display()))
         })?;
 
         // ---- SQL 組み立て ----
@@ -226,14 +223,11 @@ impl SqliteAdapter {
     }
 }
 
-fn column_value_to_json(
-    row: &rusqlite::Row<'_>,
-    idx: usize,
-) -> WireResult<serde_json::Value> {
+fn column_value_to_json(row: &rusqlite::Row<'_>, idx: usize) -> WireResult<serde_json::Value> {
     use rusqlite::types::ValueRef;
-    let v = row.get_ref(idx).map_err(|e| {
-        WireError::Storage(format!("sqlite adapter: get column {idx}: {e}"))
-    })?;
+    let v = row
+        .get_ref(idx)
+        .map_err(|e| WireError::Storage(format!("sqlite adapter: get column {idx}: {e}")))?;
     Ok(match v {
         ValueRef::Null => serde_json::Value::Null,
         ValueRef::Integer(i) => serde_json::Value::Number(i.into()),
@@ -335,9 +329,10 @@ mod tests {
 
     #[test]
     fn parse_sqlite_uri_query_form() {
-        let spec =
-            parse_sqlite_uri("sqlite:///var/data/x.db?query=SELECT%20*%20FROM%20foo%20WHERE%20x%3D1")
-                .unwrap();
+        let spec = parse_sqlite_uri(
+            "sqlite:///var/data/x.db?query=SELECT%20*%20FROM%20foo%20WHERE%20x%3D1",
+        )
+        .unwrap();
         match spec.query {
             SqliteQueryKind::Sql(q) => assert_eq!(q, "SELECT * FROM foo WHERE x=1"),
             _ => panic!("expected Sql variant"),
@@ -368,7 +363,10 @@ mod tests {
     fn parse_sqlite_uri_unknown_key_rejected() {
         let r = parse_sqlite_uri("sqlite:///var/data/x.db?table=foo&hocus=pocus");
         assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("unknown query key 'hocus'"));
+        assert!(r
+            .unwrap_err()
+            .to_string()
+            .contains("unknown query key 'hocus'"));
     }
 
     #[test]
@@ -420,7 +418,7 @@ mod tests {
         // photo (BLOB) は base64 string
         let photo = rows[0]["photo"].as_str().unwrap();
         assert_eq!(photo, "3q2+7w=="); // base64(DE AD BE EF) = "3q2+7w=="
-        // bob は weight / photo が NULL
+                                       // bob は weight / photo が NULL
         assert!(rows[1]["weight"].is_null());
         assert!(rows[1]["photo"].is_null());
     }
