@@ -1083,6 +1083,7 @@ dependencies = [
  "anyhow",
  "clap",
  "mini-app-core",
+ "persona-wire-adapter-mini-app",
  "persona-wire-core",
  "persona-wire-mcp",
  "serde",
@@ -1112,7 +1113,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "handlebars",
- "mini-app-core",
  "persona-pack",
  "rusqlite",
  "serde",
@@ -1129,6 +1129,7 @@ name = "persona-wire-mcp"
 version = "0.2.2"
 dependencies = [
  "anyhow",
+ "persona-wire-adapter-mini-app",
  "persona-wire-core",
  "rmcp",
  "schemars",

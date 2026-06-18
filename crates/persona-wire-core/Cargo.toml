@@ -18,7 +18,6 @@ thiserror.workspace = true
 tracing.workspace = true
 rusqlite.workspace = true
 handlebars = "6"
-mini-app-core = "0.12"
 persona-pack = "0.4"
 toml = "0.8"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }

@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use persona_wire_adapter_mini_app::MiniAppAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
@@ -459,7 +460,9 @@ fn main() -> Result<()> {
 
         Command::WireInit(args) => {
             let s = SqliteStorage::open(&db)?;
-            let registry = PluginRegistry::default_for_wire()?;
+            let registry = PluginRegistry::default_builder_for_wire()
+                .with_adapter(MiniAppAdapter)
+                .build()?;
             let out = wire_init(
                 WireInitInput {
                     persona_id: args.persona_id,
@@ -532,7 +535,9 @@ fn main() -> Result<()> {
 
         Command::Render(args) => {
             let s = SqliteStorage::open(&db)?;
-            let registry = PluginRegistry::default_for_wire()?;
+            let registry = PluginRegistry::default_builder_for_wire()
+                .with_adapter(MiniAppAdapter)
+                .build()?;
             let out = wire_render(
                 WireRenderInput {
                     projection_ref: args.projection_ref,

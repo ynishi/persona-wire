@@ -45,3 +45,4 @@ async-trait = "0.1"
 
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.2.2" }
+persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.2.2" }

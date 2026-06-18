@@ -9,15 +9,13 @@
 //!
 //! ```ignore
 //! use persona_wire_core::application::plugin_registry::PluginRegistry;
-//! use persona_wire_core::infrastructure::adapter::{FileAdapter, MiniAppAdapter};
+//! use persona_wire_core::infrastructure::adapter::FileAdapter;
 //! use persona_wire_core::infrastructure::template::HandlebarsEngine;
 //! use persona_wire_core::application::projection::StaticProjection;
+//! use persona_wire_adapter_mini_app::MiniAppAdapter;
 //!
-//! let registry = PluginRegistry::builder()
-//!     .with_adapter(FileAdapter)
-//!     .with_adapter(MiniAppAdapter::new(/* ... */))
-//!     .with_engine(HandlebarsEngine::new())
-//!     .with_projection(StaticProjection::new())
+//! let registry = PluginRegistry::default_builder_for_wire()
+//!     .with_adapter(MiniAppAdapter)
 //!     .build()
 //!     .expect("plugin registry build");
 //! ```
@@ -62,26 +60,31 @@ impl PluginRegistry {
         PluginRegistryBuilder::default()
     }
 
-    /// Core 同梱 4 plugin を組み立てる convenience 関数。 MCP server / CLI bin /
-    /// integration test が「特に外部 Plugin を inject せず default で立てたい」 場合の
-    /// 入口。 外部 Plugin (`wire-adapter-pg` 等) を入れるときは本 helper を呼ばず
-    /// `PluginRegistry::builder()` から組み立てる。
+    /// Core 同梱 plugin の builder を返す convenience 関数。
     ///
-    /// 同梱内訳:
+    /// P3b で mini-app adapter が外部 crate (`persona-wire-adapter-mini-app`) に分離
+    /// されたため、 consumer (`persona-wire-mcp` / `persona-wire` bin) は本 builder に
+    /// `.with_adapter(MiniAppAdapter)` を chain して使う。
+    ///
+    /// 同梱内訳 (core):
     /// - `FileAdapter` (scheme `"file"`)
-    /// - `MiniAppAdapter` (scheme `"mini-app"`)
     /// - `HandlebarsEngine` (id `"handlebars"`)
     /// - `StaticProjection` (kind `"static"`)
-    pub fn default_for_wire() -> WireResult<Self> {
+    pub fn default_builder_for_wire() -> PluginRegistryBuilder {
         use crate::application::projection::StaticProjection;
-        use crate::infrastructure::adapter::{FileAdapter, MiniAppAdapter};
+        use crate::infrastructure::adapter::FileAdapter;
         use crate::infrastructure::template::HandlebarsEngine;
         Self::builder()
             .with_adapter(FileAdapter)
-            .with_adapter(MiniAppAdapter)
             .with_engine(HandlebarsEngine::new())
             .with_projection(StaticProjection::new())
-            .build()
+    }
+
+    /// Core 同梱 plugin のみで registry を build する shortcut。
+    /// mini-app scheme を含めたい場合は [`default_builder_for_wire`] を使い、
+    /// caller 側で `MiniAppAdapter` を chain すること。
+    pub fn default_for_wire() -> WireResult<Self> {
+        Self::default_builder_for_wire().build()
     }
 
     /// `source_uri` の scheme prefix に該当する adapter を引く。
@@ -193,7 +196,7 @@ impl PluginRegistryBuilder {
 mod tests {
     use super::*;
     use crate::application::projection::StaticProjection;
-    use crate::infrastructure::adapter::{FileAdapter, MiniAppAdapter};
+    use crate::infrastructure::adapter::FileAdapter;
     use crate::infrastructure::template::HandlebarsEngine;
 
     #[test]
@@ -208,12 +211,19 @@ mod tests {
     fn registers_all_three_axes() {
         let reg = PluginRegistry::builder()
             .with_adapter(FileAdapter)
-            .with_adapter(MiniAppAdapter)
             .with_engine(HandlebarsEngine::new())
             .with_projection(StaticProjection::new())
             .build()
             .unwrap();
-        assert_eq!(reg.schemes(), vec!["file", "mini-app"]);
+        assert_eq!(reg.schemes(), vec!["file"]);
+        assert_eq!(reg.engine_ids(), vec!["handlebars"]);
+        assert_eq!(reg.projection_kinds(), vec!["static"]);
+    }
+
+    #[test]
+    fn default_builder_for_wire_has_core_plugins_only() {
+        let reg = PluginRegistry::default_builder_for_wire().build().unwrap();
+        assert_eq!(reg.schemes(), vec!["file"]);
         assert_eq!(reg.engine_ids(), vec!["handlebars"]);
         assert_eq!(reg.projection_kinds(), vec!["static"]);
     }

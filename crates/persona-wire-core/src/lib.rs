@@ -69,13 +69,14 @@
 //!     dotted paths) and emits a visible `{{render-error: …}}` prefix on
 //!     parse failure instead of panicking or silently fallback-ing.
 //!   - [`infrastructure::adapter`] — Layer 6 **SoT Adapter**. Each axis
-//!     wiring entry carries a `metadata.source_uri`; the dispatcher
-//!     [`fetch_via_adapter`](infrastructure::adapter::fetch_via_adapter)
-//!     routes by scheme prefix:
-//!     - `mini-app://<table>` → `MiniAppAdapter` (opens the table via the
-//!       `mini-app-core` SDK and returns the rows).
+//!     wiring entry carries a `metadata.source_uri`; the
+//!     [`PluginRegistry`](application::plugin_registry::PluginRegistry)
+//!     dispatches by scheme prefix to an `Arc<dyn Adapter>`:
 //!     - `file://<path>` / `file:<path>` → `FileAdapter` (`std::fs` with
 //!       `~/` expansion; for a directory it picks the newest mtime child).
+//!     - `mini-app://<table>` → `MiniAppAdapter` (external crate
+//!       `persona-wire-adapter-mini-app`; consumer wires it on top of
+//!       [`PluginRegistry::default_builder_for_wire`](application::plugin_registry::PluginRegistry::default_builder_for_wire)).
 //!
 //! ## Two query axes
 //!

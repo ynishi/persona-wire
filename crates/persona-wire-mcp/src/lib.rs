@@ -9,6 +9,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use persona_wire_adapter_mini_app::MiniAppAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
     NamedProjection, ProjectionRegistry, TargetForm,
@@ -32,10 +33,11 @@ use persona_wire_core::infrastructure::storage::SqliteStorage;
 #[derive(Clone)]
 pub struct WireServer {
     storage: Arc<Mutex<SqliteStorage>>,
-    /// P3a Phase 2 (b) — Plugin Registry built once at boot (core defaults =
-    /// FileAdapter + MiniAppAdapter + HandlebarsEngine + StaticProjection).
-    /// External plugins (e.g. `wire-adapter-pg`) are injected by replacing the
-    /// `new()` constructor with a builder-aware one in a future Phase.
+    /// P3a Phase 2 (b) / P3b — Plugin Registry built once at boot. Core defaults
+    /// = FileAdapter + HandlebarsEngine + StaticProjection; `MiniAppAdapter` is
+    /// injected from the external `persona-wire-adapter-mini-app` crate.
+    /// Additional plugins (e.g. `wire-adapter-pg`) can be injected by replacing
+    /// the `new()` constructor with a builder-aware one in a future Phase.
     registry: Arc<PluginRegistry>,
     /// Consumed indirectly by `#[tool_handler]`-generated code.
     #[allow(dead_code)]
@@ -47,7 +49,10 @@ impl WireServer {
         Self {
             storage: Arc::new(Mutex::new(storage)),
             registry: Arc::new(
-                PluginRegistry::default_for_wire().expect("default plugin registry build"),
+                PluginRegistry::default_builder_for_wire()
+                    .with_adapter(MiniAppAdapter)
+                    .build()
+                    .expect("default plugin registry build"),
             ),
             tool_router: Self::tool_router(),
         }
