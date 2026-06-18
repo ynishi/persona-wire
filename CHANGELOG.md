@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.2.1] - 2026-06-18
+
+### Added
+
+### Changed
+
+- **`docs/onboarding.md §6b`** rewritten — the “Forward-looking — `wire_workflow_*` (P5, not yet implemented)” framing is replaced with “Implemented — `wire_workflow_*` (P5-a/a')” now that both tools ship. The section gains a generic JSON example for `wire_workflow_fire` (event-fanout) and `wire_workflow_check` (coverage audit). Declarative cadence (`every 7d`) and `wire_update` remain carry under `concept-2026-06-14.md`.
+- **`docs/onboarding.md §6c`** new section — “Migrating from a per-persona config layer”. A generic three-step recipe (register one wire Node per axis → call `wire_prompt_context` from wake → fire `wire_workflow_fire` from close), plus a `projection_names: ["axis"]` subset note for wake-vs-close inject sizing. Uses generic placeholder paths only (e.g. `~/my-personas/<id>/work-config.toml`).
+- **`docs/runbook-verify.md §TC-011`** describes the path-resolution priority generically (`env (PERSONA_WIRE_DB) > CLI flag (--db) > OS data dir (XDG_DATA_HOME / HOME)`) instead of referencing an external pattern label, so the runbook stays self-contained.
+- **`crates/persona-wire-mcp/onboarding.md`** synced with the canonical `docs/onboarding.md` (the `build.rs` sync-drift guard rejects drift at dev-build time).
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [0.2.0] - 2026-06-17
 
 ### Added
@@ -116,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Internal token / persona-literal leak removal**: test fixtures, docs, and README were sanitised of persona-specific identifiers, internal issue IDs, and project labels. Each commit in the 7-commit chain leading to this release was verified by `publish-checker` + `secret-pre-commit-checker` + `content-hygiene-pre-commit-checker` (4-gate sweep).
 
-[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ynishi/persona-wire/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ynishi/persona-wire/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ynishi/persona-wire/compare/441a727...v0.1.0

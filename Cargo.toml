@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
@@ -40,4 +40,4 @@ clap = { version = "4", features = ["derive"] }
 url = "2"
 
 # Intra-workspace
-persona-wire-core = { path = "crates/persona-wire-core", version = "0.2.0" }
+persona-wire-core = { path = "crates/persona-wire-core", version = "0.2.1" }
