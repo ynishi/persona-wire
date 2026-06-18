@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.2.2] - 2026-06-18
+
+### Added
+
 - **P3a Plugin trait — Phase 1 (skeleton)**: three pluggable extension surfaces landed as trait + default impl pairs so external crates can extend the engine without forking core.
   - `infrastructure::adapter::Adapter` — gains a `scheme()` method for URI-based dispatch. `FileAdapter` (`file://`) and `MiniAppAdapter` (`mini-app://`) are now registered via this trait; external crates can ship additional schemes (e.g. `pg://`, `vector://`, `http://`).
   - `infrastructure::template::TemplateEngine` — new trait for render engines. `HandlebarsEngine` (`id = "handlebars"`) is the default impl; external engines (`jinja`, `tera`, etc.) can be added by implementing the trait.
