@@ -103,7 +103,7 @@ fn wire_doctor_reports_orphan_zero_when_every_node_is_touched() {
     assert!(doctor.report_markdown.contains("# wire_doctor report"));
     assert!(doctor
         .report_markdown
-        .contains("orphan nodes (0 in + 0 out): 0"));
+        .contains("orphan nodes (no edges, not self-attached): 0"));
 }
 
 #[test]

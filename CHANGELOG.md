@@ -11,11 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`graph_scan_summary` orphan 判定 refine** — `metadata.source_uri` を持つ wiring entry (= Layer 6 Adapter 経由で外部 SoT を fetch する node) と `metadata.maintenance_exempt: true` を持つ node を orphan カウントから除外。 onboarding §2 「Add an edge ... optional but recommended」 規約と整合 (edges は traceability 目的の optional な装飾、 wiring entry は単体で `source_uri` 経由 fetch 動作する)。 report literal も「`orphan nodes (no edges, not self-attached): N`」 に refine、 意味を明示。 影響範囲: `wire_doctor` + `wire_close` 両方の `orphan_node_count` 数値が refine (= edges optional 規約下で全件 orphan 報告される false-positive 除去)。
+
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+
+- **`wire_doctor` false-positive orphan flag** (issue `15a46ce6`) — wiring entry (= `metadata.source_uri` を持つ outline_node) が edge 不在で orphan 判定されていた drift を fix。 2026-06-19 shi dogfood session で 41/41 全件 orphan flag が再現、 実体は wire_query / wire_prompt_context で正常 fetch 動作確認済の構造だった。 上記 `graph_scan_summary` refine で構造除去、 dogfood 使用者が diagnostic シグナル誤読する 2 次事故源を解消。 regression test: `graph_scan_excludes_self_attached_wiring_from_orphans`。
 
 ### Security
 

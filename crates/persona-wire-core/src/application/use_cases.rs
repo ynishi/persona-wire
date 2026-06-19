@@ -429,9 +429,37 @@ pub struct GraphScanSummary {
     pub total_edge_count: usize,
 }
 
-/// Walk every node type and tally totals + orphan count (nodes with no
-/// in- or out-edges). Shared scan primitive for `wire_close` / `wire_doctor`;
-/// P3 daemon will extend this with stale / asymmetric / high-fanout checks.
+/// A wiring entry is "self-attached" — and therefore not an orphan — when it
+/// carries either a `metadata.source_uri` (it points at an external SoT via
+/// Layer 6 Adapter and stands alone without edges; per onboarding §2 edges
+/// are "optional but recommended") or `metadata.maintenance_exempt = true`
+/// (the node is explicitly opted-out of session-cyclic maintenance, e.g.
+/// `priorities` / `tick_log` / `journal` axes).
+///
+/// Without this guard, `wire_doctor` reports every wiring entry as orphan
+/// (issue `15a46ce6` — 41/41 false-positive on the shi dogfood session).
+fn is_self_attached_wiring(node: &crate::domain::graph::Node) -> bool {
+    let m = &node.metadata;
+    if !m.is_object() {
+        return false;
+    }
+    let has_source_uri = m
+        .get("source_uri")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let is_exempt = m
+        .get("maintenance_exempt")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    has_source_uri || is_exempt
+}
+
+/// Walk every node type and tally totals + orphan count. A node is counted as
+/// an orphan only when it has no in- or out-edges **and** is not a
+/// self-attached wiring entry (see `is_self_attached_wiring`). Shared scan
+/// primitive for `wire_close` / `wire_doctor`; P3 daemon will extend this with
+/// stale / asymmetric / high-fanout checks.
 pub fn graph_scan_summary(storage: &SqliteStorage) -> WireResult<GraphScanSummary> {
     let mut total_nodes = 0_usize;
     let mut total_edges = 0_usize;
@@ -443,7 +471,7 @@ pub fn graph_scan_summary(storage: &SqliteStorage) -> WireResult<GraphScanSummar
             let out_edges = storage.list_edges_from(&n.id)?;
             let in_edges = storage.list_edges_to(&n.id)?;
             total_edges += out_edges.len();
-            if out_edges.is_empty() && in_edges.is_empty() {
+            if out_edges.is_empty() && in_edges.is_empty() && !is_self_attached_wiring(&n) {
                 orphan += 1;
             }
         }
@@ -480,7 +508,7 @@ pub fn wire_close(input: WireCloseInput, storage: &SqliteStorage) -> WireResult<
         "# wire_close report for `{persona}`\n\n\
          - total nodes: {total_nodes}\n\
          - total edges: {total_edges}\n\
-         - orphan nodes (0 in + 0 out): {orphan}\n",
+         - orphan nodes (no edges, not self-attached): {orphan}\n",
         total_nodes = summary.total_node_count,
         total_edges = summary.total_edge_count,
         orphan = summary.orphan_node_count,
@@ -514,7 +542,7 @@ pub fn wire_doctor(storage: &SqliteStorage) -> WireResult<WireDoctorOutput> {
         "# wire_doctor report\n\n\
          - total nodes: {total_nodes}\n\
          - total edges: {total_edges}\n\
-         - orphan nodes (0 in + 0 out): {orphan}\n",
+         - orphan nodes (no edges, not self-attached): {orphan}\n",
         total_nodes = summary.total_node_count,
         total_edges = summary.total_edge_count,
         orphan = summary.orphan_node_count,
@@ -1729,8 +1757,48 @@ mod tests {
         assert_eq!(out.orphan_node_count, 1);
         assert!(out
             .report_markdown
-            .contains("orphan nodes (0 in + 0 out): 1"));
+            .contains("orphan nodes (no edges, not self-attached): 1"));
         assert!(out.report_markdown.contains("total nodes: 3"));
+    }
+
+    #[test]
+    fn graph_scan_excludes_self_attached_wiring_from_orphans() {
+        // issue 15a46ce6 regression: wiring entries that hold metadata.source_uri
+        // or metadata.maintenance_exempt=true must NOT be reported as orphans,
+        // even when they carry no edges (onboarding §2 — edges are optional).
+        let s = setup();
+
+        // wiring entry with source_uri — should NOT count as orphan
+        let mut n1 = bare_node("p.mailbox", "outline_node");
+        n1.metadata = json!({
+            "persona": "p",
+            "axis": "mailbox",
+            "source_uri": "mini-app://mailbox?alias=for_p"
+        });
+        s.insert_node(&n1).unwrap();
+
+        // wiring entry with maintenance_exempt=true — should NOT count as orphan
+        let mut n2 = bare_node("p.priorities", "outline_node");
+        n2.metadata = json!({
+            "persona": "p",
+            "axis": "priorities",
+            "maintenance_exempt": true
+        });
+        s.insert_node(&n2).unwrap();
+
+        // bare persona node with no metadata + no edges — SHOULD count as orphan
+        s.insert_node(&bare_node("p", "persona")).unwrap();
+
+        let out = wire_doctor(&s).unwrap();
+        assert_eq!(out.total_node_count, 3);
+        assert_eq!(out.total_edge_count, 0);
+        assert_eq!(
+            out.orphan_node_count, 1,
+            "only the bare persona node is orphan; the 2 wiring entries are self-attached"
+        );
+        assert!(out
+            .report_markdown
+            .contains("orphan nodes (no edges, not self-attached): 1"));
     }
 
     #[test]
