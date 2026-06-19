@@ -1,9 +1,9 @@
 //! graph.dangling_edge — edge target に該当 node が存在しない (error)。
 //!
-//! design.md §6 entry。 既存 `wire_node_delete` のコメントが「edges are NOT
-//! cascade-deleted; surviving edges referencing the removed id become
-//! dangling — wire_doctor flags them」 と宣言しており、 本 Probe がその
-//! 宣言を実装する (現 graph_scan_summary は target 存在検査をしていなかった)。
+//! design.md §6 entry。 storage 側は FK NOT-NULL + `wire_node_delete` cascade
+//! で dangling 状態を作らないため、 本 Probe は **defensive sensor** として
+//! 振る舞う (external DB drift / migration corruption / 直 SQL writes 等の
+//! 異常経路で混入した dangling edge を doctor の next scan で flag する)。
 
 use crate::application::doctor::finding::{Axis, Finding, Kind, Location, Severity};
 use crate::application::doctor::probe::{FindingSink, Probe, ProbeCtx};
@@ -63,21 +63,13 @@ mod tests {
     use super::*;
     use crate::application::doctor::test_helpers::*;
 
-    // NOTE: dangling state cannot be constructed via the public API:
-    // - storage.insert_edge enforces SQLite FK (tgt_node must exist)
-    // - storage.delete_node cascade-deletes referencing edges in one Tx
-    //
-    // The Probe is therefore defensive only (= catches external DB drift /
-    // migration corruption / direct SQL writes). The wire_node_delete
-    // docstring "edges become dangling — wire_doctor flags them" is currently
-    // a lie (storage cascades). Discrepancy carry to a separate issue; for
-    // the test we keep the negative path here and skip the positive case.
-    #[test]
-    #[ignore]
-    fn emits_error_for_edge_to_missing_target_requires_db_drift_fixture() {
-        // would need PRAGMA foreign_keys = OFF + direct SQL — out of scope for
-        // probe-level unit test。
-    }
+    // NOTE: dangling state cannot be constructed via the public API
+    // (storage.insert_edge enforces SQLite FK NOT-NULL; storage.delete_node
+    // cascade-deletes referencing edges in one Tx). The Probe is defensive
+    // only — it catches external DB drift / migration corruption / direct
+    // SQL writes that bypass the storage Tx. Positive test would require
+    // `PRAGMA foreign_keys = OFF` + raw SQL fixture, which is out of scope
+    // for a probe-level unit test.
 
     #[test]
     fn quiet_when_all_edges_resolve() {

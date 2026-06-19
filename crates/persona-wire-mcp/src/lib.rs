@@ -722,11 +722,11 @@ impl WireServer {
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
 
-    /// Delete a node by id. Edges are not cascade-deleted (wire_doctor surfaces
-    /// surviving dangling references on the next scan).
+    /// Delete a node by id. Edges referencing the node are cascade-deleted
+    /// in the same storage Tx (edges FK is NOT-NULL).
     #[tool(
         name = "wire_node_delete",
-        description = "Delete a node by id. Returns {kind, id_or_name, deleted}. Edges are NOT cascade-deleted; surviving edges referencing the removed id become dangling — wire_doctor flags them."
+        description = "Delete a node by id. Returns {kind, id_or_name, deleted}. Edges referencing the node (as src or tgt) are cascade-deleted in the same storage transaction — edges table FK is NOT-NULL so dangling state is not representable in normal operation."
     )]
     async fn wire_node_delete_tool(
         &self,

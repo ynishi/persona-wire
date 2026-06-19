@@ -937,8 +937,12 @@ pub struct WireDeleteOutput {
     pub deleted: bool,
 }
 
-/// Delete a node by id. Edges are not cascade-deleted; surviving edges referencing
-/// the removed id become dangling — wire_doctor surfaces them on the next scan.
+/// Delete a node by id. Edges referencing the node (as src or tgt) are
+/// **cascade-deleted in the same storage transaction** — edges table FK is
+/// NOT-NULL (`REFERENCES nodes(id)`) so dangling state is not representable
+/// in normal operation. The `graph.dangling_edge` Probe is retained as a
+/// defensive sensor against external DB drift / migration corruption /
+/// direct SQL writes that bypass this transaction.
 pub fn wire_node_delete(
     input: WireDeleteInput,
     storage: &SqliteStorage,
