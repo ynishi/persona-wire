@@ -57,6 +57,17 @@ Two complementary query axes, both first-class:
   registered by name (`wire_render`, `wire_prompt_context`). Good for
   stable surfaces like wake-time injection.
 
+Two health / diagnostic use cases, both first-class:
+
+- **`wire_graph_check`** — axis 1: graph connectivity (orphan count, total
+  nodes, total edges). Callable standalone as an MCP tool, or composed
+  inside `wire_doctor`.
+- **`wire_doctor`** — 2-axis integrated health report: axis 1 graph
+  connectivity (via `wire_graph_check`) + axis 2 workflow coverage (via
+  `wire_workflow_check`). Top-level backward-compatible flat fields
+  (`orphan_node_count` / `total_node_count` / `total_edge_count`) are
+  retained as mirrors of the nested `graph_check` sub-object.
+
 There is **no hard-coded projection list in the crate** — every projection
 is data, registered through `ProjectionRegistry`. Optional template
 overlays per persona live in persona-pack

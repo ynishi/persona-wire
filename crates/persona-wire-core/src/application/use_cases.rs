@@ -484,6 +484,47 @@ pub fn graph_scan_summary(storage: &SqliteStorage) -> WireResult<GraphScanSummar
     })
 }
 
+// ---- wire_graph_check (axis 1: graph connectivity) ----
+
+/// Input for [`wire_graph_check`]. Currently empty; reserved for future
+/// filter / scope options (e.g. subgraph focus, node-type filter).
+pub struct WireGraphCheckInput {}
+
+/// Output for [`wire_graph_check`]: graph connectivity health summary.
+pub struct WireGraphCheckOutput {
+    pub orphan_count: usize,
+    pub total_nodes: usize,
+    pub total_edges: usize,
+    pub report_markdown: String,
+}
+
+/// Standalone graph connectivity health check (axis 1).
+///
+/// Wraps [`graph_scan_summary`] and adds a human-readable markdown summary.
+/// Exposed both as a direct `use_case` fn (callable by [`wire_doctor`]) and
+/// as an independent MCP tool (`wire_graph_check`).
+pub fn wire_graph_check(
+    _input: WireGraphCheckInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireGraphCheckOutput> {
+    let summary = graph_scan_summary(storage)?;
+    let report_markdown = format!(
+        "## graph_check (axis 1: graph connectivity)\n\
+         - total nodes: {total_nodes}\n\
+         - total edges: {total_edges}\n\
+         - orphan nodes (no edges, not self-attached): {orphan}\n",
+        total_nodes = summary.total_node_count,
+        total_edges = summary.total_edge_count,
+        orphan = summary.orphan_node_count,
+    );
+    Ok(WireGraphCheckOutput {
+        orphan_count: summary.orphan_node_count,
+        total_nodes: summary.total_node_count,
+        total_edges: summary.total_edge_count,
+        report_markdown,
+    })
+}
+
 // ---- wire_close ----
 
 pub struct WireCloseInput {
@@ -525,34 +566,79 @@ pub fn wire_close(input: WireCloseInput, storage: &SqliteStorage) -> WireResult<
 
 // ---- wire_doctor ----
 
+/// 2-axis integrated health report.
+///
+/// Backward-compat mirror fields (`orphan_node_count` / `total_node_count` /
+/// `total_edge_count`) are retained and their values are identical to
+/// `graph_check.orphan_count` / `graph_check.total_nodes` /
+/// `graph_check.total_edges` respectively (Crux #3).
 pub struct WireDoctorOutput {
-    pub orphan_node_count: usize,
-    pub total_node_count: usize,
-    pub total_edge_count: usize,
+    // backward-compat mirror fields (Crux #3 — do not remove)
+    pub orphan_node_count: usize, // = graph_check.orphan_count
+    pub total_node_count: usize,  // = graph_check.total_nodes
+    pub total_edge_count: usize,  // = graph_check.total_edges
     pub report_markdown: String,
+    // 2-axis nested results
+    pub graph_check: WireGraphCheckOutput,
+    pub workflow_check: WireWorkflowCheckOutput,
 }
 
-/// Graph-wide health diagnostic. P2a scope: orphan count + totals only
-/// (= same scan as `wire_close`, but not persona-scoped + framed as a
-/// standalone health check). Future expansion (stale / asymmetric /
-/// high-fanout) carried to P3 daemon.
+/// 2-axis integrated health diagnostic.
+///
+/// Axis 1 — graph connectivity: delegates to [`wire_graph_check`].
+/// Axis 2 — workflow coverage:  delegates to [`wire_workflow_check`] (all
+/// workflows, no persona scope).
+///
+/// The backward-compat flat fields (`orphan_node_count` / `total_node_count` /
+/// `total_edge_count`) mirror the corresponding `graph_check.*` values so
+/// existing callers are not broken.
 pub fn wire_doctor(storage: &SqliteStorage) -> WireResult<WireDoctorOutput> {
-    let summary = graph_scan_summary(storage)?;
+    // Axis 1: graph connectivity (Crux #2 — must call wire_graph_check, not inline graph_scan_summary)
+    let graph_check = wire_graph_check(WireGraphCheckInput {}, storage)?;
+    // Axis 2: workflow coverage (all workflows, no persona scope)
+    let workflow_check = wire_workflow_check(
+        WireWorkflowCheckInput {
+            persona_id: None,
+            include_exempt: None,
+            include_covered: None,
+        },
+        storage,
+    )?;
+
     let report_markdown = format!(
         "# wire_doctor report\n\n\
+         ## graph_check (axis 1: graph connectivity)\n\
          - total nodes: {total_nodes}\n\
          - total edges: {total_edges}\n\
-         - orphan nodes (no edges, not self-attached): {orphan}\n",
-        total_nodes = summary.total_node_count,
-        total_edges = summary.total_edge_count,
-        orphan = summary.orphan_node_count,
+         - orphan nodes (no edges, not self-attached): {orphan}\n\n\
+         ## workflow_check (axis 2: persistent update mechanism)\n\
+         - declared_covered: {covered}\n\
+         - declared_uncovered: {uncovered}\n\
+         - undeclared: {undeclared}\n\
+         - exempt: {exempt}\n\
+         - workflows_observed: {workflows}\n",
+        total_nodes = graph_check.total_nodes,
+        total_edges = graph_check.total_edges,
+        orphan = graph_check.orphan_count,
+        covered = workflow_check.declared_covered_count,
+        uncovered = workflow_check.declared_uncovered.len(),
+        undeclared = workflow_check.undeclared.len(),
+        exempt = workflow_check.exempt.len(),
+        workflows = workflow_check.workflows_observed,
     );
 
+    // Crux #3: mirror flat fields from graph_check — values must be identical
+    let orphan_node_count = graph_check.orphan_count;
+    let total_node_count = graph_check.total_nodes;
+    let total_edge_count = graph_check.total_edges;
+
     Ok(WireDoctorOutput {
-        orphan_node_count: summary.orphan_node_count,
-        total_node_count: summary.total_node_count,
-        total_edge_count: summary.total_edge_count,
+        orphan_node_count,
+        total_node_count,
+        total_edge_count,
         report_markdown,
+        graph_check,
+        workflow_check,
     })
 }
 
@@ -1799,6 +1885,64 @@ mod tests {
         assert!(out
             .report_markdown
             .contains("orphan nodes (no edges, not self-attached): 1"));
+    }
+
+    // ---- wire_doctor 2-axis regression tests ----
+
+    #[test]
+    fn wire_doctor_returns_2axis_integrated_report() {
+        let storage = setup();
+        let out = wire_doctor(&storage).expect("wire_doctor should pass on empty setup");
+        // backward-compat mirror fields must match graph_check axis values (Crux #3)
+        assert_eq!(out.orphan_node_count, out.graph_check.orphan_count);
+        assert_eq!(out.total_node_count, out.graph_check.total_nodes);
+        assert_eq!(out.total_edge_count, out.graph_check.total_edges);
+        // workflow_check nested sub-object must be accessible
+        let _ = out.workflow_check.total_nodes;
+        // report_markdown must contain both axis labels
+        assert!(
+            out.report_markdown.contains("graph_check"),
+            "report_markdown should contain 'graph_check' axis header"
+        );
+        assert!(
+            out.report_markdown.contains("workflow_check"),
+            "report_markdown should contain 'workflow_check' axis header"
+        );
+    }
+
+    #[test]
+    fn wire_graph_check_standalone_returns_axis1_only() {
+        let storage = setup();
+        let out = wire_graph_check(WireGraphCheckInput {}, &storage)
+            .expect("wire_graph_check should pass on empty setup");
+        // all count fields accessible
+        let _ = out.orphan_count;
+        let _ = out.total_nodes;
+        let _ = out.total_edges;
+        // report_markdown must not be empty
+        assert!(
+            !out.report_markdown.is_empty(),
+            "wire_graph_check report_markdown must not be empty"
+        );
+    }
+
+    #[test]
+    fn wire_doctor_backward_compat_mirror_field_match() {
+        let storage = setup();
+        let out = wire_doctor(&storage).expect("wire_doctor should pass");
+        // Crux #3: flat mirror fields must be identical to nested graph_check values
+        assert_eq!(
+            out.orphan_node_count, out.graph_check.orphan_count,
+            "orphan_node_count must mirror graph_check.orphan_count"
+        );
+        assert_eq!(
+            out.total_node_count, out.graph_check.total_nodes,
+            "total_node_count must mirror graph_check.total_nodes"
+        );
+        assert_eq!(
+            out.total_edge_count, out.graph_check.total_edges,
+            "total_edge_count must mirror graph_check.total_edges"
+        );
     }
 
     #[test]
