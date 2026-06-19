@@ -3,3 +3,11 @@ workspace
 .worktrees
 .claude
 .mcp.json
+.ryo
+*.db*
+*.sqlite*
+.env*
+!.env.example
+!.env.sample
+!.env.template
+!.env.dist
