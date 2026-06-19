@@ -9,3 +9,4 @@ pub mod adapter;
 pub mod rendering;
 pub mod storage;
 pub mod template;
+pub mod wire_uri;

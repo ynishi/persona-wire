@@ -33,6 +33,7 @@ use crate::application::projection::Projection;
 use crate::domain::error::{WireError, WireResult};
 use crate::infrastructure::adapter::Adapter;
 use crate::infrastructure::template::TemplateEngine;
+use crate::infrastructure::wire_uri::WireUri;
 
 /// 3 軸 Plugin を統合管理する immutable registry。
 ///
@@ -87,11 +88,30 @@ impl PluginRegistry {
         Self::default_builder_for_wire().build()
     }
 
-    /// `source_uri` の scheme prefix に該当する adapter を引く。
+    /// `source_uri` の scheme prefix に該当する adapter を引く (parse なし、 lookup のみ)。
     /// 未登録 scheme は `None`。
+    ///
+    /// Adapter の `fetch` を呼ぶ場合は [`route`](Self::route) を使うこと
+    /// (parse + lookup を 1 箇所に集約する canonical 経路)。
     pub fn adapter_for_uri(&self, source_uri: &str) -> Option<&Arc<dyn Adapter>> {
         let scheme = source_uri.split_once(':').map(|(s, _)| s)?;
         self.adapters.get(scheme)
+    }
+
+    /// URI grammar parse + scheme dispatch を 1 step で行う canonical entry。
+    ///
+    /// 返り値の `(adapter, WireUri)` をそのまま `adapter.fetch(&uri).await` に流せる。
+    /// scheme 未登録は `WireError::Storage` (Adapter trait の `fetch` 失敗と同 error 軸)。
+    pub fn route(&self, source_uri: &str) -> WireResult<(Arc<dyn Adapter>, WireUri)> {
+        let uri = WireUri::parse(source_uri)?;
+        let adapter = self.adapters.get(uri.scheme()).cloned().ok_or_else(|| {
+            WireError::Storage(format!(
+                "plugin registry: no adapter registered for scheme `{}` (uri: {})",
+                uri.scheme(),
+                source_uri,
+            ))
+        })?;
+        Ok((adapter, uri))
     }
 
     /// scheme literal から adapter を引く。

@@ -7,10 +7,10 @@
 
 pub mod doctor;
 pub mod merger;
-pub mod persona_pack_resolver;
 pub mod plugin_registry;
 pub mod projection;
 pub mod projection_naming;
+pub mod projection_overlay;
 pub mod projection_registry;
 pub mod spec_registry;
 pub mod use_cases;

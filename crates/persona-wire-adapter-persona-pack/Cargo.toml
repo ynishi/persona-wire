@@ -1,0 +1,21 @@
+[package]
+name = "persona-wire-adapter-persona-pack"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for persona-pack overlay SoT (scheme `persona-pack://`). ACL Facade encapsulating persona-pack SDK access, hidden from persona-wire-core."
+
+[dependencies]
+persona-wire-core.workspace = true
+persona-pack = "0.4"
+serde_json.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"

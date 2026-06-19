@@ -281,8 +281,11 @@ impl Adapter for SqliteAdapter {
         "sqlite"
     }
 
-    async fn fetch(&self, source_uri: &str) -> WireResult<serde_json::Value> {
-        let spec = parse_sqlite_uri(source_uri)?;
+    async fn fetch(
+        &self,
+        uri: &persona_wire_core::infrastructure::wire_uri::WireUri,
+    ) -> WireResult<serde_json::Value> {
+        let spec = parse_sqlite_uri(uri.as_raw())?;
         // rusqlite は同期 API。 tokio runtime を block しないよう spawn_blocking でラップ。
         let self_ = SqliteAdapter;
         tokio::task::spawn_blocking(move || self_.execute(&spec))
@@ -403,10 +406,14 @@ mod tests {
         assert_eq!(SqliteAdapter.scheme(), "sqlite");
     }
 
+    fn parse_uri(s: &str) -> persona_wire_core::infrastructure::wire_uri::WireUri {
+        persona_wire_core::infrastructure::wire_uri::WireUri::parse(s).unwrap()
+    }
+
     #[tokio::test]
     async fn adapter_fetch_table_form_lists_rows() {
         let (_dir, path) = make_sample_db();
-        let uri = format!("sqlite://{}?table=persons", path.display());
+        let uri = parse_uri(&format!("sqlite://{}?table=persons", path.display()));
         let v = SqliteAdapter.fetch(&uri).await.unwrap();
         assert_eq!(v["scheme"], "sqlite");
         assert_eq!(v["count"], 2);
@@ -426,7 +433,10 @@ mod tests {
     #[tokio::test]
     async fn adapter_fetch_table_form_with_limit() {
         let (_dir, path) = make_sample_db();
-        let uri = format!("sqlite://{}?table=persons&limit=1", path.display());
+        let uri = parse_uri(&format!(
+            "sqlite://{}?table=persons&limit=1",
+            path.display()
+        ));
         let v = SqliteAdapter.fetch(&uri).await.unwrap();
         assert_eq!(v["count"], 1);
     }
@@ -434,10 +444,10 @@ mod tests {
     #[tokio::test]
     async fn adapter_fetch_query_form() {
         let (_dir, path) = make_sample_db();
-        let uri = format!(
+        let uri = parse_uri(&format!(
             "sqlite://{}?query=SELECT%20name%2C%20age%20FROM%20persons%20WHERE%20age%20%3E%2035",
             path.display()
-        );
+        ));
         let v = SqliteAdapter.fetch(&uri).await.unwrap();
         assert_eq!(v["count"], 1);
         assert_eq!(v["rows"][0]["name"], "bob");
@@ -450,19 +460,18 @@ mod tests {
     async fn adapter_fetch_query_form_with_limit_post_caps() {
         let (_dir, path) = make_sample_db();
         // primary form の limit は SQL 本体に触らず、 行数 cap として後段適用
-        let uri = format!(
+        let uri = parse_uri(&format!(
             "sqlite://{}?query=SELECT%20*%20FROM%20persons&limit=1",
             path.display()
-        );
+        ));
         let v = SqliteAdapter.fetch(&uri).await.unwrap();
         assert_eq!(v["count"], 1);
     }
 
     #[tokio::test]
     async fn adapter_fetch_nonexistent_path_errors() {
-        let r = SqliteAdapter
-            .fetch("sqlite:///nonexistent/path/x.db?table=foo")
-            .await;
+        let uri = parse_uri("sqlite:///nonexistent/path/x.db?table=foo");
+        let r = SqliteAdapter.fetch(&uri).await;
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("db not found"));
     }
@@ -470,7 +479,7 @@ mod tests {
     #[tokio::test]
     async fn adapter_fetch_table_name_with_quote_rejected() {
         let (_dir, path) = make_sample_db();
-        let uri = format!("sqlite://{}?table=foo%22bar", path.display());
+        let uri = parse_uri(&format!("sqlite://{}?table=foo%22bar", path.display()));
         let r = SqliteAdapter.fetch(&uri).await;
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("double-quote"));

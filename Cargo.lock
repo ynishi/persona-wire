@@ -1084,6 +1084,7 @@ dependencies = [
  "clap",
  "mini-app-core",
  "persona-wire-adapter-mini-app",
+ "persona-wire-adapter-persona-pack",
  "persona-wire-adapter-sqlite-x",
  "persona-wire-core",
  "persona-wire-mcp",
@@ -1108,6 +1109,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "persona-wire-adapter-persona-pack"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "persona-pack",
+ "persona-wire-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "persona-wire-adapter-sqlite-x"
 version = "0.3.0"
 dependencies = [
@@ -1127,7 +1140,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "handlebars",
- "persona-pack",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1144,6 +1156,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "persona-wire-adapter-mini-app",
+ "persona-wire-adapter-persona-pack",
  "persona-wire-adapter-sqlite-x",
  "persona-wire-core",
  "rmcp",

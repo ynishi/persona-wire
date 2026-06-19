@@ -15,12 +15,21 @@
 use std::path::PathBuf;
 
 use crate::domain::error::{WireError, WireResult};
+use crate::infrastructure::wire_uri::WireUri;
 use async_trait::async_trait;
 
 /// Adapter trait — Plugin 軸 1 / 3 (SoT Adapter)。
 ///
 /// dyn-compatible にするため `#[async_trait]` で `Pin<Box<Future>>` 化。 PluginRegistry
 /// が `Arc<dyn Adapter>` で複数 impl を一様に保持する前提。
+///
+/// ACL Facade として機能する責務:
+/// - URI grammar parse は registry 側 (`WireUri::parse`) が一手に集約済。 Adapter は
+///   parsed `WireUri` を受けて、 scheme 固有の semantic 解釈 + 外部 SDK 呼出し +
+///   Wire 定義 JSON への翻訳 を担う。
+/// - 既存 adapter で internal parser を持つものは `uri.as_raw()` で full URI 文字列を
+///   取り出して当面互換 (carry)、 新規 adapter は typed access (`host()` / `query()` 等)
+///   推奨。
 #[async_trait]
 pub trait Adapter: Send + Sync {
     /// このアダプタが扱う URI scheme 識別子 (例: `"mini-app"` / `"file"` / `"pg"`).
@@ -30,8 +39,8 @@ pub trait Adapter: Send + Sync {
     /// fail-fast)。
     fn scheme(&self) -> &'static str;
 
-    /// `source_uri` を scheme 別に解釈し、 fresh data を `serde_json::Value` で返す。
-    async fn fetch(&self, source_uri: &str) -> WireResult<serde_json::Value>;
+    /// parsed `WireUri` を scheme 別に解釈し、 fresh data を `serde_json::Value` で返す。
+    async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value>;
 }
 
 // ---- file adapter (std::fs) ----
@@ -75,7 +84,11 @@ impl Adapter for FileAdapter {
         "file"
     }
 
-    async fn fetch(&self, source_uri: &str) -> WireResult<serde_json::Value> {
+    async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
+        // file URI は `file://~/foo` 等の非 RFC な lenient form を受け入れたいため、
+        // raw 文字列から strip_prefix で path 部を取り出す (typed host/path だと
+        // `~` が host 扱いになり挙動が変わる)。
+        let source_uri = uri.as_raw();
         let rest = source_uri
             .strip_prefix("file://")
             .or_else(|| source_uri.strip_prefix("file:"))
@@ -134,7 +147,7 @@ mod tests {
             .parent()
             .unwrap()
             .join(me);
-        let uri = format!("file://{}", abs.display());
+        let uri = WireUri::parse(&format!("file://{}", abs.display())).unwrap();
         let a = FileAdapter;
         let v = a.fetch(&uri).await.unwrap();
         let body = v["body"].as_str().unwrap();
@@ -144,7 +157,8 @@ mod tests {
     #[tokio::test]
     async fn file_adapter_rejects_non_file_uri() {
         let a = FileAdapter;
-        let r = a.fetch("ssh://nope").await;
+        let uri = WireUri::parse("ssh://nope/x").unwrap();
+        let r = a.fetch(&uri).await;
         assert!(r.is_err());
     }
 }

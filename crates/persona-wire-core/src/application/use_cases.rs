@@ -237,10 +237,21 @@ pub async fn wire_prompt_context(
     storage: std::sync::Arc<std::sync::Mutex<SqliteStorage>>,
     registry: &PluginRegistry,
 ) -> WireResult<WirePromptContextOutput> {
-    use crate::application::persona_pack_resolver::read_projection_overlays;
+    use crate::application::projection_overlay::parse_overlay_response;
 
-    // ---- Phase 0: persona-pack overlay 解決 (best-effort、 不在は空 BTreeMap) ----
-    let overlays = read_projection_overlays(&input.persona_id)?.unwrap_or_default();
+    // ---- Phase 0: overlay 解決 (Adapter dispatch 経由、 best-effort) ----
+    //   URI 形式 = `persona-pack://<persona_id>/projections`。
+    //   persona-pack scheme は外部 adapter crate (`persona-wire-adapter-persona-pack`) が
+    //   提供する ACL Facade。 boot 側 (`persona-wire-mcp` / `persona-wire` bin) で registry
+    //   に inject 済 (未 inject = scheme 未登録 → overlay 空で fallback)。
+    let overlay_uri = format!("persona-pack://{}/projections", input.persona_id);
+    let overlays = match registry.route(&overlay_uri) {
+        Ok((adapter, uri)) => match adapter.fetch(&uri).await {
+            Ok(v) => parse_overlay_response(&v).unwrap_or_default(),
+            Err(_) => std::collections::BTreeMap::new(), // adapter fetch fail = silent skip
+        },
+        Err(_) => std::collections::BTreeMap::new(), // scheme 未登録 = overlay 無し fallback
+    };
 
     // ---- Phase 1: sync collect (MutexGuard を await 跨がない form) ----
     //   axis list = projection_names で subset 指定があればそれ、
@@ -343,8 +354,8 @@ pub async fn wire_prompt_context(
     // ---- Phase 2: async fetch + render (PluginRegistry 経由) ----
     let mut projections = Vec::new();
     for c in collected {
-        let fetched = match registry.adapter_for_uri(&c.source_uri) {
-            Some(adapter) => match adapter.fetch(&c.source_uri).await {
+        let fetched = match registry.route(&c.source_uri) {
+            Ok((adapter, uri)) => match adapter.fetch(&uri).await {
                 Ok(v) => v,
                 Err(e) => {
                     warnings.push(format!(
@@ -354,10 +365,10 @@ pub async fn wire_prompt_context(
                     serde_json::Value::Null
                 }
             },
-            None => {
+            Err(e) => {
                 warnings.push(format!(
-                    "no adapter registered for scheme in uri '{}' — axis '{}' skipped",
-                    c.source_uri, c.axis
+                    "registry route failed for axis '{}' (uri={}): {e}",
+                    c.axis, c.source_uri
                 ));
                 serde_json::Value::Null
             }

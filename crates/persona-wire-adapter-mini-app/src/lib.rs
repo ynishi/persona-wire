@@ -261,7 +261,11 @@ impl Adapter for MiniAppAdapter {
         "mini-app"
     }
 
-    async fn fetch(&self, source_uri: &str) -> WireResult<serde_json::Value> {
+    async fn fetch(
+        &self,
+        uri: &persona_wire_core::infrastructure::wire_uri::WireUri,
+    ) -> WireResult<serde_json::Value> {
+        let source_uri = uri.as_raw();
         let rest = source_uri.strip_prefix("mini-app://").ok_or_else(|| {
             WireError::Storage(format!("mini-app adapter: bad uri: {source_uri}"))
         })?;
@@ -630,8 +634,10 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_rejects_non_mini_app_uri() {
+        use persona_wire_core::infrastructure::wire_uri::WireUri;
         let a = MiniAppAdapter;
-        let r = a.fetch("file:///tmp/x").await;
+        let uri = WireUri::parse("file:///tmp/x").unwrap();
+        let r = a.fetch(&uri).await;
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("bad uri"));
     }
