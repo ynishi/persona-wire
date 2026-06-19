@@ -19,6 +19,9 @@ pub enum WireError {
     #[error("type not registered: {0}")]
     UnknownType(String),
 
+    #[error("invalid metadata: {0}")]
+    InvalidMetadata(String),
+
     #[error("other: {0}")]
     Other(String),
 }

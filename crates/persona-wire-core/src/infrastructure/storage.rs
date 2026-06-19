@@ -34,6 +34,50 @@ pub fn default_db_path() -> WireResult<PathBuf> {
     Ok(p)
 }
 
+/// Normalize node `metadata` at the storage boundary so callers cannot stash
+/// a string-encoded JSON literal (or other non-object shapes) into the DB.
+///
+/// Accepted inputs:
+/// - `Value::Object(_)` → pass-through unchanged.
+/// - `Value::String(s)` → attempt `serde_json::from_str(&s)`. If the result is
+///   `Value::Object(_)`, adopt it. Any parse failure or non-object result
+///   returns `WireError::InvalidMetadata`.
+///
+/// All other variants (`Null` / `Bool` / `Number` / `Array`) are rejected with
+/// `WireError::InvalidMetadata`. Node metadata semantics across the codebase
+/// (handlebars rendering / `MetadataEq` spec evaluation / persona-pack overlay)
+/// assume an object shape; this helper is the single enforcement point on the
+/// write path. The read path (`row_to_node`) remains best-effort
+/// (`from_str(...).unwrap_or(Value::Null)`) because legacy rows written before
+/// this guard may still carry stringified payloads — those are healed by data
+/// fix scripts on a case-by-case basis (see issue 22dcf208 axis (a)).
+fn normalize_metadata_storage(metadata: &serde_json::Value) -> WireResult<serde_json::Value> {
+    use serde_json::Value;
+    match metadata {
+        Value::Object(_) => Ok(metadata.clone()),
+        Value::String(s) => {
+            let parsed: Value = serde_json::from_str(s).map_err(|e| {
+                WireError::InvalidMetadata(format!(
+                    "node metadata is a string but does not parse as JSON object: {}",
+                    e
+                ))
+            })?;
+            if matches!(parsed, Value::Object(_)) {
+                Ok(parsed)
+            } else {
+                Err(WireError::InvalidMetadata(format!(
+                    "node metadata string parsed to non-object JSON: {}",
+                    parsed
+                )))
+            }
+        }
+        other => Err(WireError::InvalidMetadata(format!(
+            "node metadata must be a JSON object, got: {}",
+            other
+        ))),
+    }
+}
+
 pub struct SqliteStorage {
     conn: Connection,
 }
@@ -152,8 +196,9 @@ impl SqliteStorage {
     }
 
     pub fn insert_node(&self, node: &Node) -> WireResult<()> {
+        let normalized = normalize_metadata_storage(&node.metadata)?;
         let metadata_str =
-            serde_json::to_string(&node.metadata).map_err(|e| WireError::Storage(e.to_string()))?;
+            serde_json::to_string(&normalized).map_err(|e| WireError::Storage(e.to_string()))?;
         self.conn
             .execute(
                 "INSERT INTO nodes (id, type, sot_ref, confidence, applicability, \
@@ -201,8 +246,9 @@ impl SqliteStorage {
     /// immutable on this path; full-row replacement is out of scope for the
     /// metadata-patch UC (= wiring-entry `source_uri` tuning).
     pub fn update_node_metadata(&self, id: &str, metadata: &serde_json::Value) -> WireResult<bool> {
+        let normalized = normalize_metadata_storage(metadata)?;
         let metadata_str =
-            serde_json::to_string(metadata).map_err(|e| WireError::Storage(e.to_string()))?;
+            serde_json::to_string(&normalized).map_err(|e| WireError::Storage(e.to_string()))?;
         let n = self
             .conn
             .execute(
@@ -811,6 +857,97 @@ mod tests {
         let n = bare_node("nx", "definitely_not_a_registered_type");
         let err = s.insert_node(&n);
         assert!(err.is_err(), "FK on nodes.type should reject unknown type");
+    }
+
+    // ----- issue 22dcf208: metadata shape normalization at storage boundary -----
+
+    #[test]
+    fn insert_node_normalizes_stringified_object_metadata() {
+        let s = setup();
+        let mut n = bare_node("shi_like", "persona");
+        n.metadata =
+            serde_json::Value::String(r#"{"display":"shi_like","first_person":"しー"}"#.into());
+        s.insert_node(&n).unwrap();
+        let got = s.get_node(&"shi_like".into()).unwrap().expect("exists");
+        assert_eq!(
+            got.metadata,
+            json!({"display": "shi_like", "first_person": "しー"}),
+            "string-encoded metadata should be parsed back into an object"
+        );
+    }
+
+    #[test]
+    fn insert_node_rejects_unparseable_string_metadata() {
+        let s = setup();
+        let mut n = bare_node("bad1", "persona");
+        n.metadata = serde_json::Value::String("not json at all".into());
+        let err = s.insert_node(&n);
+        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+    }
+
+    #[test]
+    fn insert_node_rejects_string_metadata_parsing_to_non_object() {
+        let s = setup();
+        let mut n = bare_node("bad2", "persona");
+        // Valid JSON, but parses to an array — non-object shapes must be rejected.
+        n.metadata = serde_json::Value::String(r#"[1, 2, 3]"#.into());
+        let err = s.insert_node(&n);
+        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+    }
+
+    #[test]
+    fn insert_node_rejects_array_metadata() {
+        let s = setup();
+        let mut n = bare_node("bad3", "persona");
+        n.metadata = json!([1, 2, 3]);
+        let err = s.insert_node(&n);
+        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+    }
+
+    #[test]
+    fn insert_node_rejects_scalar_metadata() {
+        let s = setup();
+        let mut n = bare_node("bad4", "persona");
+        n.metadata = json!(42);
+        let err = s.insert_node(&n);
+        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+    }
+
+    #[test]
+    fn update_node_metadata_normalizes_stringified_object() {
+        let s = setup();
+        s.insert_node(&bare_node("p1", "persona")).unwrap();
+        let patched = serde_json::Value::String(r#"{"display":"p1"}"#.into());
+        let updated = s.update_node_metadata("p1", &patched).unwrap();
+        assert!(updated);
+        let got = s.get_node(&"p1".into()).unwrap().expect("exists");
+        assert_eq!(got.metadata, json!({"display": "p1"}));
+    }
+
+    #[test]
+    fn update_node_metadata_rejects_non_object_input() {
+        let s = setup();
+        s.insert_node(&bare_node("p2", "persona")).unwrap();
+        let err = s.update_node_metadata("p2", &json!("plain string"));
+        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+    }
+
+    // Mirrors the batch path: `wire_nodes_create_batch` iterates `insert_node`
+    // 1 row at a time, so verifying the storage boundary covers both surfaces.
+    #[test]
+    fn insert_node_batch_path_normalizes_each_row() {
+        let s = setup();
+        let mut n1 = bare_node("b1", "persona");
+        n1.metadata = serde_json::Value::String(r#"{"display":"b1"}"#.into());
+        let mut n2 = bare_node("b2", "persona");
+        n2.metadata = json!({"display": "b2"});
+        for n in [&n1, &n2] {
+            s.insert_node(n).unwrap();
+        }
+        let got1 = s.get_node(&"b1".into()).unwrap().expect("exists");
+        let got2 = s.get_node(&"b2".into()).unwrap().expect("exists");
+        assert_eq!(got1.metadata, json!({"display": "b1"}));
+        assert_eq!(got2.metadata, json!({"display": "b2"}));
     }
 
     #[test]
