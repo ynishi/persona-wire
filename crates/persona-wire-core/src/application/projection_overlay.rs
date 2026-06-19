@@ -49,7 +49,9 @@ pub fn parse_overlay_response(
     };
     let mut out = BTreeMap::new();
     for (axis, entry) in projections.iter() {
-        let Some(obj) = entry.as_object() else { continue };
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
         let Some(template) = obj.get("template").and_then(|v| v.as_str()) else {
             continue;
         };

@@ -172,7 +172,10 @@ mod tests {
         assert_eq!(u.path(), "/projections");
         assert_eq!(u.query_get("axis"), Some("active"));
         assert_eq!(u.fragment(), Some("frag"));
-        assert_eq!(u.as_raw(), "persona-pack://dolly/projections?axis=active#frag");
+        assert_eq!(
+            u.as_raw(),
+            "persona-pack://dolly/projections?axis=active#frag"
+        );
     }
 
     #[test]

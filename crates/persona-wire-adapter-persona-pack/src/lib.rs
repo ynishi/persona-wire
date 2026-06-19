@@ -77,9 +77,8 @@ impl PersonaPackAdapter {
                 return Ok(Self::new(PathBuf::from(p)));
             }
         }
-        let home = std::env::var("HOME").map_err(|_| {
-            WireError::Storage("persona-pack adapter: HOME unset".to_string())
-        })?;
+        let home = std::env::var("HOME")
+            .map_err(|_| WireError::Storage("persona-pack adapter: HOME unset".to_string()))?;
         Ok(Self::new(PathBuf::from(home).join("persona-pack")))
     }
 
@@ -186,8 +185,8 @@ mod tests {
     #[tokio::test]
     async fn fetch_missing_persona_returns_empty_projections() {
         let a = PersonaPackAdapter::new("/nonexistent/persona-pack-root");
-        let uri = WireUri::parse("persona-pack://__definitely_not_a_persona__/projections")
-            .unwrap();
+        let uri =
+            WireUri::parse("persona-pack://__definitely_not_a_persona__/projections").unwrap();
         let v = a.fetch(&uri).await.unwrap();
         assert_eq!(v["scheme"], "persona-pack");
         assert_eq!(v["persona_id"], "__definitely_not_a_persona__");
@@ -233,8 +232,7 @@ template = "BIO OVERLAY"
         fs::write(persona_dir.join("prompt.toml"), toml).unwrap();
 
         let a = PersonaPackAdapter::new(tmp.path());
-        let uri = WireUri::parse(&format!("persona-pack://{persona_id}/projections"))
-            .unwrap();
+        let uri = WireUri::parse(&format!("persona-pack://{persona_id}/projections")).unwrap();
         let v = a.fetch(&uri).await.unwrap();
         assert_eq!(v["scheme"], "persona-pack");
         assert_eq!(v["persona_id"], persona_id);
