@@ -66,7 +66,7 @@ fn batch_inserts_all_nodes_and_edges_happy_path() {
     assert!(edge_out.failed_at.is_none());
 
     // wire_doctor confirms the batched graph end-to-end.
-    let doctor = wire_doctor(&s).unwrap();
+    let doctor = wire_doctor(&s, None).unwrap();
     assert_eq!(doctor.total_node_count, 3);
     assert_eq!(doctor.total_edge_count, 2);
     assert_eq!(doctor.orphan_node_count, 0);
@@ -96,7 +96,7 @@ fn batch_stops_at_first_duplicate_node() {
     );
 
     // wire_doctor reflects the partial state: pre-existing + 1 fresh inserted.
-    let doctor = wire_doctor(&s).unwrap();
+    let doctor = wire_doctor(&s, None).unwrap();
     assert_eq!(doctor.total_node_count, 2);
     assert_eq!(doctor.total_edge_count, 0);
     assert_eq!(doctor.orphan_node_count, 2);

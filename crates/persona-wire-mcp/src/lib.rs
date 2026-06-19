@@ -219,6 +219,14 @@ pub struct WirePromptContextParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireDoctorParams {
+    /// Optional persona scope. `None` → Full mode (全 persona 横串)。
+    /// `Some(id)` → Persona-scoped mode (当該 persona に紐づく Finding のみ列挙)。
+    #[serde(default)]
+    pub persona_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct WireWorkflowRegisterParams {
     /// Node id for the workflow (e.g. `"alpha.workflow.review_close"`).
     pub id: String,
@@ -372,12 +380,15 @@ impl WireServer {
     /// 2-axis integrated health report (graph connectivity + workflow coverage).
     #[tool(
         name = "wire_doctor",
-        description = "2-axis integrated health report (axis 1: graph connectivity via wire_graph_check, axis 2: workflow coverage via wire_workflow_check). Returns graph_check and workflow_check sub-objects plus backward-compat flat fields (orphan_node_count / total_node_count / total_edge_count). Not persona-scoped.",
+        description = "Finding-driven 2-axis (graph / workflow) health diagnostic. Returns Markdown report with verdict (HEALTHY / DEGRADED / BROKEN), per-finding severity (error / warn / info), location (固有名詞), description, and fix template (MCP tool call literal). persona_id=None → Full mode (全 persona 横串); persona_id=Some(id) → Persona-scoped mode. backward-compat flat fields (orphan_node_count / total_node_count / total_edge_count) と graph_check / workflow_check sub-objects は Crux #3 で 1 度残置。",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
-    async fn wire_doctor_tool(&self) -> Result<String, String> {
+    async fn wire_doctor_tool(
+        &self,
+        Parameters(p): Parameters<WireDoctorParams>,
+    ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
-        let out = wire_doctor(&s).map_err(|e| e.to_string())?;
+        let out = wire_doctor(&s, p.persona_id).map_err(|e| e.to_string())?;
         // Extract backward-compat flat fields (usize = Copy)
         let orphan_node_count = out.orphan_node_count;
         let total_node_count = out.total_node_count;

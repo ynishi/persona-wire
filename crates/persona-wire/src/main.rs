@@ -494,7 +494,7 @@ fn main() -> Result<()> {
 
         Command::WireDoctor => {
             let s = SqliteStorage::open(&db)?;
-            let out = wire_doctor(&s)?;
+            let out = wire_doctor(&s, None)?;
             println!("{}", out.report_markdown);
         }
 

@@ -438,7 +438,7 @@ pub struct GraphScanSummary {
 ///
 /// Without this guard, `wire_doctor` reports every wiring entry as orphan
 /// (issue `15a46ce6` — 41/41 false-positive on the shi dogfood session).
-fn is_self_attached_wiring(node: &crate::domain::graph::Node) -> bool {
+pub(crate) fn is_self_attached_wiring(node: &crate::domain::graph::Node) -> bool {
     let m = &node.metadata;
     if !m.is_object() {
         return false;
@@ -583,49 +583,35 @@ pub struct WireDoctorOutput {
     pub workflow_check: WireWorkflowCheckOutput,
 }
 
-/// 2-axis integrated health diagnostic.
+/// 2-axis integrated health diagnostic — Finding model 駆動 (design §3-§8)。
 ///
-/// Axis 1 — graph connectivity: delegates to [`wire_graph_check`].
-/// Axis 2 — workflow coverage:  delegates to [`wire_workflow_check`] (all
-/// workflows, no persona scope).
+/// `persona_id = None` → Full mode (全 persona 横串)。
+/// `persona_id = Some(id)` → Persona-scoped mode (当該 persona に紐づく
+/// Finding のみ列挙、 main thread context を汚さない用)。
 ///
-/// The backward-compat flat fields (`orphan_node_count` / `total_node_count` /
-/// `total_edge_count`) mirror the corresponding `graph_check.*` values so
-/// existing callers are not broken.
-pub fn wire_doctor(storage: &SqliteStorage) -> WireResult<WireDoctorOutput> {
-    // Axis 1: graph connectivity (Crux #2 — must call wire_graph_check, not inline graph_scan_summary)
+/// `report_markdown` は [`crate::application::doctor::run`] が生成する
+/// Finding 列挙 + verdict 集約形式 (design §5 / §8)。
+///
+/// backward-compat mirror fields (`orphan_node_count` / `total_node_count` /
+/// `total_edge_count`) と nested `graph_check` / `workflow_check` は Crux #3
+/// の合意で 1 度残置 (deprecation は別 issue carry)。
+pub fn wire_doctor(
+    storage: &SqliteStorage,
+    persona_id: Option<String>,
+) -> WireResult<WireDoctorOutput> {
+    // backward-compat path (Crux #3): mirror fields の source として保持。
     let graph_check = wire_graph_check(WireGraphCheckInput {}, storage)?;
-    // Axis 2: workflow coverage (all workflows, no persona scope)
     let workflow_check = wire_workflow_check(
         WireWorkflowCheckInput {
-            persona_id: None,
+            persona_id: persona_id.clone(),
             include_exempt: None,
             include_covered: None,
         },
         storage,
     )?;
 
-    let report_markdown = format!(
-        "# wire_doctor report\n\n\
-         ## graph_check (axis 1: graph connectivity)\n\
-         - total nodes: {total_nodes}\n\
-         - total edges: {total_edges}\n\
-         - orphan nodes (no edges, not self-attached): {orphan}\n\n\
-         ## workflow_check (axis 2: persistent update mechanism)\n\
-         - declared_covered: {covered}\n\
-         - declared_uncovered: {uncovered}\n\
-         - undeclared: {undeclared}\n\
-         - exempt: {exempt}\n\
-         - workflows_observed: {workflows}\n",
-        total_nodes = graph_check.total_nodes,
-        total_edges = graph_check.total_edges,
-        orphan = graph_check.orphan_count,
-        covered = workflow_check.declared_covered_count,
-        uncovered = workflow_check.declared_uncovered.len(),
-        undeclared = workflow_check.undeclared.len(),
-        exempt = workflow_check.exempt.len(),
-        workflows = workflow_check.workflows_observed,
-    );
+    // 新 report は doctor::run (Finding 駆動) に委譲。
+    let report_markdown = crate::application::doctor::run(storage, persona_id)?;
 
     // Crux #3: mirror flat fields from graph_check — values must be identical
     let orphan_node_count = graph_check.orphan_count;
@@ -1875,16 +1861,15 @@ mod tests {
         // bare persona node with no metadata + no edges — SHOULD count as orphan
         s.insert_node(&bare_node("p", "persona")).unwrap();
 
-        let out = wire_doctor(&s).unwrap();
+        let out = wire_doctor(&s, None).unwrap();
         assert_eq!(out.total_node_count, 3);
         assert_eq!(out.total_edge_count, 0);
         assert_eq!(
             out.orphan_node_count, 1,
             "only the bare persona node is orphan; the 2 wiring entries are self-attached"
         );
-        assert!(out
-            .report_markdown
-            .contains("orphan nodes (no edges, not self-attached): 1"));
+        // Finding-driven format (design §8): orphan Probe land 後に再導入。
+        assert!(out.report_markdown.contains("scope: full"));
     }
 
     // ---- wire_doctor 2-axis regression tests ----
@@ -1892,22 +1877,26 @@ mod tests {
     #[test]
     fn wire_doctor_returns_2axis_integrated_report() {
         let storage = setup();
-        let out = wire_doctor(&storage).expect("wire_doctor should pass on empty setup");
+        let out = wire_doctor(&storage, None).expect("wire_doctor should pass on empty setup");
         // backward-compat mirror fields must match graph_check axis values (Crux #3)
         assert_eq!(out.orphan_node_count, out.graph_check.orphan_count);
         assert_eq!(out.total_node_count, out.graph_check.total_nodes);
         assert_eq!(out.total_edge_count, out.graph_check.total_edges);
         // workflow_check nested sub-object must be accessible
         let _ = out.workflow_check.total_nodes;
-        // report_markdown must contain both axis labels
+        // Finding-driven format (design §8): scope + verdict + axis sections。
         assert!(
-            out.report_markdown.contains("graph_check"),
-            "report_markdown should contain 'graph_check' axis header"
+            out.report_markdown.contains("## Graph axis"),
+            "report_markdown should contain '## Graph axis' header"
         );
         assert!(
-            out.report_markdown.contains("workflow_check"),
-            "report_markdown should contain 'workflow_check' axis header"
+            out.report_markdown.contains("## Workflow axis"),
+            "report_markdown should contain '## Workflow axis' header"
         );
+        assert!(out.report_markdown.contains("scope: full"));
+        // empty setup → GraphEdgesZero probe fires (error) → BROKEN。
+        assert!(out.report_markdown.contains("verdict: BROKEN"));
+        assert!(out.report_markdown.contains("graph.edges_zero"));
     }
 
     #[test]
@@ -1929,7 +1918,7 @@ mod tests {
     #[test]
     fn wire_doctor_backward_compat_mirror_field_match() {
         let storage = setup();
-        let out = wire_doctor(&storage).expect("wire_doctor should pass");
+        let out = wire_doctor(&storage, None).expect("wire_doctor should pass");
         // Crux #3: flat mirror fields must be identical to nested graph_check values
         assert_eq!(
             out.orphan_node_count, out.graph_check.orphan_count,

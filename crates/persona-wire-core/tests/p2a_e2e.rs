@@ -68,7 +68,7 @@ fn wire_doctor_parity_with_wire_close_on_same_graph() {
         &s,
     )
     .unwrap();
-    let doctor = wire_doctor(&s).unwrap();
+    let doctor = wire_doctor(&s, None).unwrap();
 
     // wire_close and wire_doctor must agree on every count.
     assert_eq!(close.total_node_count, doctor.total_node_count);
@@ -96,14 +96,15 @@ fn wire_doctor_reports_orphan_zero_when_every_node_is_touched() {
     s.insert_edge(&bare_edge("e_bc", "b", "c", "routes_to"))
         .unwrap();
 
-    let doctor = wire_doctor(&s).unwrap();
+    let doctor = wire_doctor(&s, None).unwrap();
     assert_eq!(doctor.total_node_count, 3);
     assert_eq!(doctor.total_edge_count, 2);
     assert_eq!(doctor.orphan_node_count, 0);
     assert!(doctor.report_markdown.contains("# wire_doctor report"));
-    assert!(doctor
-        .report_markdown
-        .contains("orphan nodes (no edges, not self-attached): 0"));
+    // Finding-driven format (design §8): scope + verdict + axis sections。
+    assert!(doctor.report_markdown.contains("scope: full"));
+    assert!(doctor.report_markdown.contains("## Graph axis"));
+    assert!(doctor.report_markdown.contains("## Workflow axis"));
 }
 
 #[test]
@@ -158,7 +159,7 @@ fn wire_doctor_with_dynamic_specification_e2e() {
     assert_eq!(init.projections[0].rendered, "Active personas (2): p1, p2");
 
     // wire_doctor sees the whole graph (3 personas, 2 edges, 0 orphans).
-    let doctor = wire_doctor(&s).unwrap();
+    let doctor = wire_doctor(&s, None).unwrap();
     assert_eq!(doctor.total_node_count, 3);
     assert_eq!(doctor.total_edge_count, 2);
     assert_eq!(doctor.orphan_node_count, 0);
