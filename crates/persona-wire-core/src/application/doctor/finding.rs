@@ -89,9 +89,9 @@ impl Kind {
     pub fn default_severity(self) -> Severity {
         match self {
             Kind::GraphOrphanNode | Kind::GraphSpecNoHit => Severity::Warn,
-            Kind::GraphDanglingEdge
-            | Kind::GraphEdgesZero
-            | Kind::GraphProjectionEmptyRender => Severity::Error,
+            Kind::GraphDanglingEdge | Kind::GraphEdgesZero | Kind::GraphProjectionEmptyRender => {
+                Severity::Error
+            }
             Kind::WorkflowEmitTargetUnregistered | Kind::WorkflowTriggerInfraMissing => {
                 Severity::Error
             }

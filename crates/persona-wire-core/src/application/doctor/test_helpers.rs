@@ -3,8 +3,8 @@
 #![cfg(test)]
 
 use crate::application::doctor::probe::{FindingSink, Probe, ProbeCtx};
-use crate::domain::graph::{Edge, Node};
 use crate::domain::error::WireResult;
+use crate::domain::graph::{Edge, Node};
 use crate::infrastructure::storage::SqliteStorage;
 use serde_json::{json, Value};
 
@@ -52,7 +52,11 @@ pub fn edge(id: &str, src: &str, tgt: &str) -> Edge {
 }
 
 /// Run a probe on the given storage and return all emitted findings.
-pub fn scan<P: Probe>(probe: &P, storage: &SqliteStorage, persona: Option<&str>) -> WireResult<Vec<crate::application::doctor::finding::Finding>> {
+pub fn scan<P: Probe>(
+    probe: &P,
+    storage: &SqliteStorage,
+    persona: Option<&str>,
+) -> WireResult<Vec<crate::application::doctor::finding::Finding>> {
     let ctx = ProbeCtx {
         storage,
         persona_filter: persona.map(|s| s.to_string()),

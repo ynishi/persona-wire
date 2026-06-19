@@ -69,8 +69,7 @@ impl Probe for WorkflowDuplicateTrigger {
                             .collect::<Vec<_>>()
                             .join(", "),
                     ),
-                    fix: "consolidate into 1 workflow, or differentiate triggers"
-                        .to_string(),
+                    fix: "consolidate into 1 workflow, or differentiate triggers".to_string(),
                 });
             }
         }

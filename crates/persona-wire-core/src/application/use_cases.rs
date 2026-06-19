@@ -292,7 +292,13 @@ pub async fn wire_prompt_context(
 
             // base template = wire DB 動的 register `<persona>.section.<axis>` のみ。
             //                 不在は skip + warning (= builtin hardcode 廃止)。
-            let projection_name = format!("{}.section.{}", input.persona_id, axis);
+            // 名前 derive は application::projection_naming に集約 (doctor Probe 等が
+            // 同じ rule で resolve できるよう single SoT 化、 issue 19d888ee / 25544968)。
+            let projection_name =
+                crate::application::projection_naming::workflow_emit_projection_name(
+                    &input.persona_id,
+                    axis,
+                );
             let (base_template, base_target, base_engine, base_kind, base_config) =
                 match proj_reg.get(&projection_name)? {
                     Some(proj) => (

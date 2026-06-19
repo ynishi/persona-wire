@@ -3,12 +3,12 @@
 //! design.md §6 entry。 既存 `use_cases::graph_scan_summary` の orphan 判定
 //! ロジック (`is_self_attached_wiring`) を node 単位で再走査する。
 
+use crate::application::doctor::finding::Axis;
 use crate::application::doctor::finding::{Finding, Kind, Location, Severity};
 use crate::application::doctor::probe::{FindingSink, Probe, ProbeCtx};
 use crate::application::use_cases;
 use crate::domain::error::WireResult;
 use crate::domain::graph::Node;
-use crate::application::doctor::finding::Axis;
 
 pub struct GraphOrphanNode;
 
