@@ -18,14 +18,13 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_graph_check,
-    wire_init, wire_node_delete, wire_node_update, wire_nodes_create_batch, wire_projection_delete,
+    wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
+    wire_node_delete, wire_node_update, wire_nodes_create_batch, wire_projection_delete,
     wire_prompt_context, wire_query, wire_render, wire_spec_delete, wire_workflow_fire,
     wire_workflow_list, wire_workflow_register, WireCloseInput, WireDeleteInput,
-    WireEdgesCreateBatchInput, WireGraphCheckInput, WireGraphCheckOutput, WireInitInput,
-    WireNodeUpdateInput, WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput,
-    WireQueryInput, WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput,
-    WireWorkflowRegisterInput,
+    WireEdgesCreateBatchInput, WireGraphCheckOutput, WireInitInput, WireNodeUpdateInput,
+    WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
+    WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -354,18 +353,6 @@ impl WireServer {
         )
         .map_err(|e| e.to_string())?;
         Ok(out.report_markdown)
-    }
-
-    /// Axis 1 graph connectivity health check (standalone, read-only).
-    #[tool(
-        name = "wire_graph_check",
-        description = "Axis 1 graph connectivity health check: returns orphan_count / total_nodes / total_edges and a Markdown summary. Read-only, persona-agnostic. For the full 2-axis integrated report (graph + workflow coverage) use wire_doctor.",
-        annotations(read_only_hint = true, idempotent_hint = true)
-    )]
-    async fn wire_graph_check_tool(&self) -> Result<String, String> {
-        let s = self.storage.lock().map_err(|e| e.to_string())?;
-        let out = wire_graph_check(WireGraphCheckInput {}, &s).map_err(|e| e.to_string())?;
-        serde_json::to_string_pretty(&wire_graph_check_to_json(out)).map_err(|e| e.to_string())
     }
 
     /// 2-axis integrated health report (graph connectivity + workflow coverage).
