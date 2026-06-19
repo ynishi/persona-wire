@@ -351,6 +351,69 @@ they carry no edges (see §2). A non-zero count typically points at a bare
 persona node with no edges and no `source_uri` — add an edge or a metadata
 field to silence it.
 
+### wire_doctor — 2-axis integrated health report
+
+`wire_doctor` is now a 2-axis integrated health check. It internally calls
+`wire_graph_check` (axis 1: graph connectivity) and `wire_workflow_check` (axis
+2: workflow coverage) and returns a structured JSON response:
+
+```jsonc
+// MCP: wire_doctor — 2-axis integrated health check
+{}
+```
+
+Response shape:
+
+```json
+{
+  "orphan_node_count": 0,
+  "total_node_count": 3,
+  "total_edge_count": 2,
+  "report_markdown": "# wire_doctor report\n\n## graph_check …\n\n## workflow_check …",
+  "graph_check": {
+    "orphan_count": 0,
+    "total_nodes": 3,
+    "total_edges": 2,
+    "report_markdown": "## graph_check (axis 1: graph connectivity)\n…"
+  },
+  "workflow_check": {
+    "total_nodes": 3,
+    "declared_covered_count": 1,
+    "declared_covered": [],
+    "declared_uncovered": [],
+    "undeclared": [],
+    "exempt": [],
+    "workflows_observed": 1
+  }
+}
+```
+
+The top-level `orphan_node_count` / `total_node_count` / `total_edge_count`
+fields are backward-compat mirrors of `graph_check.orphan_count` /
+`graph_check.total_nodes` / `graph_check.total_edges` respectively. Existing
+callers that read only the flat fields continue to work unchanged.
+
+### wire_graph_check — standalone axis 1 health check
+
+`wire_graph_check` is also available as an independent MCP tool when you only
+need graph connectivity data (without workflow coverage):
+
+```jsonc
+// MCP: wire_graph_check — axis 1 graph connectivity only
+{}
+```
+
+Response shape:
+
+```json
+{
+  "orphan_count": 0,
+  "total_nodes": 3,
+  "total_edges": 2,
+  "report_markdown": "## graph_check (axis 1: graph connectivity)\n…"
+}
+```
+
 ```jsonc
 // MCP: wire_prompt_context — renders every registered axis for the persona
 { "persona_id": "alpha" }
