@@ -63,7 +63,10 @@ guide resource at `wire-guide://onboarding`.
 Pick the axes you want (`active` / `ng` / `trigger` / `handoff` / `toolmap`
 is one common shape, but anything works). For each axis create one node
 with a `source_uri`. Add an edge from the persona node for traceability
-(optional but recommended).
+(optional but recommended — wiring entries that carry `metadata.source_uri`
+or `metadata.maintenance_exempt: true` are recognised as **self-attached**
+and are excluded from the `wire_doctor` / `wire_close` orphan count, so an
+edge-less wiring entry will not be flagged as a graph-health issue).
 
 ```jsonc
 // MCP: wire_node_create
@@ -340,6 +343,13 @@ back to `Append` when the marker is absent.
 persona-wire wire-doctor
 persona-wire query --spec '{"And":[{"TypeIs":"outline_node"},{"MetadataEq":{"path":"persona","value":"alpha"}}]}'
 ```
+
+A healthy graph reports `orphan nodes (no edges, not self-attached): 0`.
+Wiring entries that hold `metadata.source_uri` or `metadata.maintenance_exempt:
+true` are treated as self-attached and are not counted as orphans even when
+they carry no edges (see §2). A non-zero count typically points at a bare
+persona node with no edges and no `source_uri` — add an edge or a metadata
+field to silence it.
 
 ```jsonc
 // MCP: wire_prompt_context — renders every registered axis for the persona
