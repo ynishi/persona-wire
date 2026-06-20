@@ -13,9 +13,9 @@ use persona_wire_adapter_mini_app::MiniAppAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
-use persona_wire_core::application::projection_registry::{
-    NamedProjection, ProjectionRegistry, TargetForm,
-};
+use persona_wire_core::application::projection_registry::ProjectionRegistry;
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
@@ -580,19 +580,19 @@ impl WireServer {
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
         let tf = TargetForm::parse(&p.target_form).map_err(|e| e.to_string())?;
+        // P3a Phase 2 (a) — MCP wire_projection_register surface does not yet
+        // accept the 3 Plugin hint fields; Phase 2 (c) will extend
+        // `WireProjectionRegisterParams` to expose `PluginDispatch::Custom`.
+        let entity = Projection::from_parts(
+            p.name.clone(),
+            p.spec_ref,
+            p.template,
+            tf,
+            PluginDispatch::Default,
+        )
+        .map_err(|e| e.to_string())?;
         ProjectionRegistry::new(&s)
-            .register(&NamedProjection {
-                name: p.name.clone(),
-                spec_ref: p.spec_ref,
-                template: p.template,
-                target_form: tf,
-                // P3a Phase 2 (a) — MCP wire_projection_register surface does
-                // not yet accept the 3 new Plugin hint fields; Phase 2 (c) will
-                // extend `WireProjectionRegisterParams` to expose them.
-                template_engine: None,
-                projection_kind: None,
-                projection_config: None,
-            })
+            .register(&entity)
             .map_err(|e| e.to_string())?;
         Ok(format!("registered projection: {}", p.name))
     }

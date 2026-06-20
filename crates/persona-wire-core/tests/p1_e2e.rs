@@ -5,9 +5,9 @@
 //! NamedProjection → wire_init renders → wire_close reports.
 
 use persona_wire_core::application::plugin_registry::PluginRegistry;
-use persona_wire_core::application::projection_registry::{
-    NamedProjection, ProjectionRegistry, TargetForm,
-};
+use persona_wire_core::application::projection_registry::ProjectionRegistry;
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     graph_scan_summary, wire_close, wire_init, WireCloseInput, WireInitInput,
@@ -111,26 +111,28 @@ fn full_pipeline_init_seed_register_render_close() {
     // Register NamedProjections.
     let proj_reg = ProjectionRegistry::new(&storage);
     proj_reg
-        .register(&NamedProjection {
-            name: "_persona_toc".into(),
-            spec_ref: "active_personas".into(),
-            template: "Personas ({{count}}): {{names}}".into(),
-            target_form: TargetForm::Prompt,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        .register(
+            &Projection::from_parts(
+                "_persona_toc",
+                "active_personas",
+                "Personas ({{count}}): {{names}}",
+                TargetForm::Prompt,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
     proj_reg
-        .register(&NamedProjection {
-            name: "_review_targets".into(),
-            spec_ref: "outline_review_targets".into(),
-            template: "Review targets ({{count}}): {{names}}".into(),
-            target_form: TargetForm::Markdown,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        .register(
+            &Projection::from_parts(
+                "_review_targets",
+                "outline_review_targets",
+                "Review targets ({{count}}): {{names}}",
+                TargetForm::Markdown,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
 
     // wire_init renders both projections.
@@ -193,15 +195,16 @@ fn wire_init_warns_on_dangling_spec_ref() {
 
     // Register a projection whose spec_ref doesn't exist.
     ProjectionRegistry::new(&storage)
-        .register(&NamedProjection {
-            name: "broken".into(),
-            spec_ref: "missing_spec".into(),
-            template: "shouldn't render".into(),
-            target_form: TargetForm::Prompt,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        .register(
+            &Projection::from_parts(
+                "broken",
+                "missing_spec",
+                "shouldn't render",
+                TargetForm::Prompt,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
 
     let out = wire_init(
@@ -248,15 +251,16 @@ fn composed_specification_roundtrips_through_storage_and_evaluates() {
         .register("personas_owned_by_alpha", &spec)
         .unwrap();
     ProjectionRegistry::new(&storage)
-        .register(&NamedProjection {
-            name: "_owned".into(),
-            spec_ref: "personas_owned_by_alpha".into(),
-            template: "{{count}} matched: {{names}}".into(),
-            target_form: TargetForm::Prompt,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        .register(
+            &Projection::from_parts(
+                "_owned",
+                "personas_owned_by_alpha",
+                "{{count}} matched: {{names}}",
+                TargetForm::Prompt,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
 
     let out = wire_init(

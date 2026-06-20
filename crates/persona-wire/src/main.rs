@@ -9,8 +9,10 @@ use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::{
-    NamedProjection, ProjectionRegistry, TargetForm,
+    NamedProjection, ProjectionRegistry,
 };
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_init, wire_query, wire_render, WireCloseInput, WireInitInput,
@@ -428,24 +430,26 @@ fn main() -> Result<()> {
             } => {
                 let s = SqliteStorage::open(&db)?;
                 let tf = TargetForm::parse(&target_form)?;
-                ProjectionRegistry::new(&s).register(&NamedProjection {
-                    name: name.clone(),
+                // P3a Phase 2 (a) — CLI `projection register` does not yet
+                // accept the 3 Plugin hint fields; Phase 2 (c) will expose
+                // them via additional flags (PluginDispatch::Custom).
+                let entity = Projection::from_parts(
+                    name.clone(),
                     spec_ref,
                     template,
-                    target_form: tf,
-                    // P3a Phase 2 (a) — CLI `projection register` does not yet
-                    // accept the 3 new Plugin hint fields; Phase 2 (c) will
-                    // expose them via additional flags.
-                    template_engine: None,
-                    projection_kind: None,
-                    projection_config: None,
-                })?;
+                    tf,
+                    PluginDispatch::Default,
+                )?;
+                ProjectionRegistry::new(&s).register(&entity)?;
                 println!("registered projection: {name}");
             }
             ProjectionOp::Get { name } => {
                 let s = SqliteStorage::open(&db)?;
                 match ProjectionRegistry::new(&s).get(&name)? {
-                    Some(p) => println!("{}", serde_json::to_string_pretty(&p)?),
+                    Some(p) => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&NamedProjection::from_entity(&p))?
+                    ),
                     None => {
                         eprintln!("not found: {name}");
                         std::process::exit(1);

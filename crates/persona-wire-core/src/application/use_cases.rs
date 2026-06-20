@@ -130,10 +130,10 @@ pub fn wire_init(
         let Some(proj) = proj_reg.get(&name)? else {
             continue;
         };
-        let Some(spec) = spec_reg.get(&proj.spec_ref)? else {
+        let Some(spec) = spec_reg.get(proj.spec_ref().as_str())? else {
             warnings.push(format!(
                 "projection '{name}': spec_ref '{}' not registered",
-                proj.spec_ref
+                proj.spec_ref()
             ));
             continue;
         };
@@ -160,16 +160,17 @@ pub fn wire_init(
         // Non-static kinds are async-only and surface a structured error so
         // the caller hops to `wire_prompt_context` instead of silently
         // falling back to engine-direct.
-        assert_static_projection_kind(&proj.name, proj.projection_kind.as_deref())?;
+        let (engine_hint, kind_hint, _config) = proj.plugin().to_optional_parts();
+        assert_static_projection_kind(proj.name().as_str(), kind_hint)?;
         let rendered = resolve_engine_render(
             registry,
-            proj.template_engine.as_deref(),
-            &proj.template,
+            engine_hint,
+            proj.template().as_str(),
             &data,
         )?;
         projections.push(RenderedProjection {
-            name: proj.name,
-            target_form: proj.target_form,
+            name: proj.name().as_str().to_owned(),
+            target_form: proj.target_form(),
             rendered,
         });
     }
@@ -312,13 +313,16 @@ pub async fn wire_prompt_context(
                 );
             let (base_template, base_target, base_engine, base_kind, base_config) =
                 match proj_reg.get(&projection_name)? {
-                    Some(proj) => (
-                        proj.template,
-                        proj.target_form,
-                        proj.template_engine,
-                        proj.projection_kind,
-                        proj.projection_config,
-                    ),
+                    Some(proj) => {
+                        let (engine, kind, config) = proj.plugin().to_optional_parts();
+                        (
+                            proj.template().as_str().to_owned(),
+                            proj.target_form(),
+                            engine.map(str::to_owned),
+                            kind.map(str::to_owned),
+                            config.cloned(),
+                        )
+                    }
                     None => {
                         warnings.push(format!(
                             "axis '{axis}' has no registered projection \
@@ -675,11 +679,11 @@ pub fn wire_render(
             )))
         })?;
     let spec = SpecRegistry::new(storage)
-        .get(&proj.spec_ref)?
+        .get(proj.spec_ref().as_str())?
         .ok_or_else(|| {
             crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
                 "spec_ref (dangling): {}",
-                proj.spec_ref
+                proj.spec_ref()
             )))
         })?;
     let matched = collect_matching_nodes(storage, &spec)?;
@@ -700,16 +704,17 @@ pub fn wire_render(
         "nodes": nodes_json,
     });
     // P3a Phase 2 (c) — sync path: non-static kinds are async-only.
-    assert_static_projection_kind(&proj.name, proj.projection_kind.as_deref())?;
+    let (engine_hint, kind_hint, _config) = proj.plugin().to_optional_parts();
+    assert_static_projection_kind(proj.name().as_str(), kind_hint)?;
     let rendered = resolve_engine_render(
         registry,
-        proj.template_engine.as_deref(),
-        &proj.template,
+        engine_hint,
+        proj.template().as_str(),
         &data,
     )?;
     Ok(WireRenderOutput {
-        name: proj.name,
-        target_form: proj.target_form,
+        name: proj.name().as_str().to_owned(),
+        target_form: proj.target_form(),
         rendered,
     })
 }
@@ -1353,7 +1358,7 @@ pub fn wire_workflow_fire(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::projection_registry::NamedProjection;
+    use crate::domain::entity::projection::{PluginDispatch, Projection};
     use crate::domain::graph::{Edge, Node};
     use serde_json::json;
 
@@ -1411,15 +1416,16 @@ mod tests {
             .unwrap();
         // Register Projection
         ProjectionRegistry::new(&s)
-            .register(&NamedProjection {
-                name: "_persona_toc".into(),
-                spec_ref: "active_personas".into(),
-                template: "Personas ({{count}}): {{names}}".into(),
-                target_form: TargetForm::Prompt,
-                template_engine: None,
-                projection_kind: None,
-                projection_config: None,
-            })
+            .register(
+                &Projection::from_parts(
+                    "_persona_toc",
+                    "active_personas",
+                    "Personas ({{count}}): {{names}}",
+                    TargetForm::Prompt,
+                    PluginDispatch::Default,
+                )
+                .unwrap(),
+            )
             .unwrap();
 
         let out = wire_init(
@@ -1444,15 +1450,16 @@ mod tests {
     fn wire_init_warns_on_unknown_spec_ref() {
         let s = setup();
         ProjectionRegistry::new(&s)
-            .register(&NamedProjection {
-                name: "broken".into(),
-                spec_ref: "no_such_spec".into(),
-                template: "x".into(),
-                target_form: TargetForm::Prompt,
-                template_engine: None,
-                projection_kind: None,
-                projection_config: None,
-            })
+            .register(
+                &Projection::from_parts(
+                    "broken",
+                    "no_such_spec",
+                    "x",
+                    TargetForm::Prompt,
+                    PluginDispatch::Default,
+                )
+                .unwrap(),
+            )
             .unwrap();
         let out = wire_init(
             WireInitInput {
@@ -1669,15 +1676,16 @@ mod tests {
             .register("p", &Specification::TypeIs("persona".into()))
             .unwrap();
         ProjectionRegistry::new(&s)
-            .register(&NamedProjection {
-                name: "doomed".into(),
-                spec_ref: "p".into(),
-                template: "x".into(),
-                target_form: TargetForm::Prompt,
-                template_engine: None,
-                projection_kind: None,
-                projection_config: None,
-            })
+            .register(
+                &Projection::from_parts(
+                    "doomed",
+                    "p",
+                    "x",
+                    TargetForm::Prompt,
+                    PluginDispatch::Default,
+                )
+                .unwrap(),
+            )
             .unwrap();
         let out = wire_projection_delete(
             WireDeleteInput {
@@ -2068,15 +2076,16 @@ mod tests {
             .register("p", &Specification::TypeIs("persona".into()))
             .unwrap();
         ProjectionRegistry::new(&s)
-            .register(&NamedProjection {
-                name: "async_only".into(),
-                spec_ref: "p".into(),
-                template: "x".into(),
-                target_form: TargetForm::Prompt,
-                template_engine: None,
-                projection_kind: Some("llm".into()),
-                projection_config: None,
-            })
+            .register(
+                &Projection::from_parts(
+                    "async_only",
+                    "p",
+                    "x",
+                    TargetForm::Prompt,
+                    PluginDispatch::custom("handlebars", "llm", None).unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         let result = wire_init(
             WireInitInput {
@@ -2101,15 +2110,16 @@ mod tests {
             .register("p", &Specification::TypeIs("persona".into()))
             .unwrap();
         ProjectionRegistry::new(&s)
-            .register(&NamedProjection {
-                name: "summarized".into(),
-                spec_ref: "p".into(),
-                template: "x".into(),
-                target_form: TargetForm::Prompt,
-                template_engine: None,
-                projection_kind: Some("cache".into()),
-                projection_config: None,
-            })
+            .register(
+                &Projection::from_parts(
+                    "summarized",
+                    "p",
+                    "x",
+                    TargetForm::Prompt,
+                    PluginDispatch::custom("handlebars", "cache", None).unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         let result = wire_render(
             WireRenderInput {
@@ -2136,15 +2146,16 @@ mod tests {
             .register("p", &Specification::TypeIs("persona".into()))
             .unwrap();
         ProjectionRegistry::new(&s)
-            .register(&NamedProjection {
-                name: "explicit_static".into(),
-                spec_ref: "p".into(),
-                template: "n={{count}}".into(),
-                target_form: TargetForm::Prompt,
-                template_engine: None,
-                projection_kind: Some("static".into()),
-                projection_config: None,
-            })
+            .register(
+                &Projection::from_parts(
+                    "explicit_static",
+                    "p",
+                    "n={{count}}",
+                    TargetForm::Prompt,
+                    PluginDispatch::custom("handlebars", "static", None).unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         let out = wire_init(
             WireInitInput {

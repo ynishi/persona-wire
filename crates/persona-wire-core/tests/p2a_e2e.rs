@@ -8,9 +8,9 @@
 //!   totals confirmed via wire_doctor).
 
 use persona_wire_core::application::plugin_registry::PluginRegistry;
-use persona_wire_core::application::projection_registry::{
-    NamedProjection, ProjectionRegistry, TargetForm,
-};
+use persona_wire_core::application::projection_registry::ProjectionRegistry;
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     graph_scan_summary, wire_close, wire_doctor, wire_init, WireCloseInput, WireInitInput,
@@ -147,15 +147,16 @@ fn wire_doctor_with_dynamic_specification_e2e() {
         .register("active_personas", &spec)
         .unwrap();
     ProjectionRegistry::new(&s)
-        .register(&NamedProjection {
-            name: "_active".into(),
-            spec_ref: "active_personas".into(),
-            template: "Active personas ({{count}}): {{names}}".into(),
-            target_form: TargetForm::Prompt,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        .register(
+            &Projection::from_parts(
+                "_active",
+                "active_personas",
+                "Active personas ({{count}}): {{names}}",
+                TargetForm::Prompt,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
 
     // wire_init renders only the 2 active personas.

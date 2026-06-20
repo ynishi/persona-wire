@@ -7,9 +7,9 @@
 //! - validation: spec + spec_ref are mutually exclusive; one is required
 
 use persona_wire_core::application::plugin_registry::PluginRegistry;
-use persona_wire_core::application::projection_registry::{
-    NamedProjection, ProjectionRegistry, TargetForm,
-};
+use persona_wire_core::application::projection_registry::ProjectionRegistry;
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_query, wire_render, WireQueryInput, WireRenderInput,
@@ -235,15 +235,16 @@ fn wire_render_evaluates_registered_projection_by_name() {
         )
         .unwrap();
     ProjectionRegistry::new(&s)
-        .register(&NamedProjection {
-            name: "_active".into(),
-            spec_ref: "active_personas".into(),
-            template: "Active personas ({{count}}): {{names}}".into(),
-            target_form: TargetForm::Prompt,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        .register(
+            &Projection::from_parts(
+                "_active",
+                "active_personas",
+                "Active personas ({{count}}): {{names}}",
+                TargetForm::Prompt,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
 
     let out = wire_render(
@@ -284,15 +285,16 @@ fn wire_render_errors_on_unknown_projection_and_dangling_spec() {
 
     // (b) Projection whose spec_ref dangles.
     ProjectionRegistry::new(&s)
-        .register(&NamedProjection {
-            name: "broken".into(),
-            spec_ref: "missing_spec".into(),
-            template: "x".into(),
-            target_form: TargetForm::Prompt,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        .register(
+            &Projection::from_parts(
+                "broken",
+                "missing_spec",
+                "x",
+                TargetForm::Prompt,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
     let err = wire_render(
         WireRenderInput {

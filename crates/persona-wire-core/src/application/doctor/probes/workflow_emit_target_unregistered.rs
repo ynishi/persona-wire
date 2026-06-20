@@ -90,7 +90,8 @@ mod tests {
     use super::*;
     use crate::application::doctor::finding::Kind;
     use crate::application::doctor::test_helpers::*;
-    use crate::application::projection_registry::NamedProjection;
+    use crate::domain::entity::projection::{PluginDispatch, Projection};
+    use crate::domain::entity::TargetForm;
     use serde_json::json;
 
     #[test]
@@ -128,15 +129,16 @@ mod tests {
             .unwrap();
         let reg = ProjectionRegistry::new(&s);
         // register the *resolved* name shape the runtime would look up.
-        reg.register(&NamedProjection {
-            name: "alpha.section.active".into(),
-            spec_ref: "any_persona".into(),
-            template: "x".into(),
-            target_form: crate::application::projection_registry::TargetForm::Prompt,
-            template_engine: None,
-            projection_kind: None,
-            projection_config: None,
-        })
+        reg.register(
+            &Projection::from_parts(
+                "alpha.section.active",
+                "any_persona",
+                "x",
+                TargetForm::Prompt,
+                PluginDispatch::Default,
+            )
+            .unwrap(),
+        )
         .unwrap();
         s.insert_node(&workflow_node(
             "wf1",
