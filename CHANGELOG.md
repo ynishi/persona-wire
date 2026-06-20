@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.4.0] - 2026-06-20
+
+### Added
+
 - **`wire_graph_check` — new standalone use_case + MCP tool (axis 1: graph connectivity)** — `pub fn wire_graph_check(input: WireGraphCheckInput, storage: &SqliteStorage)` exposed in `persona-wire-core` and as MCP tool `wire_graph_check`. Returns `WireGraphCheckOutput { orphan_count, total_nodes, total_edges, report_markdown }`. Callable independently or as a sub-step of `wire_doctor` (Crux #1 / #2 — genuine separate fn, not a rename of `graph_scan_summary`).
 
 ### Changed
