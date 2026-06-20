@@ -8,7 +8,8 @@ use persona_wire_adapter_mini_app::MiniAppAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
-use persona_wire_core::application::projection_registry::{NamedProjection, ProjectionRegistry};
+use persona_wire_core::application::projection_mapper::projection_to_dto;
+use persona_wire_core::application::projection_registry::ProjectionRegistry;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_init, wire_query, wire_render, WireCloseInput, WireInitInput,
@@ -446,7 +447,7 @@ fn main() -> Result<()> {
                 match ProjectionRegistry::new(&s).get(&name)? {
                     Some(p) => println!(
                         "{}",
-                        serde_json::to_string_pretty(&NamedProjection::from_entity(&p))?
+                        serde_json::to_string_pretty(&projection_to_dto(&p))?
                     ),
                     None => {
                         eprintln!("not found: {name}");

@@ -1,72 +1,21 @@
-//! Projection registry — Data Mapper (Fowler PoEAA) between the
-//! [`Projection`] Domain Entity and the SQLite `projections` table.
+//! Projection registry — thin storage wrapper that routes through the
+//! [`projection_mapper`](super::projection_mapper) Data Mapper.
 //!
-//! `NamedProjection` is the persistence-shape DTO: an anemic row mirror used
-//! only inside this module for serde + column round-trip. Application code
-//! outside the registry consumes the typed [`Projection`] Entity exclusively;
-//! all VO + cross-field invariants live in the Entity layer. BP: CQRS Read
-//! Model + Data Mapper.
+//! The DTO (`NamedProjection`) + Entity round-trip lives in
+//! [`projection_mapper`](super::projection_mapper). This module owns only
+//! the SQLite column tuple ↔ DTO translation and the `register / get / list`
+//! flow surface.
+//!
+//! Sibling of [`wiring_mapper`](super::wiring_mapper) /
+//! [`workflow_mapper`](super::workflow_mapper) consumers in `use_cases.rs`.
 
+pub use super::projection_mapper::NamedProjection;
 pub use crate::domain::entity::TargetForm;
 
-use crate::domain::entity::projection::{PluginDispatch, Projection};
+use super::projection_mapper::{dto_to_projection, projection_to_dto};
+use crate::domain::entity::projection::Projection;
 use crate::domain::error::{WireError, WireResult};
 use crate::infrastructure::storage::SqliteStorage;
-use serde::{Deserialize, Serialize};
-
-/// Persistence DTO. Anemic by design — invariants live in [`Projection`].
-///
-/// Kept `pub` only because a few legacy callsites (doctor probes / tests)
-/// still hand-build rows; new code should construct [`Projection`] and let
-/// the registry handle the DTO conversion.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NamedProjection {
-    pub name: String,
-    pub spec_ref: String,
-    pub template: String,
-    pub target_form: TargetForm,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_engine: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projection_kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projection_config: Option<serde_json::Value>,
-}
-
-impl NamedProjection {
-    /// DTO → Domain Entity. Runs all VO validations and rejects illegal
-    /// PluginDispatch combinations at the mapper boundary.
-    pub fn into_entity(self) -> WireResult<Projection> {
-        let plugin = PluginDispatch::from_optional_parts(
-            self.template_engine,
-            self.projection_kind,
-            self.projection_config,
-        )?;
-        Projection::from_parts(
-            self.name,
-            self.spec_ref,
-            self.template,
-            self.target_form,
-            plugin,
-        )
-    }
-
-    /// Domain Entity → DTO. Total (no failure path) — Entity invariants are
-    /// strictly stronger than DTO shape, so projection is always defined.
-    pub fn from_entity(p: &Projection) -> Self {
-        let (engine, kind, config) = p.plugin().to_optional_parts();
-        Self {
-            name: p.name().as_str().to_owned(),
-            spec_ref: p.spec_ref().as_str().to_owned(),
-            template: p.template().as_str().to_owned(),
-            target_form: p.target_form(),
-            template_engine: engine.map(str::to_owned),
-            projection_kind: kind.map(str::to_owned),
-            projection_config: config.cloned(),
-        }
-    }
-}
 
 pub struct ProjectionRegistry<'a> {
     storage: &'a SqliteStorage,
@@ -79,7 +28,7 @@ impl<'a> ProjectionRegistry<'a> {
 
     /// Persist a Domain Entity through the Data Mapper boundary.
     pub fn register(&self, p: &Projection) -> WireResult<()> {
-        let dto = NamedProjection::from_entity(p);
+        let dto = projection_to_dto(p);
         self.upsert_dto(&dto)
     }
 
@@ -90,14 +39,15 @@ impl<'a> ProjectionRegistry<'a> {
         let Some(dto) = self.get_dto(name)? else {
             return Ok(None);
         };
-        Some(dto.into_entity()).transpose()
+        Some(dto_to_projection(dto)).transpose()
     }
 
     pub fn list(&self) -> WireResult<Vec<String>> {
         self.storage.list_projections()
     }
 
-    // -- Mapper internals (kept private; DTO does not leak past the boundary).
+    // -- Column tuple ↔ DTO internals (kept private; DTO does not leak past
+    //    the boundary except via the mapper re-export).
 
     fn upsert_dto(&self, p: &NamedProjection) -> WireResult<()> {
         let cfg_text = match &p.projection_config {
@@ -146,7 +96,7 @@ impl<'a> ProjectionRegistry<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::error::DomainError;
+    use crate::domain::entity::projection::PluginDispatch;
 
     fn setup() -> SqliteStorage {
         let s = SqliteStorage::open_in_memory().unwrap();
@@ -224,32 +174,5 @@ mod tests {
         let storage = setup();
         let reg = ProjectionRegistry::new(&storage);
         assert!(reg.get("nope").unwrap().is_none());
-    }
-
-    #[test]
-    fn into_entity_rejects_illegal_plugin_state() {
-        // engine without kind — illegal at the mapper boundary
-        let dto = NamedProjection {
-            name: "p".into(),
-            spec_ref: "s".into(),
-            template: "t".into(),
-            target_form: TargetForm::Prompt,
-            template_engine: Some("handlebars".into()),
-            projection_kind: None,
-            projection_config: None,
-        };
-        let err = dto.into_entity().expect_err("should reject");
-        assert!(matches!(
-            err,
-            WireError::Domain(DomainError::InvalidProjection(_))
-        ));
-    }
-
-    #[test]
-    fn from_entity_into_entity_pure_roundtrip() {
-        let p = sample_projection();
-        let dto = NamedProjection::from_entity(&p);
-        let back = dto.into_entity().unwrap();
-        assert_eq!(back, p);
     }
 }
