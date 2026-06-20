@@ -1,6 +1,6 @@
 //! Projection Overlay — Wire の domain 型 (上流 SoT 非依存)。
 //!
-//! `wire_prompt_context` Phase 0 で各 axis の base template に被せる Overlay 情報。
+//! `wire_prompt_context` Phase 0 で各 slot の base template に被せる Overlay 情報。
 //! 取得経路は `PluginRegistry::route("<scheme>://<persona_id>/projections")` 経由の
 //! Adapter dispatch (= ACL Facade、 上流 SDK 固有の TOML field / Type を Wire に漏らさない)。
 //!
@@ -11,7 +11,7 @@
 //!   "scheme": "<adapter-scheme>",
 //!   "persona_id": "<id>",
 //!   "projections": {
-//!     "<axis>": {
+//!     "<slot>": {
 //!       "template": "<string>",
 //!       "target_form": "markdown" | "json" | "text" | "ascii",
 //!       "merge_strategy": "replace" | "append" | "prepend" | "section"
@@ -29,7 +29,7 @@ use crate::application::merger::MergeStrategy;
 use crate::application::projection_registry::TargetForm;
 use crate::domain::error::WireResult;
 
-/// 1 axis 分の Overlay 解決結果 (Wire domain 型)。
+/// 1 slot 分の Overlay 解決結果 (Wire domain 型)。
 #[derive(Debug, Clone)]
 pub struct ProjectionOverlay {
     pub template: String,
@@ -37,7 +37,7 @@ pub struct ProjectionOverlay {
     pub strategy: MergeStrategy,
 }
 
-/// Adapter return JSON を `BTreeMap<axis, ProjectionOverlay>` に翻訳する。
+/// Adapter return JSON を `BTreeMap<slot, ProjectionOverlay>` に翻訳する。
 ///
 /// best-effort: `projections` 不在 / 形不正は空 map (= 「overlay 無し」 として扱う)。
 /// Wire domain enum の parse fail は default 値に倒す (本 module 内で挙動を吸収)。
@@ -48,7 +48,7 @@ pub fn parse_overlay_response(
         return Ok(BTreeMap::new());
     };
     let mut out = BTreeMap::new();
-    for (axis, entry) in projections.iter() {
+    for (slot, entry) in projections.iter() {
         let Some(obj) = entry.as_object() else {
             continue;
         };
@@ -66,7 +66,7 @@ pub fn parse_overlay_response(
             .map(MergeStrategy::parse)
             .unwrap_or(MergeStrategy::Replace);
         out.insert(
-            axis.clone(),
+            slot.clone(),
             ProjectionOverlay {
                 template: template.to_string(),
                 target_form,

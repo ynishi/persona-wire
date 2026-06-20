@@ -18,7 +18,7 @@ use std::path::Path;
 
 use common::{
     bootstrap_mini_app_table, bootstrap_mini_app_table_no_alias, each_title_template, make_layout,
-    make_layout_with_project, schema_for, wire_one_axis, McpClient, STATUS_TITLE_SCHEMA,
+    make_layout_with_project, schema_for, wire_one_slot, McpClient, STATUS_TITLE_SCHEMA,
 };
 use mini_app_core::aggregator::SourceSpec;
 use mini_app_core::alias_storage::{AliasRecord, AliasScope, GlobalAliasStorage};
@@ -115,7 +115,7 @@ async fn e2e_scope_user_hits_global_user_storage() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "scope_user_hit";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "active",
@@ -168,7 +168,7 @@ async fn e2e_scope_user_miss_does_not_fallback_to_per_table() {
     // _global.db (User scope) is intentionally NOT seeded with `shadow_alias`.
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "scope_user_miss";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "ghost",
@@ -232,7 +232,7 @@ async fn e2e_scope_project_hits_global_project_storage() {
     );
     let persona_id = "scope_proj_hit";
     let project_root_str = layout.mini_app_project_dir.to_string_lossy();
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "active",
@@ -281,7 +281,7 @@ async fn e2e_scope_project_without_root_parse_errors() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "scope_proj_no_root";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "ghost",
@@ -335,7 +335,7 @@ async fn e2e_legacy_uri_resolves_via_global_user_first() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "legacy_global";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "active",
@@ -389,7 +389,7 @@ async fn e2e_legacy_uri_falls_back_to_per_table_aliases() {
     // _global.db (User scope) is intentionally empty.
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "legacy_per_table";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "active",
@@ -439,7 +439,7 @@ async fn e2e_legacy_uri_double_miss_emits_combined_error() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "legacy_double_miss";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "ghost",

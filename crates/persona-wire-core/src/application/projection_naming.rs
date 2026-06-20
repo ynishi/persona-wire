@@ -1,4 +1,4 @@
-//! Projection name derivation — single SoT for `(persona_id, axis)` → registered
+//! Projection name derivation — single SoT for `(persona_id, slot)` → registered
 //! NamedProjection name mapping.
 //!
 //! Consumers:
@@ -10,11 +10,11 @@
 //! applies — origin of the false-positive in `workflow.emit_target_unregistered`.
 
 /// Compute the NamedProjection name that the runtime looks up in
-/// `ProjectionRegistry` for a given persona + emit axis.
+/// `ProjectionRegistry` for a given persona + emit slot.
 ///
-/// Workflow `action.projection_names` entries are **axis names**, not
-/// literal projection names; the runtime derives `<persona>.section.<axis>`
+/// Workflow `action.projection_names` entries are **slot names**, not
+/// literal projection names; the runtime derives `<persona>.section.<slot>`
 /// before hitting the registry.
-pub fn workflow_emit_projection_name(persona_id: &str, axis: &str) -> String {
-    format!("{persona_id}.section.{axis}")
+pub fn workflow_emit_projection_name(persona_id: &str, slot: &str) -> String {
+    format!("{persona_id}.section.{slot}")
 }

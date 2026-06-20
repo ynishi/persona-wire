@@ -59,13 +59,13 @@ enum Command {
         op: EdgeOp,
     },
 
-    /// Specification registry (dynamic-axis query objects).
+    /// Specification registry (dynamic / composable selector).
     Spec {
         #[command(subcommand)]
         op: SpecOp,
     },
 
-    /// NamedProjection registry (fixed-axis query + template).
+    /// NamedProjection registry (fixed / named view: query + template).
     Projection {
         #[command(subcommand)]
         op: ProjectionOp,

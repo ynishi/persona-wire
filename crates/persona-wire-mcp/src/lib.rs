@@ -216,8 +216,8 @@ pub struct WireNodeUpdateParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WirePromptContextParams {
     pub persona_id: String,
-    /// Optional subset of axis names to render (e.g. `["active", "ng"]`).
-    /// `None` (omitted) = render all axes registered in persona-pack
+    /// Optional subset of slot names to render (e.g. `["active", "ng"]`).
+    /// `None` (omitted) = render all slots registered in persona-pack
     /// `[extra.persona_wire.sections]`.
     #[serde(default)]
     pub projection_names: Option<Vec<String>>,
@@ -551,7 +551,7 @@ impl WireServer {
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
 
-    /// Register a Specification (dynamic-axis query object).
+    /// Register a Specification (dynamic / composable selector).
     #[tool(
         name = "wire_spec_register",
         description = "Register a Specification by name. `json` is the serialised Specification body, e.g. `{\"TypeIs\":\"persona\"}` or `{\"And\":[...]}`."
@@ -569,7 +569,7 @@ impl WireServer {
         Ok(format!("registered spec: {}", p.name))
     }
 
-    /// Register a NamedProjection (fixed-axis: spec + template + form).
+    /// Register a NamedProjection (fixed / named view: spec + template + form).
     #[tool(
         name = "wire_projection_register",
         description = "Register a NamedProjection. spec_ref must name a previously registered Specification. target_form ∈ {prompt|markdown|json|ascii}."
@@ -708,7 +708,7 @@ impl WireServer {
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
 
-    /// One-shot entry: discover persona-scoped wiring entries, fetch each axis
+    /// One-shot entry: discover persona-scoped wiring entries, fetch each slot
     /// via the Layer 6 Adapter, render with the registered NamedProjection
     /// (optionally merged with a persona-pack overlay), and concatenate the
     /// rendered blocks into a single PromptContext.

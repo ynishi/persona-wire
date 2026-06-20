@@ -1,10 +1,10 @@
-//! workflow.emit_target_unregistered — `action.projection_names` axis を
-//! runtime と同じ name derive rule で `<persona>.section.<axis>` に format
+//! workflow.emit_target_unregistered — `action.projection_names` slot を
+//! runtime と同じ name derive rule で `<persona>.section.<slot>` に format
 //! してから `ProjectionRegistry` を引き、 未登録なら error finding。
 //!
 //! design.md §7 entry。 emit しても受け手不在 = 永久空撃ち を検出する。
 //!
-//! `action.projection_names` の各 entry は literal name ではなく **axis 名**
+//! `action.projection_names` の各 entry は literal name ではなく **slot 名**
 //! (= use_cases::wire_prompt_context が `projection_naming::workflow_emit_projection_name`
 //! で resolve する rule と同じ SoT を共有)。 旧実装はこの derive を行わず、
 //! literal name を ProjectionRegistry に直接突き合わせて false positive を
@@ -53,8 +53,8 @@ impl Probe for WorkflowEmitTargetUnregistered {
                 continue;
             };
             for n in names {
-                let Some(axis) = n.as_str() else { continue };
-                let resolved = workflow_emit_projection_name(persona, axis);
+                let Some(slot) = n.as_str() else { continue };
+                let resolved = workflow_emit_projection_name(persona, slot);
                 if registered.contains(&resolved) {
                     continue;
                 }
@@ -70,7 +70,7 @@ impl Probe for WorkflowEmitTargetUnregistered {
                         ..Default::default()
                     },
                     description: format!(
-                        "workflow `{wid}` emits axis `{axis}` for persona `{persona}` \
+                        "workflow `{wid}` emits slot `{slot}` for persona `{persona}` \
                          but no NamedProjection `{resolved}` is registered",
                         wid = w.id,
                     ),
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn emits_error_when_resolved_name_is_not_registered() {
         let s = setup();
-        // axis "ghost" → resolved name "alpha.section.ghost" → not in registry
+        // slot "ghost" → resolved name "alpha.section.ghost" → not in registry
         s.insert_node(&workflow_node(
             "wf1",
             Some("alpha"),
@@ -113,7 +113,7 @@ mod tests {
         assert_eq!(
             f[0].location.projection_name.as_deref(),
             Some("alpha.section.ghost"),
-            "Probe must report the resolved <persona>.section.<axis> name"
+            "Probe must report the resolved <persona>.section.<slot> name"
         );
     }
 
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn quiet_for_workflow_without_persona_id() {
-        // Without persona_id we cannot derive `<persona>.section.<axis>`;
+        // Without persona_id we cannot derive `<persona>.section.<slot>`;
         // MCP layer rejects this anyway so the Probe stays quiet.
         let s = setup();
         s.insert_node(&workflow_node(

@@ -192,7 +192,7 @@ pub fn wire_init(
 #[derive(Debug)]
 pub struct WirePromptContextInput {
     pub persona_id: String,
-    /// `Some(["active", "ng"])` で該当 axis のみ render、 `None` で全 axis。
+    /// `Some(["active", "ng"])` で該当 slot のみ render、 `None` で全 slot。
     pub projection_names: Option<Vec<String>>,
 }
 
@@ -206,9 +206,9 @@ pub struct WirePromptContextOutput {
     pub warnings: Vec<String>,
 }
 
-/// 各 axis 1 件の Phase 1 sync collect 結果。
-struct CollectedAxis {
-    axis: String,
+/// 各 slot 1 件の Phase 1 sync collect 結果。
+struct CollectedSlot {
+    slot: String,
     source_uri: String,
     target_form: TargetForm,
     template: String,
@@ -221,21 +221,21 @@ struct CollectedAxis {
     /// P3a Phase 2 (c) — NamedProjection 由来の `projection_config` を Phase 2
     /// render dispatch まで運ぶ (例: LLM endpoint / cache TTL)。
     projection_config: Option<serde_json::Value>,
-    /// Projection 名 (= `<persona>.section.<axis>`)。 エラー / warning メッセージで
+    /// Projection 名 (= `<persona>.section.<slot>`)。 エラー / warning メッセージで
     /// projection を指し示すのに使う。
     projection_name: String,
 }
 
-/// 全 builtin axis (or projection_names で subset) を iterate し、 各 axis の
-/// **配線 (source_uri)** を **wire DB の wiring entry `<persona>.<axis>`** から取得、
+/// 全 builtin slot (or projection_names で subset) を iterate し、 各 slot の
+/// **配線 (source_uri)** を **wire DB の wiring entry `<persona>.<slot>`** から取得、
 /// **template** を 3 段優先 (1: persona-pack overlay × `MergeStrategy.merge` / 2: wire
-/// DB の動的 register projection `<persona>.section.<axis>` / 3: `BUILTIN_PROJECTIONS`)
-/// で解決して Adapter で fresh fetch + render し、 全 axis を concat した
+/// DB の動的 register projection `<persona>.section.<slot>` / 3: `BUILTIN_PROJECTIONS`)
+/// で解決して Adapter で fresh fetch + render し、 全 slot を concat した
 /// **PromptContext** を 1 call で return する `/wake` 用 entry。
 ///
 /// 設計確定 (2026-06-16 reframe):
 /// - 配線 SoT = **wire DB wiring entry**。 persona-pack には書かない (= 二重管理 drift 防止)
-/// - persona-pack `[extra.persona_wire.projections.<axis>]` は **Projection template の
+/// - persona-pack `[extra.persona_wire.projections.<slot>]` は **Projection template の
 ///   Overlay only** (persona 固有 emote / register 等を `MergeStrategy` 指定で被せる)
 /// - `projection_names: Some([...])` で subset 指定可能 (= 動的 Selection)
 pub async fn wire_prompt_context(
@@ -260,20 +260,22 @@ pub async fn wire_prompt_context(
     };
 
     // ---- Phase 1: sync collect (MutexGuard を await 跨がない form) ----
-    //   axis list = projection_names で subset 指定があればそれ、
+    //   slot list = projection_names で subset 指定があればそれ、
     //               None なら wire DB の wiring entry (= persona-scoped Node) を
-    //               spec query で全件取得し metadata.axis を抽出する。
+    //               spec query で全件取得し metadata.axis (= storage 互換 key) を抽出する。
     let mut warnings = Vec::new();
-    let collected: Vec<CollectedAxis> = {
+    let collected: Vec<CollectedSlot> = {
         let s = storage.lock().map_err(|_| {
             crate::domain::error::WireError::Storage("storage mutex poisoned".to_string())
         })?;
         let proj_reg = ProjectionRegistry::new(&s);
 
-        let axes: Vec<String> = if let Some(names) = input.projection_names.as_ref() {
+        let slots: Vec<String> = if let Some(names) = input.projection_names.as_ref() {
             names.clone()
         } else {
-            // wire DB から persona の wiring entry 全件 spec query → axis 抽出
+            // wire DB から persona の wiring entry 全件 spec query → slot 抽出
+            // (`metadata["axis"]` の literal key は storage 互換のため keep、
+            // docs/design/render-trinity-domain-entity.md Appendix B 参照)
             let spec = Specification::And(vec![
                 Specification::TypeIs("outline_node".to_string()),
                 Specification::MetadataEq {
@@ -293,28 +295,28 @@ pub async fn wire_prompt_context(
                 .collect()
         };
 
-        let mut out: Vec<CollectedAxis> = Vec::new();
-        for axis in &axes {
-            // 配線 SoT = wire DB Node `<persona>.<axis>` の metadata.source_uri
-            let node_id = format!("{}.{}", input.persona_id, axis);
+        let mut out: Vec<CollectedSlot> = Vec::new();
+        for slot in &slots {
+            // 配線 SoT = wire DB Node `<persona>.<slot>` の metadata.source_uri
+            let node_id = format!("{}.{}", input.persona_id, slot);
             let Some(node) = s.get_node(&node_id)? else {
                 continue; // 未配線 = silent skip
             };
             let Some(source_uri) = node.metadata.get("source_uri").and_then(|v| v.as_str()) else {
                 warnings.push(format!(
-                    "wiring entry '{node_id}' lacks metadata.source_uri — axis skipped"
+                    "wiring entry '{node_id}' lacks metadata.source_uri — slot skipped"
                 ));
                 continue;
             };
 
-            // base template = wire DB 動的 register `<persona>.section.<axis>` のみ。
+            // base template = wire DB 動的 register `<persona>.section.<slot>` のみ。
             //                 不在は skip + warning (= builtin hardcode 廃止)。
             // 名前 derive は application::projection_naming に集約 (doctor Probe 等が
             // 同じ rule で resolve できるよう single SoT 化、 issue 19d888ee / 25544968)。
             let projection_name =
                 crate::application::projection_naming::workflow_emit_projection_name(
                     &input.persona_id,
-                    axis,
+                    slot,
                 );
             let (base_template, base_target, base_engine, base_kind, base_config) =
                 match proj_reg.get(&projection_name)? {
@@ -330,8 +332,8 @@ pub async fn wire_prompt_context(
                     }
                     None => {
                         warnings.push(format!(
-                            "axis '{axis}' has no registered projection \
-                             '{projection_name}' — axis skipped"
+                            "slot '{slot}' has no registered projection \
+                             '{projection_name}' — slot skipped"
                         ));
                         continue;
                     }
@@ -340,14 +342,14 @@ pub async fn wire_prompt_context(
             // overlay merge (MergeStrategy 経由)。 template_engine / projection_kind
             // / projection_config は overlay schema にまだ field がないため、
             // NamedProjection 由来をそのまま運ぶ (P3a Phase 2 (c))。
-            let (final_template, final_target) = if let Some(o) = overlays.get(axis) {
+            let (final_template, final_target) = if let Some(o) = overlays.get(slot) {
                 (o.strategy.merge(&base_template, &o.template), o.target_form)
             } else {
                 (base_template, base_target)
             };
 
-            out.push(CollectedAxis {
-                axis: axis.clone(),
+            out.push(CollectedSlot {
+                slot: slot.clone(),
                 source_uri: source_uri.to_string(),
                 target_form: final_target,
                 template: final_template,
@@ -368,30 +370,30 @@ pub async fn wire_prompt_context(
                 Ok(v) => v,
                 Err(e) => {
                     warnings.push(format!(
-                        "adapter fetch failed for axis '{}' (uri={}): {e}",
-                        c.axis, c.source_uri
+                        "adapter fetch failed for slot '{}' (uri={}): {e}",
+                        c.slot, c.source_uri
                     ));
                     serde_json::Value::Null
                 }
             },
             Err(e) => {
                 warnings.push(format!(
-                    "registry route failed for axis '{}' (uri={}): {e}",
-                    c.axis, c.source_uri
+                    "registry route failed for slot '{}' (uri={}): {e}",
+                    c.slot, c.source_uri
                 ));
                 serde_json::Value::Null
             }
         };
         let entries = vec![serde_json::json!({
             "wiring_entry": {
-                "axis": c.axis,
+                "slot": c.slot,
                 "source_uri": c.source_uri,
             },
             "fetched_data": fetched,
         })];
         let data = serde_json::json!({
             "count": 1,
-            "axis": c.axis,
+            "slot": c.slot,
             "entries": entries,
             "persona_id": input.persona_id,
         });
@@ -460,7 +462,7 @@ pub struct GraphScanSummary {
 /// Layer 6 Adapter and stands alone without edges; per onboarding §2 edges
 /// are "optional but recommended") or `metadata.maintenance_exempt = true`
 /// (the node is explicitly opted-out of session-cyclic maintenance, e.g.
-/// `priorities` / `tick_log` / `journal` axes).
+/// `priorities` / `tick_log` / `journal` slots).
 ///
 /// Without this guard, `wire_doctor` reports every wiring entry as orphan
 /// (issue `15a46ce6` — 41/41 false-positive on the shi dogfood session).
@@ -1066,7 +1068,7 @@ pub fn wire_workflow_register(
             })?;
         if names.is_empty() {
             return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
-                "action.projection_names must contain at least one axis name".to_string(),
+                "action.projection_names must contain at least one slot name".to_string(),
             )));
         }
         for n in names {
@@ -1850,7 +1852,7 @@ mod tests {
                 id: "w1".into(),
                 persona_id: Some("alpha".into()),
                 trigger: json!({"kind":"on_demand"}),
-                action: json!({"kind":"emit_projection","projection_names":["axis_a","axis_b"]}),
+                action: json!({"kind":"emit_projection","projection_names":["slot_a","slot_b"]}),
                 enabled: None,
             },
             &s,
@@ -1873,7 +1875,7 @@ mod tests {
         assert_eq!(f.action_kind, "emit_projection");
         assert_eq!(
             f.action_emit_projection_names.as_deref(),
-            Some(&["axis_a".to_string(), "axis_b".to_string()][..])
+            Some(&["slot_a".to_string(), "slot_b".to_string()][..])
         );
     }
 

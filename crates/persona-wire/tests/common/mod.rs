@@ -345,19 +345,19 @@ pub async fn bootstrap_mini_app_table_no_alias(
 // Wiring helpers.
 // ---------------------------------------------------------------------------
 
-/// Register spec + projection + persona + wiring_entry + edge for one axis,
-/// wiring `<persona>.<axis>` at the supplied `source_uri`. Returns once the
+/// Register spec + projection + persona + wiring_entry + edge for one slot,
+/// wiring `<persona>.<slot>` at the supplied `source_uri`. Returns once the
 /// graph is ready for `wire_prompt_context`.
-pub fn wire_one_axis(
+pub fn wire_one_slot(
     client: &mut McpClient,
     persona_id: &str,
-    axis: &str,
+    slot: &str,
     source_uri: &str,
     template: &str,
 ) {
-    let spec_name = format!("{persona_id}.spec.{axis}");
-    let projection_name = format!("{persona_id}.section.{axis}");
-    let entry_id = format!("{persona_id}.{axis}");
+    let spec_name = format!("{persona_id}.spec.{slot}");
+    let projection_name = format!("{persona_id}.section.{slot}");
+    let entry_id = format!("{persona_id}.{slot}");
 
     client.call_tool_text(
         "wire_spec_register",
@@ -375,7 +375,7 @@ pub fn wire_one_axis(
             "target_form": "markdown",
         }),
     );
-    // Persona node may already exist (multi-axis tests). Tolerate dup via the
+    // Persona node may already exist (multi-slot tests). Tolerate dup via the
     // best-effort path (UNIQUE violation is silently ignored).
     let _ = client.try_call_tool_text(
         "wire_node_create",
@@ -392,7 +392,9 @@ pub fn wire_one_axis(
             "type": "outline_node",
             "metadata": {
                 "persona": persona_id,
-                "axis": axis,
+                // `axis` is the legacy storage-compat key for Slot
+                // (see docs/design/render-trinity-domain-entity.md Appendix B).
+                "axis": slot,
                 "source_uri": source_uri,
             },
         }),
@@ -400,7 +402,7 @@ pub fn wire_one_axis(
     client.call_tool_text(
         "wire_edge_create",
         json!({
-            "id": format!("e.{persona_id}.{axis}"),
+            "id": format!("e.{persona_id}.{slot}"),
             "src": persona_id,
             "tgt": entry_id,
             "kind": "routes_to",
@@ -418,15 +420,15 @@ pub const STATUS_TITLE_SCHEMA: &str =
 pub const TO_BODY_SCHEMA: &str =
     "table: T\nfields:\n- name: to\n  type: string\n  required: true\n- name: body\n  type: string\n  required: true\n";
 
-pub fn each_title_template(axis: &str) -> String {
+pub fn each_title_template(slot: &str) -> String {
     format!(
-        "## {axis}\n{{{{#each entries.[0].fetched_data.rows}}}}- {{{{this.data.title}}}}\n{{{{/each}}}}",
+        "## {slot}\n{{{{#each entries.[0].fetched_data.rows}}}}- {{{{this.data.title}}}}\n{{{{/each}}}}",
     )
 }
 
-pub fn each_body_template(axis: &str) -> String {
+pub fn each_body_template(slot: &str) -> String {
     format!(
-        "## {axis}\n{{{{#each entries.[0].fetched_data.rows}}}}- {{{{this.data.body}}}}\n{{{{/each}}}}",
+        "## {slot}\n{{{{#each entries.[0].fetched_data.rows}}}}- {{{{this.data.body}}}}\n{{{{/each}}}}",
     )
 }
 

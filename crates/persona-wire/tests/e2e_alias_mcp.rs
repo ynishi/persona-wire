@@ -11,7 +11,7 @@
 //! call, expanding step by step. Mirrors the mini-app-mcp `e2e_mcp.rs`
 //! McpClient shape.
 //!
-//! Shared fixtures (McpClient / Layout / bootstrap / wire_one_axis) live
+//! Shared fixtures (McpClient / Layout / bootstrap / wire_one_slot) live
 //! in `tests/common/mod.rs`. Scope-axis tests (`?scope=user` /
 //! `?scope=<project>`) live in `tests/e2e_alias_scope.rs`.
 
@@ -19,7 +19,7 @@ mod common;
 
 use common::{
     bootstrap_mini_app_table, bootstrap_mini_app_table_full, each_body_template,
-    each_title_template, make_layout, schema_for, wire_one_axis, McpClient, STATUS_TITLE_SCHEMA,
+    each_title_template, make_layout, schema_for, wire_one_slot, McpClient, STATUS_TITLE_SCHEMA,
     TO_BODY_SCHEMA,
 };
 use serde_json::{json, Value};
@@ -90,7 +90,7 @@ async fn e2e_plain_eq_alias_renders_active_rows() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "alias_smoke";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "active",
@@ -150,7 +150,7 @@ async fn e2e_template_alias_renders_with_params() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "alias_tpl";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "inbox",
@@ -209,7 +209,7 @@ async fn e2e_alias_limit_override_caps_rows() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "alias_limit";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "capped",
@@ -234,11 +234,11 @@ async fn e2e_alias_limit_override_caps_rows() {
 
 // ---------------------------------------------------------------------------
 // E2E 4 — alias_not_found: malformed URI pointing at an unregistered alias
-// surfaces a warning, axis is skipped, prompt_context is empty (no panic).
+// surfaces a warning, slot is skipped, prompt_context is empty (no panic).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]
-async fn e2e_alias_not_found_warns_and_skips_axis() {
+async fn e2e_alias_not_found_warns_and_skips_slot() {
     let layout = make_layout();
     let table = "wire_e2e_missing";
 
@@ -255,7 +255,7 @@ async fn e2e_alias_not_found_warns_and_skips_axis() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "alias_missing";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "ghost",
@@ -307,7 +307,7 @@ async fn e2e_plain_table_fetch_lists_all_rows() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "alias_plain";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "all",
@@ -327,14 +327,14 @@ async fn e2e_plain_table_fetch_lists_all_rows() {
 }
 
 // ---------------------------------------------------------------------------
-// E2E 6 — multi-axis: one persona wired across two different alias URIs
-// against two different mini-app tables, plus one plain (alias-free) axis.
+// E2E 6 — multi-slot: one persona wired across two different alias URIs
+// against two different mini-app tables, plus one plain (alias-free) slot.
 // Verifies that `wire_prompt_context` walks the wiring graph and renders
-// every axis through the Adapter dispatch.
+// every slot through the Adapter dispatch.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]
-async fn e2e_multi_axis_alias_and_plain_coexist() {
+async fn e2e_multi_slot_alias_and_plain_coexist() {
     let layout = make_layout();
     let table_active = "wire_e2e_multi_active";
     let table_inbox = "wire_e2e_multi_inbox";
@@ -369,14 +369,14 @@ async fn e2e_multi_axis_alias_and_plain_coexist() {
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "alias_multi";
 
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "active",
         &format!("mini-app://{table_active}?alias=active"),
         &each_title_template("Active"),
     );
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "inbox",
@@ -397,11 +397,11 @@ async fn e2e_multi_axis_alias_and_plain_coexist() {
     assert!(warnings.is_empty(), "warnings emitted: {warnings:?}");
     assert!(
         rendered.contains("MA1") && !rendered.contains("MC1"),
-        "active axis missing or leaked: {rendered:?}"
+        "active slot missing or leaked: {rendered:?}"
     );
     assert!(
         rendered.contains("MX1") && !rendered.contains("SX1"),
-        "inbox axis missing or leaked: {rendered:?}"
+        "inbox slot missing or leaked: {rendered:?}"
     );
 }
 
@@ -577,7 +577,7 @@ async fn e2e_alias_default_limit_applied_without_uri_override() {
 
     let mut client = McpClient::spawn(&layout.wire_db, &layout.mini_app_user_dir);
     let persona_id = "alias_default_limit";
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "active",

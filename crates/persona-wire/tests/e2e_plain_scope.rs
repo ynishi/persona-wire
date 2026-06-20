@@ -13,7 +13,7 @@ mod common;
 
 use common::{
     bootstrap_mini_app_table_no_alias, each_title_template, make_layout_with_project, schema_for,
-    wire_one_axis, McpClient, STATUS_TITLE_SCHEMA,
+    wire_one_slot, McpClient, STATUS_TITLE_SCHEMA,
 };
 use serde_json::{json, Value};
 
@@ -63,7 +63,7 @@ async fn e2e_plain_form_with_scope_project_lists_all_rows() {
 
     // plain form: alias 不在、 `?scope=<project>&root=<dir>` だけで project-scope
     // mini-app table を直接 list-all する。
-    wire_one_axis(
+    wire_one_slot(
         &mut client,
         persona_id,
         "all",
