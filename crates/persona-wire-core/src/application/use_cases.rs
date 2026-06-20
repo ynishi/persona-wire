@@ -2,10 +2,10 @@
 
 use crate::application::plugin_registry::PluginRegistry;
 use crate::application::projection_registry::{ProjectionRegistry, TargetForm};
-use crate::domain::port::ProjectionInput;
 use crate::application::spec_registry::SpecRegistry;
 use crate::domain::error::{DomainError, WireError, WireResult};
 use crate::domain::graph::Node;
+use crate::domain::port::ProjectionInput;
 use crate::domain::specification::Specification;
 use crate::infrastructure::storage::SqliteStorage;
 
@@ -62,10 +62,7 @@ fn assert_static_projection_kind(
 /// into a single object) is distinct from the per-slot shape used by the
 /// async `wire_prompt_context` path; see
 /// `docs/design/render-trinity-domain-entity.md` §1.2.
-fn build_broadcast_render_data(
-    matched: &[Node],
-    persona_id: Option<&str>,
-) -> serde_json::Value {
+fn build_broadcast_render_data(matched: &[Node], persona_id: Option<&str>) -> serde_json::Value {
     let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
     let nodes_json: Vec<serde_json::Value> = matched
         .iter()
@@ -280,183 +277,38 @@ pub async fn wire_prompt_context(
     storage: std::sync::Arc<std::sync::Mutex<SqliteStorage>>,
     registry: &PluginRegistry,
 ) -> WireResult<WirePromptContextOutput> {
-    use crate::application::projection_overlay::parse_overlay_response;
+    let overlays = resolve_persona_overlays(&input.persona_id, registry).await;
 
-    // ---- Phase 0: overlay 解決 (Adapter dispatch 経由、 best-effort) ----
-    //   URI 形式 = `persona-pack://<persona_id>/projections`。
-    //   persona-pack scheme は外部 adapter crate (`persona-wire-adapter-persona-pack`) が
-    //   提供する ACL Facade。 boot 側 (`persona-wire-mcp` / `persona-wire` bin) で registry
-    //   に inject 済 (未 inject = scheme 未登録 → overlay 空で fallback)。
-    let overlay_uri = format!("persona-pack://{}/projections", input.persona_id);
-    let overlays = match registry.route(&overlay_uri) {
-        Ok((adapter, uri)) => match adapter.fetch(&uri).await {
-            Ok(v) => parse_overlay_response(&v).unwrap_or_default(),
-            Err(_) => std::collections::BTreeMap::new(), // adapter fetch fail = silent skip
-        },
-        Err(_) => std::collections::BTreeMap::new(), // scheme 未登録 = overlay 無し fallback
-    };
-
-    // ---- Phase 1: sync collect (MutexGuard を await 跨がない form) ----
-    //   slot list = projection_names で subset 指定があればそれ、
-    //               None なら wire DB の wiring entry (= persona-scoped Node) を
-    //               spec query で全件取得し metadata.axis (= storage 互換 key) を抽出する。
     let mut warnings = Vec::new();
     let collected: Vec<CollectedSlot> = {
         let s = storage.lock().map_err(|_| {
             crate::domain::error::WireError::Storage("storage mutex poisoned".to_string())
         })?;
         let proj_reg = ProjectionRegistry::new(&s);
-
-        let slots: Vec<String> = if let Some(names) = input.projection_names.as_ref() {
-            names.clone()
-        } else {
-            // wire DB から persona の wiring entry 全件 spec query → slot 抽出
-            // (`metadata["axis"]` の literal key は storage 互換のため keep、
-            // docs/design/render-trinity-domain-entity.md Appendix B 参照)
-            let spec = Specification::And(vec![
-                Specification::TypeIs("outline_node".to_string()),
-                Specification::MetadataEq {
-                    path: "persona".to_string(),
-                    value: serde_json::json!(input.persona_id),
-                },
-            ]);
-            let nodes = collect_matching_nodes(&s, &spec)?;
-            nodes
-                .iter()
-                .filter_map(|n| {
-                    n.metadata
-                        .get("axis")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-                .collect()
-        };
-
+        let slots = enumerate_slot_names(&s, &input.persona_id, input.projection_names.as_deref())?;
         let mut out: Vec<CollectedSlot> = Vec::new();
         for slot in &slots {
-            // 配線 SoT = wire DB Node `<persona>.<slot>` の metadata.source_uri
-            let node_id = format!("{}.{}", input.persona_id, slot);
-            let Some(node) = s.get_node(&node_id)? else {
-                continue; // 未配線 = silent skip
-            };
-            let Some(source_uri) = node.metadata.get("source_uri").and_then(|v| v.as_str()) else {
-                warnings.push(format!(
-                    "wiring entry '{node_id}' lacks metadata.source_uri — slot skipped"
-                ));
-                continue;
-            };
-
-            // base template = wire DB 動的 register `<persona>.section.<slot>` のみ。
-            //                 不在は skip + warning (= builtin hardcode 廃止)。
-            // 名前 derive は application::projection_naming に集約 (doctor Probe 等が
-            // 同じ rule で resolve できるよう single SoT 化、 issue 19d888ee / 25544968)。
-            let projection_name =
-                crate::application::projection_naming::workflow_emit_projection_name(
-                    &input.persona_id,
-                    slot,
-                );
-            let (base_template, base_target, base_engine, base_kind, base_config) =
-                match proj_reg.get(&projection_name)? {
-                    Some(proj) => {
-                        let (engine, kind, config) = proj.plugin().to_optional_parts();
-                        (
-                            proj.template().as_str().to_owned(),
-                            proj.target_form(),
-                            engine.map(str::to_owned),
-                            kind.map(str::to_owned),
-                            config.cloned(),
-                        )
-                    }
-                    None => {
-                        warnings.push(format!(
-                            "slot '{slot}' has no registered projection \
-                             '{projection_name}' — slot skipped"
-                        ));
-                        continue;
-                    }
-                };
-
-            // overlay merge (MergeStrategy 経由)。 template_engine / projection_kind
-            // / projection_config は overlay schema にまだ field がないため、
-            // NamedProjection 由来をそのまま運ぶ (P3a Phase 2 (c))。
-            let (final_template, final_target) = if let Some(o) = overlays.get(slot) {
-                (o.strategy.merge(&base_template, &o.template), o.target_form)
-            } else {
-                (base_template, base_target)
-            };
-
-            out.push(CollectedSlot {
-                slot: slot.clone(),
-                source_uri: source_uri.to_string(),
-                target_form: final_target,
-                template: final_template,
-                template_engine: base_engine,
-                projection_kind: base_kind,
-                projection_config: base_config,
-                projection_name: projection_name.clone(),
-            });
+            if let Some(c) = collect_slot(
+                slot,
+                &input.persona_id,
+                &s,
+                &proj_reg,
+                &overlays,
+                &mut warnings,
+            )? {
+                out.push(c);
+            }
         }
         out
     };
 
-    // ---- Phase 2: async fetch + render (PluginRegistry 経由) ----
     let mut projections = Vec::new();
-    for c in collected {
-        let fetched = match registry.route(&c.source_uri) {
-            Ok((adapter, uri)) => match adapter.fetch(&uri).await {
-                Ok(v) => v,
-                Err(e) => {
-                    warnings.push(format!(
-                        "adapter fetch failed for slot '{}' (uri={}): {e}",
-                        c.slot, c.source_uri
-                    ));
-                    serde_json::Value::Null
-                }
-            },
-            Err(e) => {
-                warnings.push(format!(
-                    "registry route failed for slot '{}' (uri={}): {e}",
-                    c.slot, c.source_uri
-                ));
-                serde_json::Value::Null
-            }
-        };
-        let entries = vec![serde_json::json!({
-            "wiring_entry": {
-                "slot": c.slot,
-                "source_uri": c.source_uri,
-            },
-            "fetched_data": fetched,
-        })];
-        let data = serde_json::json!({
-            "count": 1,
-            "slot": c.slot,
-            "entries": entries,
-            "persona_id": input.persona_id,
-        });
-        // P3a Phase 2 (c) — async path uses full `Projection` trait dispatch.
-        // `projection_kind` defaults to `"static"` (= `StaticProjection` =
-        // engine-direct equivalent); external Projection plugins (e.g. `llm`)
-        // animate from here without touching the sync use cases.
-        let rendered = resolve_projection_render_async(
-            registry,
-            c.template_engine.as_deref(),
-            c.projection_kind.as_deref(),
-            &c.template,
-            c.target_form,
-            &data,
-            Some(input.persona_id.as_str()),
-            c.projection_config.as_ref(),
-        )
-        .await?;
-        projections.push(RenderedProjection {
-            name: c.projection_name.clone(),
-            target_form: c.target_form,
-            rendered,
-        });
+    for c in &collected {
+        projections.push(
+            render_collected_slot_async(c, &input.persona_id, registry, &mut warnings).await?,
+        );
     }
 
-    // ---- Phase 3: concat (= PromptContext として 1 string) ----
     let prompt_context = projections
         .iter()
         .map(|p| p.rendered.as_str())
@@ -468,6 +320,199 @@ pub async fn wire_prompt_context(
         prompt_context,
         projections,
         warnings,
+    })
+}
+
+/// Phase 0 — async overlay resolution via PluginRegistry adapter dispatch.
+///
+/// URI 形式 = `persona-pack://<persona_id>/projections`。 persona-pack scheme は
+/// 外部 adapter crate (`persona-wire-adapter-persona-pack`) が提供する ACL Facade。
+/// boot 側 (`persona-wire-mcp` / `persona-wire` bin) で registry に inject 済
+/// (未 inject = scheme 未登録 → overlay 空で fallback、 adapter fetch fail も同様)。
+async fn resolve_persona_overlays(
+    persona_id: &str,
+    registry: &PluginRegistry,
+) -> std::collections::BTreeMap<String, crate::application::projection_overlay::ProjectionOverlay> {
+    use crate::application::projection_overlay::parse_overlay_response;
+    let overlay_uri = format!("persona-pack://{}/projections", persona_id);
+    match registry.route(&overlay_uri) {
+        Ok((adapter, uri)) => match adapter.fetch(&uri).await {
+            Ok(v) => parse_overlay_response(&v).unwrap_or_default(),
+            Err(_) => std::collections::BTreeMap::new(),
+        },
+        Err(_) => std::collections::BTreeMap::new(),
+    }
+}
+
+/// Phase 1 helper — slot 名集合を確定する。 `explicit` で subset 指定があれば
+/// そのまま使い、 None なら wire DB の wiring entry (= persona-scoped Node) を
+/// spec query で全件取得し `metadata.axis` (= storage 互換 key、
+/// docs/design/render-trinity-domain-entity.md Appendix B 参照) を抽出する。
+fn enumerate_slot_names(
+    storage: &SqliteStorage,
+    persona_id: &str,
+    explicit: Option<&[String]>,
+) -> WireResult<Vec<String>> {
+    if let Some(names) = explicit {
+        return Ok(names.to_vec());
+    }
+    let spec = Specification::And(vec![
+        Specification::TypeIs("outline_node".to_string()),
+        Specification::MetadataEq {
+            path: "persona".to_string(),
+            value: serde_json::json!(persona_id),
+        },
+    ]);
+    let nodes = collect_matching_nodes(storage, &spec)?;
+    Ok(nodes
+        .iter()
+        .filter_map(|n| {
+            n.metadata
+                .get("axis")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect())
+}
+
+/// Phase 1 per-slot collect — 1 slot 分の wiring entry resolve + base projection
+/// lookup + overlay merge を行い、 Phase 2 (async) に渡す `CollectedSlot` を返す。
+///
+/// 返値:
+/// - `Ok(Some(_))` — 配線 + projection 完備、 render 対象
+/// - `Ok(None)` — 未配線 (silent skip)、 source_uri 不在 (warning push)、
+///   projection 未登録 (warning push) のいずれか
+///
+/// 名前 derive は `application::projection_naming` に集約 (doctor Probe 等が
+/// 同じ rule で resolve できるよう single SoT 化、 issue 19d888ee / 25544968)。
+fn collect_slot(
+    slot: &str,
+    persona_id: &str,
+    storage: &SqliteStorage,
+    proj_reg: &ProjectionRegistry,
+    overlays: &std::collections::BTreeMap<
+        String,
+        crate::application::projection_overlay::ProjectionOverlay,
+    >,
+    warnings: &mut Vec<String>,
+) -> WireResult<Option<CollectedSlot>> {
+    let node_id = format!("{}.{}", persona_id, slot);
+    let Some(node) = storage.get_node(&node_id)? else {
+        return Ok(None);
+    };
+    let Some(source_uri) = node.metadata.get("source_uri").and_then(|v| v.as_str()) else {
+        warnings.push(format!(
+            "wiring entry '{node_id}' lacks metadata.source_uri — slot skipped"
+        ));
+        return Ok(None);
+    };
+
+    let projection_name =
+        crate::application::projection_naming::workflow_emit_projection_name(persona_id, slot);
+    let (base_template, base_target, base_engine, base_kind, base_config) =
+        match proj_reg.get(&projection_name)? {
+            Some(proj) => {
+                let (engine, kind, config) = proj.plugin().to_optional_parts();
+                (
+                    proj.template().as_str().to_owned(),
+                    proj.target_form(),
+                    engine.map(str::to_owned),
+                    kind.map(str::to_owned),
+                    config.cloned(),
+                )
+            }
+            None => {
+                warnings.push(format!(
+                    "slot '{slot}' has no registered projection \
+                     '{projection_name}' — slot skipped"
+                ));
+                return Ok(None);
+            }
+        };
+
+    // overlay merge (MergeStrategy 経由)。 template_engine / projection_kind
+    // / projection_config は overlay schema にまだ field がないため、
+    // NamedProjection 由来をそのまま運ぶ (P3a Phase 2 (c))。
+    let (final_template, final_target) = if let Some(o) = overlays.get(slot) {
+        (o.strategy.merge(&base_template, &o.template), o.target_form)
+    } else {
+        (base_template, base_target)
+    };
+
+    Ok(Some(CollectedSlot {
+        slot: slot.to_string(),
+        source_uri: source_uri.to_string(),
+        target_form: final_target,
+        template: final_template,
+        template_engine: base_engine,
+        projection_kind: base_kind,
+        projection_config: base_config,
+        projection_name,
+    }))
+}
+
+/// Phase 2 per-slot async fetch + render — Adapter dispatch で fresh fetch、
+/// `Projection` trait dispatch で render、 `RenderedProjection` を返す。
+///
+/// fetch fail / route fail は `serde_json::Value::Null` に倒して warning push
+/// で先に進む (= 個別 slot の失敗で全体を落とさない best-effort)。
+///
+/// P3a Phase 2 (c) — `projection_kind` default は `"static"` (=
+/// `StaticProjection` = engine-direct 相当)、 外部 Projection plugin (例 `llm`)
+/// はここを経由してのみ animate する (sync use cases は通らない)。
+async fn render_collected_slot_async(
+    c: &CollectedSlot,
+    persona_id: &str,
+    registry: &PluginRegistry,
+    warnings: &mut Vec<String>,
+) -> WireResult<RenderedProjection> {
+    let fetched = match registry.route(&c.source_uri) {
+        Ok((adapter, uri)) => match adapter.fetch(&uri).await {
+            Ok(v) => v,
+            Err(e) => {
+                warnings.push(format!(
+                    "adapter fetch failed for slot '{}' (uri={}): {e}",
+                    c.slot, c.source_uri
+                ));
+                serde_json::Value::Null
+            }
+        },
+        Err(e) => {
+            warnings.push(format!(
+                "registry route failed for slot '{}' (uri={}): {e}",
+                c.slot, c.source_uri
+            ));
+            serde_json::Value::Null
+        }
+    };
+    let entries = vec![serde_json::json!({
+        "wiring_entry": {
+            "slot": c.slot,
+            "source_uri": c.source_uri,
+        },
+        "fetched_data": fetched,
+    })];
+    let data = serde_json::json!({
+        "count": 1,
+        "slot": c.slot,
+        "entries": entries,
+        "persona_id": persona_id,
+    });
+    let rendered = resolve_projection_render_async(
+        registry,
+        c.template_engine.as_deref(),
+        c.projection_kind.as_deref(),
+        &c.template,
+        c.target_form,
+        &data,
+        Some(persona_id),
+        c.projection_config.as_ref(),
+    )
+    .await?;
+    Ok(RenderedProjection {
+        name: c.projection_name.clone(),
+        target_form: c.target_form,
+        rendered,
     })
 }
 
@@ -648,18 +693,18 @@ pub struct WireQueryOutput {
 pub fn wire_query(input: WireQueryInput, storage: &SqliteStorage) -> WireResult<WireQueryOutput> {
     let resolved: Specification = match (input.spec, input.spec_ref.as_deref()) {
         (Some(s), None) => s,
-        (None, Some(name)) => SpecRegistry::new(storage)
-            .get(name)?
-            .ok_or_else(|| crate::domain::error::WireError::Domain(DomainError::NotFound(format!("spec: {name}"))))?,
+        (None, Some(name)) => SpecRegistry::new(storage).get(name)?.ok_or_else(|| {
+            crate::domain::error::WireError::Domain(DomainError::NotFound(format!("spec: {name}")))
+        })?,
         (Some(_), Some(_)) => {
-            return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
-                "spec and spec_ref are mutually exclusive".into(),
-            )));
+            return Err(crate::domain::error::WireError::Domain(
+                DomainError::InvalidSpec("spec and spec_ref are mutually exclusive".into()),
+            ));
         }
         (None, None) => {
-            return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
-                "either spec or spec_ref is required".into(),
-            )));
+            return Err(crate::domain::error::WireError::Domain(
+                DomainError::InvalidSpec("either spec or spec_ref is required".into()),
+            ));
         }
     };
 
@@ -817,7 +862,10 @@ pub fn wire_node_update(
         )));
     }
     let Some(existing) = storage.get_node(&input.id)? else {
-        return Err(WireError::Domain(DomainError::NotFound(format!("node: {}", input.id))));
+        return Err(WireError::Domain(DomainError::NotFound(format!(
+            "node: {}",
+            input.id
+        ))));
     };
 
     let final_metadata = match input.mode {
@@ -1023,9 +1071,11 @@ pub fn wire_edges_create_batch(
 //   - set_metadata / fire_mailbox action
 //   - wire_update (cross-ref 自動維持)
 
-const WORKFLOW_TYPE: &str = "workflow_def";
-const TRIGGER_KINDS_P5A: &[&str] = &["on_demand", "on_event"];
-const ACTION_KINDS_P5A: &[&str] = &["no_op", "emit_projection"];
+use crate::application::workflow_mapper::{
+    node_to_workflow, parse_action, parse_trigger, workflow_to_node, WORKFLOW_TYPE,
+};
+use crate::domain::entity::workflow::{Action, Trigger, Workflow, WorkflowId};
+use crate::domain::entity::PersonaId;
 
 #[derive(Debug)]
 pub struct WireWorkflowRegisterInput {
@@ -1041,106 +1091,47 @@ pub struct WireWorkflowRegisterOutput {
     pub id: String,
 }
 
-/// Register a Workflow as a `workflow_def` Node. Validates the trigger /
-/// action shape (P5-a kind subset) and stores `{persona, trigger, action,
-/// enabled}` in `metadata`. Implementation = thin wrapper around
-/// `storage.insert_node` so observability via `wire_query({TypeIs:
-/// "workflow_def"})` works out of the box.
+/// Register a Workflow as a `workflow_def` Node. Routes through the
+/// [`Workflow`] Domain Entity for all invariant checks (trigger / action
+/// shape, P5-a kind subset) and through [`workflow_mapper`] for the
+/// Entity ↔ Node mapping; this function is now a thin orchestrator over
+/// the mapper boundary so observability via `wire_query({TypeIs:
+/// "workflow_def"})` continues to work out of the box.
+///
+/// design §7.3 Phase 5 — `register / fire / delete` lifecycle invariants
+/// are owned by the Entity (`Workflow::new` + `Trigger::on_event` +
+/// `Action::emit_projection` constructors); use cases are pure orchestration.
 pub fn wire_workflow_register(
     input: WireWorkflowRegisterInput,
     storage: &SqliteStorage,
 ) -> WireResult<WireWorkflowRegisterOutput> {
-    let trigger_kind = read_kind(&input.trigger, "trigger")?;
-    if !TRIGGER_KINDS_P5A.contains(&trigger_kind.as_str()) {
-        return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!(
-            "trigger.kind '{trigger_kind}' not supported in P5-a (allowed: {:?})",
-            TRIGGER_KINDS_P5A
-        ))));
-    }
-    if trigger_kind == "on_event" {
-        require_string_field(&input.trigger, "event", "trigger.event")?;
-    }
-
-    let action_kind = read_kind(&input.action, "action")?;
-    if !ACTION_KINDS_P5A.contains(&action_kind.as_str()) {
-        return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!(
-            "action.kind '{action_kind}' not supported in P5-a (allowed: {:?})",
-            ACTION_KINDS_P5A
-        ))));
-    }
-    if action_kind == "emit_projection" {
-        let names = input
-            .action
-            .get("projection_names")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
-                    "action.projection_names (array) is required for action.kind \
-                     'emit_projection'"
-                        .to_string(),
-                ))
-            })?;
-        if names.is_empty() {
-            return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
-                "action.projection_names must contain at least one slot name".to_string(),
-            )));
-        }
-        for n in names {
-            if !n.is_string() {
-                return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
-                    "action.projection_names entries must all be strings".to_string(),
-                )));
-            }
-        }
-    }
-
-    let mut metadata = serde_json::Map::new();
-    if let Some(p) = input.persona_id.as_ref() {
-        metadata.insert("persona".to_string(), serde_json::json!(p));
-    }
-    metadata.insert("trigger".to_string(), input.trigger);
-    metadata.insert("action".to_string(), input.action);
-    metadata.insert(
-        "enabled".to_string(),
-        serde_json::json!(input.enabled.unwrap_or(true)),
-    );
-
-    let node = Node {
-        id: input.id.clone(),
-        r#type: WORKFLOW_TYPE.to_string(),
-        sot_ref: None,
-        confidence: None,
-        applicability: None,
-        last_verified_at: None,
-        review_due: None,
-        version: 1,
-        prev_id: None,
-        metadata: serde_json::Value::Object(metadata),
-    };
+    let workflow = build_workflow_from_register_input(input)?;
+    let node = workflow_to_node(&workflow);
     storage.insert_node(&node)?;
-    Ok(WireWorkflowRegisterOutput { id: input.id })
+    Ok(WireWorkflowRegisterOutput {
+        id: workflow.id().as_str().to_owned(),
+    })
 }
 
-fn read_kind(value: &serde_json::Value, label: &str) -> WireResult<String> {
-    value
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!(
-                "{label}.kind (string) is required"
-            )))
-        })
-}
-
-fn require_string_field(value: &serde_json::Value, field: &str, label: &str) -> WireResult<String> {
-    value
-        .get(field)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!("{label} (string) is required")))
-        })
+/// Construct a [`Workflow`] from the raw register input JSON, applying all
+/// VO invariants at the Entity boundary. Surfaces structured
+/// `DomainError::InvalidSpec` (via the mapper / Entity constructors) on
+/// invalid trigger / action shape.
+fn build_workflow_from_register_input(input: WireWorkflowRegisterInput) -> WireResult<Workflow> {
+    let id = WorkflowId::new(input.id)?;
+    let persona_id = match input.persona_id {
+        Some(p) => Some(PersonaId::new(p)?),
+        None => None,
+    };
+    let trigger = parse_trigger(&input.trigger)?;
+    let action = parse_action(&input.action)?;
+    Ok(Workflow::new(
+        id,
+        persona_id,
+        trigger,
+        action,
+        input.enabled.unwrap_or(true),
+    ))
 }
 
 #[derive(Debug)]
@@ -1196,6 +1187,17 @@ pub fn wire_workflow_list(
     Ok(WireWorkflowListOutput { workflows })
 }
 
+/// Translate a persisted `workflow_def` Node into a [`WorkflowSummary`].
+///
+/// **Tolerant listing path**: `wire_workflow_list` is consumed by
+/// `wire_doctor` probes that explicitly surface drift (= persisted
+/// workflows whose trigger / action shape doesn't match the current
+/// P5-a Entity invariants — e.g. a `cron` trigger kind injected by
+/// future tooling or test scenarios). Routing this through the strict
+/// `node_to_workflow` mapper would silently filter such rows out, which
+/// is exactly what the doctor probes need to see. So this stays on raw
+/// JSON extraction; only `wire_workflow_register` (write path) and
+/// `wire_workflow_fire` (typed gating) go through the Entity mapper.
 fn node_to_summary(node: Node) -> WireResult<WorkflowSummary> {
     let meta = node.metadata;
     let persona_id = meta
@@ -1265,14 +1267,15 @@ pub fn wire_workflow_fire(
     storage: &SqliteStorage,
 ) -> WireResult<WireWorkflowFireOutput> {
     if input.id.is_some() == input.event.is_some() {
-        return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
-            "exactly one of `id` or `event` is required".to_string(),
-        )));
+        return Err(crate::domain::error::WireError::Domain(
+            DomainError::InvalidSpec("exactly one of `id` or `event` is required".to_string()),
+        ));
     }
     let dry_run = input.dry_run.unwrap_or(false);
 
-    // Collect candidate workflows.
-    let candidates: Vec<WorkflowSummary> = if let Some(id) = input.id.as_ref() {
+    // Collect candidate workflows as Domain Entities. Gating below dispatches
+    // on the typed `Trigger` / `Action` sum types instead of JSON probing.
+    let candidates: Vec<Workflow> = if let Some(id) = input.id.as_ref() {
         let Some(node) = storage.get_node(id)? else {
             return Ok(WireWorkflowFireOutput {
                 fired: vec![],
@@ -1288,13 +1291,13 @@ pub fn wire_workflow_fire(
                 )],
             });
         }
-        vec![node_to_summary(node)?]
+        vec![node_to_workflow(&node)?]
     } else {
         // event-driven: match every on_event workflow whose trigger.event == event
         let spec = Specification::TypeIs(WORKFLOW_TYPE.to_string());
         collect_matching_nodes(storage, &spec)?
-            .into_iter()
-            .filter_map(|n| node_to_summary(n).ok())
+            .iter()
+            .filter_map(|n| node_to_workflow(n).ok())
             .collect()
     };
 
@@ -1303,65 +1306,49 @@ pub fn wire_workflow_fire(
     let event = input.event.as_deref();
 
     for w in candidates {
-        if !w.enabled {
-            skipped.push((w.id.clone(), "enabled=false".to_string()));
+        let id_str = w.id().as_str().to_owned();
+        if !w.enabled() {
+            skipped.push((id_str, "enabled=false".to_string()));
             continue;
         }
         if let Some(persona_filter) = input.persona_id.as_ref() {
-            if w.persona_id.as_deref() != Some(persona_filter.as_str()) {
+            if w.persona_id().map(|p| p.as_str()) != Some(persona_filter.as_str()) {
                 skipped.push((
-                    w.id.clone(),
+                    id_str,
                     format!("persona scope mismatch (want={persona_filter})"),
                 ));
                 continue;
             }
         }
-        // Trigger gating
-        let trigger_kind = w.trigger.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        // Trigger gating (typed)
         if let Some(ev) = event {
-            // event-driven fire path: skip non-on_event workflows
-            if trigger_kind != "on_event" {
-                skipped.push((
-                    w.id.clone(),
-                    format!("trigger.kind='{trigger_kind}' does not match event fan-out"),
-                ));
-                continue;
-            }
-            let wf_event = w
-                .trigger
-                .get("event")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if wf_event != ev {
-                skipped.push((
-                    w.id.clone(),
-                    format!("trigger.event='{wf_event}' != '{ev}'"),
-                ));
-                continue;
+            match w.trigger() {
+                Trigger::OnEvent { event: wf_event } => {
+                    if wf_event != ev {
+                        skipped.push((id_str, format!("trigger.event='{wf_event}' != '{ev}'")));
+                        continue;
+                    }
+                }
+                Trigger::OnDemand => {
+                    skipped.push((
+                        id_str,
+                        "trigger.kind='on_demand' does not match event fan-out".to_string(),
+                    ));
+                    continue;
+                }
             }
         }
-        // Resolve action
-        let action_kind = w
-            .action
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let action_emit_projection_names = if action_kind == "emit_projection" {
-            w.action
-                .get("projection_names")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-        } else {
-            None
+        // Resolve action (typed)
+        let (action_kind, action_emit_projection_names) = match w.action() {
+            Action::NoOp => ("no_op".to_string(), None),
+            Action::EmitProjection { slots } => (
+                "emit_projection".to_string(),
+                Some(slots.iter().map(|s| s.as_str().to_owned()).collect()),
+            ),
         };
         fired.push(ResolvedFire {
-            id: w.id,
-            persona_id: w.persona_id,
+            id: w.id().as_str().to_owned(),
+            persona_id: w.persona_id().map(|p| p.as_str().to_owned()),
             action_kind,
             action_emit_projection_names,
             dry_run,

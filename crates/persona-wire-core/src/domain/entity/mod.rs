@@ -65,7 +65,7 @@ pub mod workflow;
 
 pub use persona_id::PersonaId;
 pub use projection::{
-    PluginDispatch, Projection, ProjectionName, ProjectionTemplate, SpecRef, TargetForm,
+    PluginDispatch, Projection, ProjectionName, ProjectionTemplate, SpecName, SpecRef, TargetForm,
 };
 pub use slot::Slot;
 pub use source::Source;

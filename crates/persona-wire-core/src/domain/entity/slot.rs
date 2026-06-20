@@ -54,10 +54,7 @@ fn validate(s: &str) -> WireResult<()> {
         return Err(DomainError::InvalidMetadata("slot must not be empty".into()).into());
     }
     if s.contains('.') {
-        return Err(DomainError::InvalidMetadata(format!(
-            "slot must not contain '.': {s}"
-        ))
-        .into());
+        return Err(DomainError::InvalidMetadata(format!("slot must not contain '.': {s}")).into());
     }
     Ok(())
 }

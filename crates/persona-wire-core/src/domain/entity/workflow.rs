@@ -123,9 +123,7 @@ impl Trigger {
     pub fn on_event(event: impl Into<String>) -> WireResult<Self> {
         let event = event.into();
         if event.is_empty() {
-            return Err(
-                DomainError::InvalidSpec("trigger.event must not be empty".into()).into(),
-            );
+            return Err(DomainError::InvalidSpec("trigger.event must not be empty".into()).into());
         }
         Ok(Self::OnEvent { event })
     }

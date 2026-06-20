@@ -8,12 +8,12 @@
 
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::ProjectionRegistry;
-use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
-use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_query, wire_render, WireQueryInput, WireRenderInput,
 };
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::domain::graph::Node;
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;

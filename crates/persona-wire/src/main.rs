@@ -8,16 +8,14 @@ use persona_wire_adapter_mini_app::MiniAppAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
-use persona_wire_core::application::projection_registry::{
-    NamedProjection, ProjectionRegistry,
-};
-use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
-use persona_wire_core::domain::entity::TargetForm;
+use persona_wire_core::application::projection_registry::{NamedProjection, ProjectionRegistry};
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_init, wire_query, wire_render, WireCloseInput, WireInitInput,
     WireQueryInput, WireRenderInput,
 };
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::{default_db_path, SqliteStorage};

@@ -9,7 +9,7 @@
 //!
 //! ## Invariants
 //!
-//! - [`ProjectionName`] / [`SpecRef`] / [`ProjectionTemplate`] — non-empty.
+//! - [`ProjectionName`] / [`SpecName`] / [`ProjectionTemplate`] — non-empty.
 //! - [`TargetForm`] — value domain enforced by the enum itself.
 //! - [`PluginDispatch`] — `Default` (= framework defaults) or `Custom { engine,
 //!   kind, config }` with non-empty `engine` / `kind`. The 3 Optional-field
@@ -17,9 +17,16 @@
 //!   illegal combinations (engine only / kind only) are rejected at the
 //!   mapper boundary.
 //!
-//! Cross-aggregate referential integrity (the `SpecRef` actually resolving
+//! Cross-aggregate referential integrity (the [`SpecName`] actually resolving
 //! against a `SpecRegistry` row) is **not** enforced here — that is a
 //! soft reference handled by `wire_render` / `wire_doctor` at use-case time.
+//!
+//! ## Vernon IDDD Rule 3 (Identity-by-Name)
+//!
+//! [`SpecName`] is the Identity Value Object that lets `Projection` reference
+//! the `Specification` aggregate by name only (no aggregate-to-aggregate
+//! pointer). The legacy type alias [`SpecRef`] is preserved as a re-export
+//! for back-compat — new code should prefer `SpecName`.
 
 use std::fmt;
 
@@ -94,23 +101,27 @@ impl<'de> Deserialize<'de> for ProjectionName {
     }
 }
 
-// -- SpecRef -----------------------------------------------------------------
+// -- SpecName ----------------------------------------------------------------
 
-/// Identity reference to a registered `Specification`. Non-empty.
+/// Identity Value Object for a registered `Specification`. Non-empty.
 ///
-/// Vernon IDDD Rule 3 — other aggregates are referenced by identity only.
-/// The `SpecRegistry` lookup happens at use-case time; this VO only carries
-/// the typed name.
+/// Vernon IDDD Rule 3 (Reference Other Aggregates by Identity Only) — the
+/// `Projection` aggregate references the `Specification` aggregate solely by
+/// this typed name. The `SpecRegistry` lookup happens at use-case time; this
+/// VO only carries the typed name and its non-empty invariant.
+///
+/// The legacy alias [`SpecRef`] is preserved as a `pub type` re-export for
+/// back-compat — new code should prefer `SpecName`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
-pub struct SpecRef(String);
+pub struct SpecName(String);
 
-impl SpecRef {
+impl SpecName {
     pub fn new(value: impl Into<String>) -> WireResult<Self> {
         let s = value.into();
         if s.is_empty() {
             return Err(
-                DomainError::InvalidProjection("spec_ref must not be empty".into()).into(),
+                DomainError::InvalidProjection("spec_name must not be empty".into()).into(),
             );
         }
         Ok(Self(s))
@@ -121,25 +132,30 @@ impl SpecRef {
     }
 }
 
-impl fmt::Display for SpecRef {
+/// Back-compat alias for [`SpecName`]. Kept so external crates (and the
+/// `spec_ref` wire/SQL field name) can refer to the same VO without churn.
+/// New code should use `SpecName` directly.
+pub type SpecRef = SpecName;
+
+impl fmt::Display for SpecName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl AsRef<str> for SpecRef {
+impl AsRef<str> for SpecName {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl From<SpecRef> for String {
-    fn from(value: SpecRef) -> Self {
+impl From<SpecName> for String {
+    fn from(value: SpecName) -> Self {
         value.0
     }
 }
 
-impl TryFrom<String> for SpecRef {
+impl TryFrom<String> for SpecName {
     type Error = crate::domain::error::WireError;
 
     fn try_from(value: String) -> WireResult<Self> {
@@ -147,7 +163,7 @@ impl TryFrom<String> for SpecRef {
     }
 }
 
-impl TryFrom<&str> for SpecRef {
+impl TryFrom<&str> for SpecName {
     type Error = crate::domain::error::WireError;
 
     fn try_from(value: &str) -> WireResult<Self> {
@@ -155,7 +171,7 @@ impl TryFrom<&str> for SpecRef {
     }
 }
 
-impl<'de> Deserialize<'de> for SpecRef {
+impl<'de> Deserialize<'de> for SpecName {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -179,9 +195,7 @@ impl ProjectionTemplate {
     pub fn new(value: impl Into<String>) -> WireResult<Self> {
         let s = value.into();
         if s.is_empty() {
-            return Err(
-                DomainError::InvalidProjection("template must not be empty".into()).into(),
-            );
+            return Err(DomainError::InvalidProjection("template must not be empty".into()).into());
         }
         Ok(Self(s))
     }
@@ -360,9 +374,7 @@ impl PluginDispatch {
     }
 
     /// Mapper-side helper: project back to the persistence triple.
-    pub fn to_optional_parts(
-        &self,
-    ) -> (Option<&str>, Option<&str>, Option<&serde_json::Value>) {
+    pub fn to_optional_parts(&self) -> (Option<&str>, Option<&str>, Option<&serde_json::Value>) {
         match self {
             Self::Default => (None, None, None),
             Self::Custom {
@@ -385,7 +397,7 @@ impl PluginDispatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     name: ProjectionName,
-    spec_ref: SpecRef,
+    spec_ref: SpecName,
     template: ProjectionTemplate,
     target_form: TargetForm,
     plugin: PluginDispatch,
@@ -394,7 +406,7 @@ pub struct Projection {
 impl Projection {
     pub fn new(
         name: ProjectionName,
-        spec_ref: SpecRef,
+        spec_ref: SpecName,
         template: ProjectionTemplate,
         target_form: TargetForm,
         plugin: PluginDispatch,
@@ -418,7 +430,7 @@ impl Projection {
     ) -> WireResult<Self> {
         Ok(Self::new(
             ProjectionName::new(name)?,
-            SpecRef::new(spec_ref)?,
+            SpecName::new(spec_ref)?,
             ProjectionTemplate::new(template)?,
             target_form,
             plugin,
@@ -429,7 +441,10 @@ impl Projection {
         &self.name
     }
 
-    pub fn spec_ref(&self) -> &SpecRef {
+    /// Returns the [`SpecName`] this projection references. Method name keeps
+    /// `spec_ref` to align with the persistence column / wire field, which
+    /// model "this projection holds a reference to a spec by name".
+    pub fn spec_ref(&self) -> &SpecName {
         &self.spec_ref
     }
 
@@ -484,17 +499,17 @@ mod tests {
         assert!(err.to_string().contains("must not be empty"));
     }
 
-    // -- VO: SpecRef ---------------------------------------------------------
+    // -- VO: SpecName --------------------------------------------------------
 
     #[test]
-    fn spec_ref_accepts_valid() {
-        let r = SpecRef::new("active_personas").unwrap();
+    fn spec_name_accepts_valid() {
+        let r = SpecName::new("active_personas").unwrap();
         assert_eq!(r.as_str(), "active_personas");
     }
 
     #[test]
-    fn spec_ref_rejects_empty() {
-        let err = SpecRef::new("").expect_err("reject");
+    fn spec_name_rejects_empty() {
+        let err = SpecName::new("").expect_err("reject");
         assert!(matches!(
             err,
             WireError::Domain(DomainError::InvalidProjection(_))
@@ -502,10 +517,17 @@ mod tests {
     }
 
     #[test]
-    fn spec_ref_serde_roundtrip() {
-        let r = SpecRef::new("s").unwrap();
-        let back: SpecRef = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+    fn spec_name_serde_roundtrip() {
+        let r = SpecName::new("s").unwrap();
+        let back: SpecName = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back, r);
+    }
+
+    /// `SpecRef` alias keeps resolving to `SpecName` for back-compat callers.
+    #[test]
+    fn spec_ref_alias_resolves_to_spec_name() {
+        let r: SpecRef = SpecName::new("active_personas").unwrap();
+        assert_eq!(r.as_str(), "active_personas");
     }
 
     // -- VO: ProjectionTemplate ----------------------------------------------
@@ -610,7 +632,8 @@ mod tests {
         ));
         // config without engine + kind
         assert!(matches!(
-            PluginDispatch::from_optional_parts(None, None, Some(serde_json::json!({}))).unwrap_err(),
+            PluginDispatch::from_optional_parts(None, None, Some(serde_json::json!({})))
+                .unwrap_err(),
             WireError::Domain(DomainError::InvalidProjection(_))
         ));
     }
@@ -675,27 +698,16 @@ mod tests {
             WireError::Domain(DomainError::InvalidProjection(_))
         ));
 
-        let err = Projection::from_parts(
-            "n",
-            "",
-            "tmpl",
-            TargetForm::Prompt,
-            PluginDispatch::Default,
-        )
-        .expect_err("empty spec_ref");
+        let err =
+            Projection::from_parts("n", "", "tmpl", TargetForm::Prompt, PluginDispatch::Default)
+                .expect_err("empty spec_ref");
         assert!(matches!(
             err,
             WireError::Domain(DomainError::InvalidProjection(_))
         ));
 
-        let err = Projection::from_parts(
-            "n",
-            "s",
-            "",
-            TargetForm::Prompt,
-            PluginDispatch::Default,
-        )
-        .expect_err("empty template");
+        let err = Projection::from_parts("n", "s", "", TargetForm::Prompt, PluginDispatch::Default)
+            .expect_err("empty template");
         assert!(matches!(
             err,
             WireError::Domain(DomainError::InvalidProjection(_))
@@ -704,22 +716,12 @@ mod tests {
 
     #[test]
     fn projection_immutable_equality() {
-        let p1 = Projection::from_parts(
-            "n",
-            "s",
-            "t",
-            TargetForm::Markdown,
-            PluginDispatch::Default,
-        )
-        .unwrap();
-        let p2 = Projection::from_parts(
-            "n",
-            "s",
-            "t",
-            TargetForm::Markdown,
-            PluginDispatch::Default,
-        )
-        .unwrap();
+        let p1 =
+            Projection::from_parts("n", "s", "t", TargetForm::Markdown, PluginDispatch::Default)
+                .unwrap();
+        let p2 =
+            Projection::from_parts("n", "s", "t", TargetForm::Markdown, PluginDispatch::Default)
+                .unwrap();
         assert_eq!(p1, p2);
     }
 }

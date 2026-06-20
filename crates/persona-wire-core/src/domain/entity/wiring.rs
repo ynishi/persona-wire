@@ -46,8 +46,8 @@
 //! [`crate::domain::graph`]). No dedicated Registry / DTO / table — see the
 //! "Persistence" section in [`crate::domain::entity`] for the rationale.
 
-use crate::domain::entity::{persona_id::PersonaId, projection::ProjectionName, slot::Slot};
 use crate::domain::entity::source::Source;
+use crate::domain::entity::{persona_id::PersonaId, projection::ProjectionName, slot::Slot};
 use crate::domain::error::WireResult;
 
 /// Wiring Domain Entity.
@@ -141,7 +141,10 @@ mod tests {
         let w = sample();
         assert_eq!(w.persona_id().as_str(), "test_persona_a");
         assert_eq!(w.slot().as_str(), "mailbox");
-        assert_eq!(w.source().as_str(), "mini-app://mailbox?alias=for_test_persona_a");
+        assert_eq!(
+            w.source().as_str(),
+            "mini-app://mailbox?alias=for_test_persona_a"
+        );
         assert_eq!(
             w.projection_ref().map(|p| p.as_str()),
             Some("test_persona_a.section.mailbox")
@@ -150,8 +153,13 @@ mod tests {
 
     #[test]
     fn from_parts_allows_missing_projection_ref() {
-        let w =
-            Wiring::from_parts("test_persona_a", "mail", "mini-app://mail?alias=for_test_persona_a", None).unwrap();
+        let w = Wiring::from_parts(
+            "test_persona_a",
+            "mail",
+            "mini-app://mail?alias=for_test_persona_a",
+            None,
+        )
+        .unwrap();
         assert!(w.projection_ref().is_none());
     }
 
@@ -187,9 +195,13 @@ mod tests {
 
     #[test]
     fn from_parts_rejects_empty_projection_ref() {
-        let err =
-            Wiring::from_parts("test_persona_a", "mailbox", "mini-app://x", Some(String::new()))
-                .expect_err("empty projection ref must reject");
+        let err = Wiring::from_parts(
+            "test_persona_a",
+            "mailbox",
+            "mini-app://x",
+            Some(String::new()),
+        )
+        .expect_err("empty projection ref must reject");
         assert!(matches!(
             err,
             WireError::Domain(DomainError::InvalidProjection(_))

@@ -14,8 +14,6 @@ use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::ProjectionRegistry;
-use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
-use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
@@ -26,6 +24,8 @@ use persona_wire_core::application::use_cases::{
     WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput, WireRenderInput,
     WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
 };
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;

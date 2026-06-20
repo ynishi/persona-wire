@@ -43,7 +43,13 @@ impl NamedProjection {
             self.projection_kind,
             self.projection_config,
         )?;
-        Projection::from_parts(self.name, self.spec_ref, self.template, self.target_form, plugin)
+        Projection::from_parts(
+            self.name,
+            self.spec_ref,
+            self.template,
+            self.target_form,
+            plugin,
+        )
     }
 
     /// Domain Entity → DTO. Total (no failure path) — Entity invariants are

@@ -31,7 +31,9 @@ impl PersonaId {
     pub fn new(value: impl Into<String>) -> WireResult<Self> {
         let s = value.into();
         if s.is_empty() {
-            return Err(DomainError::InvalidPersonaId("persona id must not be empty".into()).into());
+            return Err(
+                DomainError::InvalidPersonaId("persona id must not be empty".into()).into(),
+            );
         }
         Ok(Self(s))
     }

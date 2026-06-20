@@ -6,12 +6,12 @@
 
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::ProjectionRegistry;
-use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
-use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     graph_scan_summary, wire_close, wire_init, WireCloseInput, WireInitInput,
 };
+use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
+use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;

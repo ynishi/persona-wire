@@ -18,8 +18,8 @@ impl<'a> SpecRegistry<'a> {
     }
 
     pub fn register(&self, name: &str, spec: &Specification) -> WireResult<()> {
-        let expr =
-            serde_json::to_string(spec).map_err(|e| WireError::Domain(DomainError::InvalidSpec(e.to_string())))?;
+        let expr = serde_json::to_string(spec)
+            .map_err(|e| WireError::Domain(DomainError::InvalidSpec(e.to_string())))?;
         self.storage.upsert_specification(name, &expr)
     }
 
