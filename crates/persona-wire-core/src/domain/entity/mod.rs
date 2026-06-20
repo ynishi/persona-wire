@@ -24,3 +24,5 @@ pub mod projection;
 pub mod source;
 pub mod wiring;
 pub mod workflow;
+
+pub use persona_id::PersonaId;
