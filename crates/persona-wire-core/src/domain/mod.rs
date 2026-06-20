@@ -12,6 +12,7 @@
 //! `domain::crud` etc. resolvable for existing call sites; Domain Entity
 //! layer (`domain::entity`) lands in Step B.
 
+pub mod entity;
 pub mod error;
 pub mod graph;
 
