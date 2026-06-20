@@ -13,7 +13,7 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_doctor, wire_init, WireCloseInput, WireInitInput,
+    graph_scan_summary, wire_close, wire_doctor, wire_init, WireCloseInput, WireInitInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
@@ -61,24 +61,35 @@ fn wire_doctor_parity_with_wire_close_on_same_graph() {
     s.insert_edge(&bare_edge("e1", "alpha", "beta", "routes_to"))
         .unwrap();
 
-    let close = wire_close(
+    let _close = wire_close(
         WireCloseInput {
             persona_id: "alpha".into(),
         },
         &s,
     )
     .unwrap();
-    let doctor = wire_doctor(&s, None).unwrap();
+    let close_summary = graph_scan_summary(&s).unwrap();
+    let _doctor = wire_doctor(&s, None).unwrap();
+    let doctor_summary = graph_scan_summary(&s).unwrap();
 
     // wire_close and wire_doctor must agree on every count.
-    assert_eq!(close.total_node_count, doctor.total_node_count);
-    assert_eq!(close.total_edge_count, doctor.total_edge_count);
-    assert_eq!(close.orphan_node_count, doctor.orphan_node_count);
+    assert_eq!(
+        close_summary.total_node_count,
+        doctor_summary.total_node_count
+    );
+    assert_eq!(
+        close_summary.total_edge_count,
+        doctor_summary.total_edge_count
+    );
+    assert_eq!(
+        close_summary.orphan_node_count,
+        doctor_summary.orphan_node_count
+    );
 
     // Concrete expected values (3 nodes, 1 edge, 1 orphan = gamma).
-    assert_eq!(doctor.total_node_count, 3);
-    assert_eq!(doctor.total_edge_count, 1);
-    assert_eq!(doctor.orphan_node_count, 1);
+    assert_eq!(doctor_summary.total_node_count, 3);
+    assert_eq!(doctor_summary.total_edge_count, 1);
+    assert_eq!(doctor_summary.orphan_node_count, 1);
 }
 
 #[test]
@@ -97,9 +108,10 @@ fn wire_doctor_reports_orphan_zero_when_every_node_is_touched() {
         .unwrap();
 
     let doctor = wire_doctor(&s, None).unwrap();
-    assert_eq!(doctor.total_node_count, 3);
-    assert_eq!(doctor.total_edge_count, 2);
-    assert_eq!(doctor.orphan_node_count, 0);
+    let doctor_summary = graph_scan_summary(&s).unwrap();
+    assert_eq!(doctor_summary.total_node_count, 3);
+    assert_eq!(doctor_summary.total_edge_count, 2);
+    assert_eq!(doctor_summary.orphan_node_count, 0);
     assert!(doctor.report_markdown.contains("# wire_doctor report"));
     // Finding-driven format (design §8): scope + verdict + axis sections。
     assert!(doctor.report_markdown.contains("scope: full"));
@@ -159,8 +171,9 @@ fn wire_doctor_with_dynamic_specification_e2e() {
     assert_eq!(init.projections[0].rendered, "Active personas (2): p1, p2");
 
     // wire_doctor sees the whole graph (3 personas, 2 edges, 0 orphans).
-    let doctor = wire_doctor(&s, None).unwrap();
-    assert_eq!(doctor.total_node_count, 3);
-    assert_eq!(doctor.total_edge_count, 2);
-    assert_eq!(doctor.orphan_node_count, 0);
+    let _doctor = wire_doctor(&s, None).unwrap();
+    let doctor_summary = graph_scan_summary(&s).unwrap();
+    assert_eq!(doctor_summary.total_node_count, 3);
+    assert_eq!(doctor_summary.total_edge_count, 2);
+    assert_eq!(doctor_summary.orphan_node_count, 0);
 }

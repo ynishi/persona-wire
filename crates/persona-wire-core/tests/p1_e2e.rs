@@ -10,7 +10,7 @@ use persona_wire_core::application::projection_registry::{
 };
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_init, WireCloseInput, WireInitInput,
+    graph_scan_summary, wire_close, wire_init, WireCloseInput, WireInitInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -174,10 +174,11 @@ fn full_pipeline_init_seed_register_render_close() {
         &storage,
     )
     .expect("wire_close");
-    assert_eq!(close_out.total_node_count, 4);
-    assert_eq!(close_out.total_edge_count, 3);
+    let close_summary = graph_scan_summary(&storage).unwrap();
+    assert_eq!(close_summary.total_node_count, 4);
+    assert_eq!(close_summary.total_edge_count, 3);
     assert_eq!(
-        close_out.orphan_node_count, 0,
+        close_summary.orphan_node_count, 0,
         "every node is touched by at least one edge"
     );
     assert!(close_out.report_markdown.contains("total nodes: 4"));

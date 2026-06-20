@@ -22,9 +22,9 @@ use persona_wire_core::application::use_cases::{
     wire_node_delete, wire_node_update, wire_nodes_create_batch, wire_projection_delete,
     wire_prompt_context, wire_query, wire_render, wire_spec_delete, wire_workflow_fire,
     wire_workflow_list, wire_workflow_register, WireCloseInput, WireDeleteInput,
-    WireEdgesCreateBatchInput, WireGraphCheckOutput, WireInitInput, WireNodeUpdateInput,
-    WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
-    WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
+    WireEdgesCreateBatchInput, WireInitInput, WireNodeUpdateInput, WireNodeUpdateMode,
+    WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput, WireRenderInput,
+    WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
@@ -281,25 +281,6 @@ pub struct WireWorkflowFireParams {
 }
 
 // ---------------------------------------------------------------------------
-// Private JSON conversion helpers (K-orphan-rule: no impl From<…> for serde_json::Value)
-// ---------------------------------------------------------------------------
-
-/// Convert a [`WireGraphCheckOutput`] to a [`serde_json::Value`].
-///
-/// A private fn is required here because `WireGraphCheckOutput` is defined in
-/// `persona-wire-core` (a different crate) and `serde_json::Value` is defined
-/// in `serde_json`. Implementing `From<WireGraphCheckOutput> for serde_json::Value`
-/// in this adapter crate would violate the orphan rule.
-fn wire_graph_check_to_json(out: WireGraphCheckOutput) -> serde_json::Value {
-    serde_json::json!({
-        "orphan_count": out.orphan_count,
-        "total_nodes": out.total_nodes,
-        "total_edges": out.total_edges,
-        "report_markdown": out.report_markdown,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
 
@@ -358,7 +339,7 @@ impl WireServer {
     /// 2-axis integrated health report (graph connectivity + workflow coverage).
     #[tool(
         name = "wire_doctor",
-        description = "Finding-driven 2-axis (graph / workflow) health diagnostic. Returns Markdown report with verdict (HEALTHY / DEGRADED / BROKEN), per-finding severity (error / warn / info), location (固有名詞), description, and fix template (MCP tool call literal). persona_id=None → Full mode (全 persona 横串); persona_id=Some(id) → Persona-scoped mode. backward-compat flat fields (orphan_node_count / total_node_count / total_edge_count) と graph_check / workflow_check sub-objects は Crux #3 で 1 度残置。",
+        description = "Finding-driven 2-axis (graph / workflow) health diagnostic. Returns a Markdown report with verdict (HEALTHY / DEGRADED / BROKEN), per-finding severity (error / warn / info), location (固有名詞), description, and fix template (MCP tool call literal). persona_id=None → Full mode (全 persona 横串); persona_id=Some(id) → Persona-scoped mode.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     async fn wire_doctor_tool(
@@ -367,79 +348,7 @@ impl WireServer {
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
         let out = wire_doctor(&s, p.persona_id).map_err(|e| e.to_string())?;
-        // Extract backward-compat flat fields (usize = Copy)
-        let orphan_node_count = out.orphan_node_count;
-        let total_node_count = out.total_node_count;
-        let total_edge_count = out.total_edge_count;
-        let report_markdown = out.report_markdown;
-        let graph_check_json = wire_graph_check_to_json(out.graph_check);
-        // Extract workflow_check fields. Extract Copy fields before consuming Vecs.
-        let wc_total_nodes = out.workflow_check.total_nodes;
-        let wc_declared_covered_count = out.workflow_check.declared_covered_count;
-        let wc_workflows_observed = out.workflow_check.workflows_observed;
-        let declared_uncovered: Vec<serde_json::Value> = out
-            .workflow_check
-            .declared_uncovered
-            .into_iter()
-            .map(|u| {
-                serde_json::json!({
-                    "node_id": u.node_id,
-                    "type": u.r#type,
-                    "persona": u.persona,
-                    "axis": u.axis,
-                    "reasons": u.reasons,
-                })
-            })
-            .collect();
-        let undeclared: Vec<serde_json::Value> = out
-            .workflow_check
-            .undeclared
-            .into_iter()
-            .map(|u| {
-                serde_json::json!({
-                    "node_id": u.node_id,
-                    "type": u.r#type,
-                    "persona": u.persona,
-                    "axis": u.axis,
-                })
-            })
-            .collect();
-        let exempt: Vec<serde_json::Value> = out
-            .workflow_check
-            .exempt
-            .into_iter()
-            .map(|e| serde_json::json!({ "node_id": e.node_id, "reason": e.reason }))
-            .collect();
-        let declared_covered: Vec<serde_json::Value> = out
-            .workflow_check
-            .declared_covered
-            .into_iter()
-            .map(|c| {
-                serde_json::json!({
-                    "node_id": c.node_id,
-                    "axis": c.axis,
-                    "covering_workflow_id": c.covering_workflow_id,
-                })
-            })
-            .collect();
-        let workflow_check_json = serde_json::json!({
-            "total_nodes": wc_total_nodes,
-            "declared_covered_count": wc_declared_covered_count,
-            "declared_covered": declared_covered,
-            "declared_uncovered": declared_uncovered,
-            "undeclared": undeclared,
-            "exempt": exempt,
-            "workflows_observed": wc_workflows_observed,
-        });
-        let json = serde_json::json!({
-            "orphan_node_count": orphan_node_count,
-            "total_node_count": total_node_count,
-            "total_edge_count": total_edge_count,
-            "report_markdown": report_markdown,
-            "graph_check": graph_check_json,
-            "workflow_check": workflow_check_json,
-        });
-        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+        Ok(out.report_markdown)
     }
 
     /// Insert a node.

@@ -6,8 +6,8 @@
 //!   reflect what was committed so far, error_message surfaces)
 
 use persona_wire_core::application::use_cases::{
-    wire_doctor, wire_edges_create_batch, wire_nodes_create_batch, WireEdgesCreateBatchInput,
-    WireNodesCreateBatchInput,
+    graph_scan_summary, wire_doctor, wire_edges_create_batch, wire_nodes_create_batch,
+    WireEdgesCreateBatchInput, WireNodesCreateBatchInput,
 };
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::infrastructure::storage::SqliteStorage;
@@ -66,10 +66,11 @@ fn batch_inserts_all_nodes_and_edges_happy_path() {
     assert!(edge_out.failed_at.is_none());
 
     // wire_doctor confirms the batched graph end-to-end.
-    let doctor = wire_doctor(&s, None).unwrap();
-    assert_eq!(doctor.total_node_count, 3);
-    assert_eq!(doctor.total_edge_count, 2);
-    assert_eq!(doctor.orphan_node_count, 0);
+    let _doctor = wire_doctor(&s, None).unwrap();
+    let doctor_summary = graph_scan_summary(&s).unwrap();
+    assert_eq!(doctor_summary.total_node_count, 3);
+    assert_eq!(doctor_summary.total_edge_count, 2);
+    assert_eq!(doctor_summary.orphan_node_count, 0);
 }
 
 #[test]
@@ -96,10 +97,11 @@ fn batch_stops_at_first_duplicate_node() {
     );
 
     // wire_doctor reflects the partial state: pre-existing + 1 fresh inserted.
-    let doctor = wire_doctor(&s, None).unwrap();
-    assert_eq!(doctor.total_node_count, 2);
-    assert_eq!(doctor.total_edge_count, 0);
-    assert_eq!(doctor.orphan_node_count, 2);
+    let _doctor = wire_doctor(&s, None).unwrap();
+    let doctor_summary = graph_scan_summary(&s).unwrap();
+    assert_eq!(doctor_summary.total_node_count, 2);
+    assert_eq!(doctor_summary.total_edge_count, 0);
+    assert_eq!(doctor_summary.orphan_node_count, 2);
 }
 
 #[test]
