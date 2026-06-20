@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::application::projection::Projection;
+use crate::application::projection::ProjectionRenderer;
 use crate::domain::error::{WireError, WireResult};
 use crate::infrastructure::adapter::Adapter;
 use crate::infrastructure::template::TemplateEngine;
@@ -42,7 +42,7 @@ use crate::infrastructure::wire_uri::WireUri;
 pub struct PluginRegistry {
     adapters: HashMap<&'static str, Arc<dyn Adapter>>,
     engines: HashMap<&'static str, Arc<dyn TemplateEngine>>,
-    projections: HashMap<&'static str, Arc<dyn Projection>>,
+    projections: HashMap<&'static str, Arc<dyn ProjectionRenderer>>,
 }
 
 impl fmt::Debug for PluginRegistry {
@@ -125,7 +125,7 @@ impl PluginRegistry {
     }
 
     /// kind id から projection を引く。
-    pub fn projection(&self, kind: &str) -> Option<&Arc<dyn Projection>> {
+    pub fn projection(&self, kind: &str) -> Option<&Arc<dyn ProjectionRenderer>> {
         self.projections.get(kind)
     }
 
@@ -156,7 +156,7 @@ impl PluginRegistry {
 pub struct PluginRegistryBuilder {
     adapters: Vec<Arc<dyn Adapter>>,
     engines: Vec<Arc<dyn TemplateEngine>>,
-    projections: Vec<Arc<dyn Projection>>,
+    projections: Vec<Arc<dyn ProjectionRenderer>>,
 }
 
 impl PluginRegistryBuilder {
@@ -170,7 +170,7 @@ impl PluginRegistryBuilder {
         self
     }
 
-    pub fn with_projection<P: Projection + 'static>(mut self, projection: P) -> Self {
+    pub fn with_projection<P: ProjectionRenderer + 'static>(mut self, projection: P) -> Self {
         self.projections.push(Arc::new(projection));
         self
     }

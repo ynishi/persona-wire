@@ -1,6 +1,13 @@
 //! NamedProjection registry — fixed named query + template + target form.
 //!
 //! Backed by the storage layer (`projections` table). BP: CQRS Read Model.
+//!
+//! `TargetForm` is owned by the Domain Entity layer
+//! ([`crate::domain::entity::projection::TargetForm`]) and re-exported here
+//! for source-compat during the Data Mapper migration. The Entity-typed
+//! mapper boundary lands in step 3.
+
+pub use crate::domain::entity::TargetForm;
 
 use crate::domain::error::{WireError, WireResult};
 use crate::infrastructure::storage::SqliteStorage;
@@ -30,36 +37,6 @@ pub struct NamedProjection {
     /// owned by the consuming `Projection` impl; wire-core is opaque.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_config: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TargetForm {
-    Prompt,
-    Markdown,
-    Json,
-    Ascii,
-}
-
-impl TargetForm {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TargetForm::Prompt => "prompt",
-            TargetForm::Markdown => "markdown",
-            TargetForm::Json => "json",
-            TargetForm::Ascii => "ascii",
-        }
-    }
-
-    pub fn parse(s: &str) -> WireResult<Self> {
-        match s {
-            "prompt" => Ok(TargetForm::Prompt),
-            "markdown" => Ok(TargetForm::Markdown),
-            "json" => Ok(TargetForm::Json),
-            "ascii" => Ok(TargetForm::Ascii),
-            other => Err(WireError::Other(format!("unknown target_form: {other}"))),
-        }
-    }
 }
 
 pub struct ProjectionRegistry<'a> {

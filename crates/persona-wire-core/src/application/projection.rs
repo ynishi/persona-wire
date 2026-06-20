@@ -1,18 +1,22 @@
-//! Projection Plugin trait — Plugin 軸 3 / 3。
+//! ProjectionRenderer Plugin trait — Plugin 軸 3 / 3。
 //!
 //! NamedProjection の「種別」を Plugin 化する。 default = `static` (template engine
 //! で render するだけ、 現状 path)。 拡張 = `llm` (render 後 LLM で summarize)
 //! / `code` (impl 関数で組み立て) / `cache` (memoize) 等。
 //!
+//! Renamed from `Projection` (P3a 当時) to `ProjectionRenderer` so the Domain
+//! Entity [`crate::domain::entity::projection::Projection`] (Data Mapper land)
+//! can own the unqualified name without an import collision.
+//!
 //! ## Plugin author 視点
 //!
 //! ```ignore
-//! use persona_wire_core::application::projection::{Projection, ProjectionInput};
+//! use persona_wire_core::application::projection::{ProjectionRenderer, ProjectionInput};
 //! use persona_wire_core::domain::error::WireResult;
 //!
 //! pub struct LlmProjection { /* anthropic client 等 */ }
 //!
-//! impl Projection for LlmProjection {
+//! impl ProjectionRenderer for LlmProjection {
 //!     fn kind(&self) -> &'static str { "llm" }
 //!     async fn render(&self, input: ProjectionInput<'_>) -> WireResult<String> {
 //!         let base = input.template_engine.render(input.template, input.spec_result)?;
@@ -26,16 +30,16 @@
 //! 既存 dispatch (render free fn 直呼び) は維持、 PluginRegistry 経由 dispatch
 //! 配線は P3a 後段 (NamedProjection schema 拡張と並走) で実施。
 
-use crate::application::projection_registry::TargetForm;
+use crate::domain::entity::TargetForm;
 use crate::domain::error::WireResult;
 use crate::infrastructure::template::TemplateEngine;
 use async_trait::async_trait;
 
-/// Projection Plugin。 render 動作の種別 (`static` / `llm` / `code` / …) を Plugin 化。
+/// ProjectionRenderer Plugin。 render 動作の種別 (`static` / `llm` / `code` / …) を Plugin 化。
 ///
 /// dyn-compatible にするため `#[async_trait]` で `Pin<Box<Future>>` 化。
 #[async_trait]
-pub trait Projection: Send + Sync {
+pub trait ProjectionRenderer: Send + Sync {
     /// projection 種別 id (`"static"` / `"llm"` / `"code"` / …)。
     /// NamedProjection 側の `projection_kind` field と一致するものに dispatch。
     fn kind(&self) -> &'static str;
@@ -74,7 +78,7 @@ impl StaticProjection {
 }
 
 #[async_trait]
-impl Projection for StaticProjection {
+impl ProjectionRenderer for StaticProjection {
     fn kind(&self) -> &'static str {
         "static"
     }
