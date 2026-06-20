@@ -47,6 +47,75 @@ fn assert_static_projection_kind(
     }
 }
 
+/// Build the broadcast-shape render data JSON for sync use cases
+/// (`wire_init` / `wire_render`).
+///
+/// Shape:
+/// ```json
+/// { "count": N, "names": "id1, id2, …", "nodes": [...], "persona_id": "…" }
+/// ```
+///
+/// `persona_id` is included only when `Some` is passed; `wire_render` calls
+/// with `None` since it is name-addressed (no implicit persona scope).
+///
+/// Step C-6 phase 2 — broadcast data shape (graph spec result aggregated
+/// into a single object) is distinct from the per-slot shape used by the
+/// async `wire_prompt_context` path; see
+/// `docs/design/render-trinity-domain-entity.md` §1.2.
+fn build_broadcast_render_data(
+    matched: &[Node],
+    persona_id: Option<&str>,
+) -> serde_json::Value {
+    let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
+    let nodes_json: Vec<serde_json::Value> = matched
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "type": n.r#type,
+                "metadata": n.metadata,
+            })
+        })
+        .collect();
+    let mut obj = serde_json::json!({
+        "count": matched.len(),
+        "names": names.join(", "),
+        "nodes": nodes_json,
+    });
+    if let Some(pid) = persona_id {
+        obj.as_object_mut()
+            .expect("json!({...}) constructs an object")
+            .insert("persona_id".to_string(), serde_json::json!(pid));
+    }
+    obj
+}
+
+/// Render a Projection against a pre-built data JSON via the **sync** engine
+/// path (`wire_init` / `wire_render`). Encapsulates the shared post-spec
+/// dispatch: plugin parts extraction, static-kind guard, engine render, and
+/// `RenderedProjection` construction.
+///
+/// Non-static projection kinds (e.g. `llm`) surface a structured error so the
+/// caller hops to `wire_prompt_context` (async) instead of silently falling
+/// back to engine-direct rendering.
+///
+/// Step C-6 phase 2 — shared by both sync use cases; the async path uses
+/// `resolve_projection_render_async` (full plugin Projection dispatch).
+fn render_named_projection_sync(
+    proj: &crate::domain::entity::Projection,
+    data: &serde_json::Value,
+    registry: &PluginRegistry,
+) -> WireResult<RenderedProjection> {
+    let (engine_hint, kind_hint, _config) = proj.plugin().to_optional_parts();
+    assert_static_projection_kind(proj.name().as_str(), kind_hint)?;
+    let rendered = resolve_engine_render(registry, engine_hint, proj.template().as_str(), data)?;
+    Ok(RenderedProjection {
+        name: proj.name().as_str().to_owned(),
+        target_form: proj.target_form(),
+        rendered,
+    })
+}
+
 /// Async render path that dispatches through `PluginRegistry`'s `Projection`
 /// axis. Used by `wire_prompt_context` (already async). Sync use cases
 /// short-circuit through `resolve_engine_render` after
@@ -144,40 +213,8 @@ pub fn wire_init(
         };
 
         let matched = collect_matching_nodes(storage, &spec)?;
-        let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
-        let nodes_json: Vec<serde_json::Value> = matched
-            .iter()
-            .map(|n| {
-                serde_json::json!({
-                    "id": n.id,
-                    "type": n.r#type,
-                    "metadata": n.metadata,
-                })
-            })
-            .collect();
-        let data = serde_json::json!({
-            "count": matched.len(),
-            "names": names.join(", "),
-            "nodes": nodes_json,
-            "persona_id": input.persona_id,
-        });
-        // P3a Phase 2 (c) — sync path only permits `static` (or unset) kinds.
-        // Non-static kinds are async-only and surface a structured error so
-        // the caller hops to `wire_prompt_context` instead of silently
-        // falling back to engine-direct.
-        let (engine_hint, kind_hint, _config) = proj.plugin().to_optional_parts();
-        assert_static_projection_kind(proj.name().as_str(), kind_hint)?;
-        let rendered = resolve_engine_render(
-            registry,
-            engine_hint,
-            proj.template().as_str(),
-            &data,
-        )?;
-        projections.push(RenderedProjection {
-            name: proj.name().as_str().to_owned(),
-            target_form: proj.target_form(),
-            rendered,
-        });
+        let data = build_broadcast_render_data(&matched, Some(input.persona_id.as_str()));
+        projections.push(render_named_projection_sync(&proj, &data, registry)?);
     }
 
     Ok(WireInitOutput {
@@ -694,35 +731,12 @@ pub fn wire_render(
             )))
         })?;
     let matched = collect_matching_nodes(storage, &spec)?;
-    let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
-    let nodes_json: Vec<serde_json::Value> = matched
-        .iter()
-        .map(|n| {
-            serde_json::json!({
-                "id": n.id,
-                "type": n.r#type,
-                "metadata": n.metadata,
-            })
-        })
-        .collect();
-    let data = serde_json::json!({
-        "count": matched.len(),
-        "names": names.join(", "),
-        "nodes": nodes_json,
-    });
-    // P3a Phase 2 (c) — sync path: non-static kinds are async-only.
-    let (engine_hint, kind_hint, _config) = proj.plugin().to_optional_parts();
-    assert_static_projection_kind(proj.name().as_str(), kind_hint)?;
-    let rendered = resolve_engine_render(
-        registry,
-        engine_hint,
-        proj.template().as_str(),
-        &data,
-    )?;
+    let data = build_broadcast_render_data(&matched, None);
+    let r = render_named_projection_sync(&proj, &data, registry)?;
     Ok(WireRenderOutput {
-        name: proj.name().as_str().to_owned(),
-        target_form: proj.target_form(),
-        rendered,
+        name: r.name,
+        target_form: r.target_form,
+        rendered: r.rendered,
     })
 }
 
