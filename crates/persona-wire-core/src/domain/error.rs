@@ -23,6 +23,12 @@ pub enum DomainError {
     #[error("invalid specification: {0}")]
     InvalidSpec(String),
 
+    #[error("invalid projection: {0}")]
+    InvalidProjection(String),
+
+    #[error("invalid target_form: {0}")]
+    InvalidTargetForm(String),
+
     #[error("invalid metadata: {0}")]
     InvalidMetadata(String),
 

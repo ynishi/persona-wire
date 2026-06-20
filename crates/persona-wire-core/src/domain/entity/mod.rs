@@ -26,4 +26,7 @@ pub mod wiring;
 pub mod workflow;
 
 pub use persona_id::PersonaId;
+pub use projection::{
+    PluginDispatch, Projection, ProjectionName, ProjectionTemplate, SpecRef, TargetForm,
+};
 pub use source::Source;
