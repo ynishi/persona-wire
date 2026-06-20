@@ -29,42 +29,64 @@ use crate::domain::error::{DomainError, WireResult};
 ///
 /// See [module docs](self) for invariants and the rationale behind the
 /// minimal Domain-side validation.
+///
+/// `scheme_len` caches the byte length of the scheme prefix (the substring
+/// before `:`). Computed once at construction and reused by [`Source::scheme`]
+/// so the accessor stays `panic!` / `expect` free by construction — no
+/// runtime re-parse, no `expect("invariant")` on a method that is called
+/// after deserialization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
-pub struct Source(String);
+pub struct Source(#[serde(serialize_with = "serialize_uri")] Inner);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Inner {
+    uri: String,
+    /// Byte index of the `:` separator in `uri`. Always `< uri.len()` and
+    /// `> 0` (enforced by [`parse_scheme_len`]).
+    scheme_len: usize,
+}
+
+fn serialize_uri<S>(inner: &Inner, ser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    ser.serialize_str(&inner.uri)
+}
 
 impl Source {
     /// Construct a `Source` from any string-like value, validating the
     /// non-empty + scheme-prefix invariants.
     pub fn new(uri: impl Into<String>) -> WireResult<Self> {
-        let s = uri.into();
-        validate(&s)?;
-        Ok(Self(s))
+        let uri = uri.into();
+        let scheme_len = parse_scheme_len(&uri)?;
+        Ok(Self(Inner { uri, scheme_len }))
     }
 
     /// Borrow the underlying URI as `&str`.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.0.uri
     }
 
     /// Return the scheme prefix (`<scheme>:` の前段)。
     ///
-    /// Construction guarantees the `:` is present and the prefix is non-empty,
-    /// so this never panics.
+    /// `scheme_len` is computed at construction time, so this accessor is
+    /// `panic!` / `expect` free — the slice bound is structurally guaranteed
+    /// by [`Inner`]'s invariant (`scheme_len < uri.len()`).
     pub fn scheme(&self) -> &str {
-        self.0
-            .split_once(':')
-            .map(|(scheme, _)| scheme)
-            .expect("Source invariant: scheme prefix present")
+        &self.0.uri[..self.0.scheme_len]
     }
 }
 
-fn validate(s: &str) -> WireResult<()> {
+/// Validate non-empty + scheme-prefix invariants and return the byte length
+/// of the scheme (the substring before `:`). Used by both `Source::new` and
+/// the `Deserialize` impl as the single validation entry point.
+fn parse_scheme_len(s: &str) -> WireResult<usize> {
     if s.is_empty() {
         return Err(DomainError::InvalidSource("source uri must not be empty".into()).into());
     }
     match s.split_once(':') {
-        Some((scheme, _)) if !scheme.is_empty() => Ok(()),
+        Some((scheme, _)) if !scheme.is_empty() => Ok(scheme.len()),
         _ => Err(DomainError::InvalidSource(format!(
             "source uri must carry a scheme prefix (`<scheme>:<rest>`): {s}"
         ))
@@ -74,19 +96,19 @@ fn validate(s: &str) -> WireResult<()> {
 
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.0.uri)
     }
 }
 
 impl AsRef<str> for Source {
     fn as_ref(&self) -> &str {
-        &self.0
+        &self.0.uri
     }
 }
 
 impl From<Source> for String {
     fn from(value: Source) -> Self {
-        value.0
+        value.0.uri
     }
 }
 

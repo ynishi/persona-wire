@@ -346,32 +346,29 @@ async fn resolve_persona_overlays(
 
 /// Phase 1 helper — slot 名集合を確定する。 `explicit` で subset 指定があれば
 /// そのまま使い、 None なら wire DB の wiring entry (= persona-scoped Node) を
-/// spec query で全件取得し `metadata.axis` (= storage 互換 key、
-/// docs/design/render-trinity-domain-entity.md Appendix B 参照) を抽出する。
+/// spec query で全件取得し、 `wiring_mapper::extract_slot` 経由で slot 名を
+/// 抽出する (storage 互換 key `metadata.axis` の直リードは禁止、
+/// docs/design/render-trinity-domain-entity.md Appendix B 参照)。
 fn enumerate_slot_names(
     storage: &SqliteStorage,
     persona_id: &str,
     explicit: Option<&[String]>,
 ) -> WireResult<Vec<String>> {
+    use crate::application::wiring_mapper;
     if let Some(names) = explicit {
         return Ok(names.to_vec());
     }
     let spec = Specification::And(vec![
-        Specification::TypeIs("outline_node".to_string()),
+        Specification::TypeIs(wiring_mapper::WIRING_TYPE.to_string()),
         Specification::MetadataEq {
-            path: "persona".to_string(),
+            path: wiring_mapper::META_PERSONA.to_string(),
             value: serde_json::json!(persona_id),
         },
     ]);
     let nodes = collect_matching_nodes(storage, &spec)?;
     Ok(nodes
         .iter()
-        .filter_map(|n| {
-            n.metadata
-                .get("axis")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
+        .filter_map(|n| wiring_mapper::extract_slot(n).map(str::to_owned))
         .collect())
 }
 
@@ -400,7 +397,7 @@ fn collect_slot(
     let Some(node) = storage.get_node(&node_id)? else {
         return Ok(None);
     };
-    let Some(source_uri) = node.metadata.get("source_uri").and_then(|v| v.as_str()) else {
+    let Some(source_uri) = crate::application::wiring_mapper::extract_source_uri(&node) else {
         warnings.push(format!(
             "wiring entry '{node_id}' lacks metadata.source_uri — slot skipped"
         ));
@@ -549,19 +546,14 @@ pub struct GraphScanSummary {
 /// Without this guard, `wire_doctor` reports every wiring entry as orphan
 /// (issue `15a46ce6` — 41/41 false-positive on the shi dogfood session).
 pub(crate) fn is_self_attached_wiring(node: &crate::domain::graph::Node) -> bool {
-    let m = &node.metadata;
-    if !m.is_object() {
+    use crate::application::wiring_mapper;
+    if !node.metadata.is_object() {
         return false;
     }
-    let has_source_uri = m
-        .get("source_uri")
-        .and_then(|v| v.as_str())
+    let has_source_uri = wiring_mapper::extract_source_uri(node)
         .map(|s| !s.is_empty())
         .unwrap_or(false);
-    let is_exempt = m
-        .get("maintenance_exempt")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_exempt = wiring_mapper::extract_maintenance_exempt(node);
     has_source_uri || is_exempt
 }
 
@@ -1199,23 +1191,11 @@ pub fn wire_workflow_list(
 /// JSON extraction; only `wire_workflow_register` (write path) and
 /// `wire_workflow_fire` (typed gating) go through the Entity mapper.
 fn node_to_summary(node: Node) -> WireResult<WorkflowSummary> {
-    let meta = node.metadata;
-    let persona_id = meta
-        .get("persona")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let trigger = meta
-        .get("trigger")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let action = meta
-        .get("action")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let enabled = meta
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    use crate::application::workflow_mapper;
+    let persona_id = workflow_mapper::extract_persona(&node).map(str::to_owned);
+    let trigger = workflow_mapper::extract_trigger_value(&node);
+    let action = workflow_mapper::extract_action_value(&node);
+    let enabled = workflow_mapper::extract_enabled(&node);
     Ok(WorkflowSummary {
         id: node.id,
         persona_id,
@@ -1525,21 +1505,38 @@ mod tests {
         let s = setup();
 
         // wiring entry with source_uri — should NOT count as orphan
-        let mut n1 = bare_node("p.mailbox", "outline_node");
-        n1.metadata = json!({
-            "persona": "p",
-            "axis": "mailbox",
-            "source_uri": "mini-app://mailbox?alias=for_p"
-        });
+        use crate::application::wiring_mapper;
+        use crate::domain::entity::{PersonaId, Slot, Source};
+        let mut n1 = bare_node("p.mailbox", wiring_mapper::WIRING_TYPE);
+        n1.metadata = wiring_mapper::wiring_metadata_object(
+            &PersonaId::new("p").unwrap(),
+            &Slot::new("mailbox").unwrap(),
+            &Source::new("mini-app://mailbox?alias=for_p").unwrap(),
+            None,
+        );
         s.insert_node(&n1).unwrap();
 
-        // wiring entry with maintenance_exempt=true — should NOT count as orphan
-        let mut n2 = bare_node("p.priorities", "outline_node");
-        n2.metadata = json!({
-            "persona": "p",
-            "axis": "priorities",
-            "maintenance_exempt": true
-        });
+        // wiring entry with maintenance_exempt=true — should NOT count as orphan.
+        // mapper has no first-class Source for the maintenance-only sketch, so
+        // construct the metadata Map directly via the mapper key constants and
+        // pass it as `extras` against a placeholder Source.
+        let mut n2 = bare_node("p.priorities", wiring_mapper::WIRING_TYPE);
+        let mut extras = serde_json::Map::new();
+        extras.insert(wiring_mapper::META_MAINTENANCE_EXEMPT.into(), json!(true));
+        // build metadata without a real source_uri; remove the placeholder
+        // afterwards so the legacy sketch (source_uri absent + maintenance
+        // exempt) survives the round-trip.
+        let mut metadata = wiring_mapper::wiring_metadata_object(
+            &PersonaId::new("p").unwrap(),
+            &Slot::new("priorities").unwrap(),
+            &Source::new("placeholder://x").unwrap(),
+            Some(extras),
+        );
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove(wiring_mapper::META_SOURCE_URI);
+        n2.metadata = metadata;
         s.insert_node(&n2).unwrap();
 
         // bare persona node with no metadata + no edges — SHOULD count as orphan
@@ -2180,9 +2177,11 @@ mod tests {
     // ---- P3a Phase 2 (d) — wire_node_update ----
 
     fn seed_wiring_node(s: &SqliteStorage, id: &str, source_uri: &str) {
+        use crate::application::wiring_mapper;
+        use crate::domain::entity::{PersonaId, Slot, Source};
         s.insert_node(&Node {
             id: id.into(),
-            r#type: "outline_node".into(),
+            r#type: wiring_mapper::WIRING_TYPE.into(),
             sot_ref: None,
             confidence: Some(1.0),
             applicability: None,
@@ -2190,11 +2189,12 @@ mod tests {
             review_due: None,
             version: 1,
             prev_id: None,
-            metadata: json!({
-                "persona": "shi",
-                "axis": "mailbox",
-                "source_uri": source_uri,
-            }),
+            metadata: wiring_mapper::wiring_metadata_object(
+                &PersonaId::new("shi").unwrap(),
+                &Slot::new("mailbox").unwrap(),
+                &Source::new(source_uri).unwrap(),
+                None,
+            ),
         })
         .unwrap();
     }
@@ -2214,40 +2214,69 @@ mod tests {
             &s,
         )
         .unwrap();
-        // source_uri が新値に、 persona / axis は維持される
+        // source_uri が新値に、 persona / slot (= 旧 axis 互換 key) は維持される
+        use crate::application::wiring_mapper;
         assert_eq!(out.id, "shi.mailbox");
         assert_eq!(out.mode, WireNodeUpdateMode::Merge);
+        let synthetic = Node {
+            id: out.id.clone(),
+            r#type: wiring_mapper::WIRING_TYPE.into(),
+            sot_ref: None,
+            confidence: None,
+            applicability: None,
+            last_verified_at: None,
+            review_due: None,
+            version: 1,
+            prev_id: None,
+            metadata: out.metadata.clone(),
+        };
         assert_eq!(
-            out.metadata["source_uri"].as_str().unwrap(),
-            "mini-app://mailbox?alias=for_shi&limit=10"
+            wiring_mapper::extract_source_uri(&synthetic),
+            Some("mini-app://mailbox?alias=for_shi&limit=10")
         );
-        assert_eq!(out.metadata["persona"].as_str().unwrap(), "shi");
-        assert_eq!(out.metadata["axis"].as_str().unwrap(), "mailbox");
+        assert_eq!(wiring_mapper::extract_persona(&synthetic), Some("shi"));
+        assert_eq!(wiring_mapper::extract_slot(&synthetic), Some("mailbox"));
         // 永続化検証
         let stored = s.get_node(&"shi.mailbox".to_string()).unwrap().unwrap();
         assert_eq!(
-            stored.metadata["source_uri"].as_str().unwrap(),
-            "mini-app://mailbox?alias=for_shi&limit=10"
+            wiring_mapper::extract_source_uri(&stored),
+            Some("mini-app://mailbox?alias=for_shi&limit=10")
         );
     }
 
     #[test]
     fn node_update_merge_null_value_deletes_key() {
+        use crate::application::wiring_mapper;
         let s = setup();
         seed_wiring_node(&s, "shi.tmp", "mini-app://x");
         let out = wire_node_update(
             WireNodeUpdateInput {
                 id: "shi.tmp".into(),
-                metadata_patch: json!({"axis": null}),
+                metadata_patch: json!({ wiring_mapper::META_SLOT: null }),
                 mode: WireNodeUpdateMode::Merge,
             },
             &s,
         )
         .unwrap();
-        // axis key は消える、 persona と source_uri は残る
-        assert!(out.metadata.get("axis").is_none());
-        assert_eq!(out.metadata["persona"].as_str().unwrap(), "shi");
-        assert_eq!(out.metadata["source_uri"].as_str().unwrap(), "mini-app://x");
+        // slot key (legacy `axis`) は消える、 persona と source_uri は残る
+        let synthetic = Node {
+            id: out.id.clone(),
+            r#type: wiring_mapper::WIRING_TYPE.into(),
+            sot_ref: None,
+            confidence: None,
+            applicability: None,
+            last_verified_at: None,
+            review_due: None,
+            version: 1,
+            prev_id: None,
+            metadata: out.metadata.clone(),
+        };
+        assert!(wiring_mapper::extract_slot(&synthetic).is_none());
+        assert_eq!(wiring_mapper::extract_persona(&synthetic), Some("shi"));
+        assert_eq!(
+            wiring_mapper::extract_source_uri(&synthetic),
+            Some("mini-app://x")
+        );
     }
 
     #[test]
@@ -2264,8 +2293,21 @@ mod tests {
         )
         .unwrap();
         // 全 key が新値で置き換わる
+        use crate::application::wiring_mapper;
         assert_eq!(out.metadata, json!({"only_field": 42}));
-        assert!(out.metadata.get("persona").is_none());
+        let synthetic = Node {
+            id: out.id.clone(),
+            r#type: wiring_mapper::WIRING_TYPE.into(),
+            sot_ref: None,
+            confidence: None,
+            applicability: None,
+            last_verified_at: None,
+            review_due: None,
+            version: 1,
+            prev_id: None,
+            metadata: out.metadata.clone(),
+        };
+        assert!(wiring_mapper::extract_persona(&synthetic).is_none());
     }
 
     #[test]

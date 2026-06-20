@@ -13,4 +13,5 @@ pub mod projection_overlay;
 pub mod projection_registry;
 pub mod spec_registry;
 pub mod use_cases;
+pub mod wiring_mapper;
 pub mod workflow_mapper;

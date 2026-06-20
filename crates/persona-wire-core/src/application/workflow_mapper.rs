@@ -39,8 +39,53 @@ use crate::domain::graph::Node;
 /// string.
 pub const WORKFLOW_TYPE: &str = "workflow_def";
 
+/// `metadata.persona` key — owning persona (optional). Single SoT for the
+/// metadata key name so callers do not re-type the bare literal.
+pub const META_PERSONA: &str = "persona";
+
+/// `metadata.trigger` key — trigger descriptor JSON.
+pub const META_TRIGGER: &str = "trigger";
+
+/// `metadata.action` key — action descriptor JSON.
+pub const META_ACTION: &str = "action";
+
+/// `metadata.enabled` key — enable flag (defaults to `true` on missing).
+pub const META_ENABLED: &str = "enabled";
+
 const TRIGGER_KINDS_P5A: &[&str] = &["on_demand", "on_event"];
 const ACTION_KINDS_P5A: &[&str] = &["no_op", "emit_projection"];
+
+// -- Node → tolerant field reads --------------------------------------------
+
+/// Borrow the optional `persona` field as `&str`.
+pub fn extract_persona(node: &crate::domain::graph::Node) -> Option<&str> {
+    node.metadata.get(META_PERSONA).and_then(Value::as_str)
+}
+
+/// Borrow the `trigger` descriptor JSON; returns a Null borrow when missing.
+pub fn extract_trigger_value(node: &crate::domain::graph::Node) -> Value {
+    node.metadata
+        .get(META_TRIGGER)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// Borrow the `action` descriptor JSON; returns a Null borrow when missing.
+pub fn extract_action_value(node: &crate::domain::graph::Node) -> Value {
+    node.metadata
+        .get(META_ACTION)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// Read the `enabled` flag, defaulting to `true` when missing or non-boolean
+/// (matches existing tolerant-listing semantics of `wire_workflow_list`).
+pub fn extract_enabled(node: &crate::domain::graph::Node) -> bool {
+    node.metadata
+        .get(META_ENABLED)
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
 
 // -- JSON → Entity -----------------------------------------------------------
 
