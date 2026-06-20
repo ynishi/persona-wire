@@ -17,6 +17,9 @@ pub enum DomainError {
     #[error("invalid persona id: {0}")]
     InvalidPersonaId(String),
 
+    #[error("invalid source uri: {0}")]
+    InvalidSource(String),
+
     #[error("invalid specification: {0}")]
     InvalidSpec(String),
 

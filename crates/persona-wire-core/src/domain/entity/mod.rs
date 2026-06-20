@@ -26,3 +26,4 @@ pub mod wiring;
 pub mod workflow;
 
 pub use persona_id::PersonaId;
+pub use source::Source;
