@@ -15,6 +15,7 @@
 pub mod entity;
 pub mod error;
 pub mod graph;
+pub mod port;
 
 // Backward-compat re-exports — keep old `domain::<sub>` paths working
 // until external call sites migrate. Will be revisited at 1.0 bump.

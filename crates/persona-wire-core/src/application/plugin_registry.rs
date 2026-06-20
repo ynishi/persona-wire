@@ -11,7 +11,7 @@
 //! use persona_wire_core::application::plugin_registry::PluginRegistry;
 //! use persona_wire_core::infrastructure::adapter::FileAdapter;
 //! use persona_wire_core::infrastructure::template::HandlebarsEngine;
-//! use persona_wire_core::application::projection::StaticProjection;
+//! use persona_wire_core::infrastructure::projection::StaticProjection;
 //! use persona_wire_adapter_mini_app::MiniAppAdapter;
 //!
 //! let registry = PluginRegistry::default_builder_for_wire()
@@ -29,8 +29,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::application::projection::ProjectionRenderer;
 use crate::domain::error::{WireError, WireResult};
+use crate::domain::port::ProjectionRenderer;
 use crate::infrastructure::adapter::Adapter;
 use crate::infrastructure::template::TemplateEngine;
 use crate::infrastructure::wire_uri::WireUri;
@@ -72,8 +72,8 @@ impl PluginRegistry {
     /// - `HandlebarsEngine` (id `"handlebars"`)
     /// - `StaticProjection` (kind `"static"`)
     pub fn default_builder_for_wire() -> PluginRegistryBuilder {
-        use crate::application::projection::StaticProjection;
         use crate::infrastructure::adapter::FileAdapter;
+        use crate::infrastructure::projection::StaticProjection;
         use crate::infrastructure::template::HandlebarsEngine;
         Self::builder()
             .with_adapter(FileAdapter)
@@ -215,8 +215,8 @@ impl PluginRegistryBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::projection::StaticProjection;
     use crate::infrastructure::adapter::FileAdapter;
+    use crate::infrastructure::projection::StaticProjection;
     use crate::infrastructure::template::HandlebarsEngine;
 
     #[test]

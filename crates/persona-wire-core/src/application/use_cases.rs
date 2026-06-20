@@ -1,8 +1,8 @@
 //! Use cases — orchestration of Domain + Infrastructure for wire_* flows.
 
 use crate::application::plugin_registry::PluginRegistry;
-use crate::application::projection::ProjectionInput;
 use crate::application::projection_registry::{ProjectionRegistry, TargetForm};
+use crate::domain::port::ProjectionInput;
 use crate::application::spec_registry::SpecRegistry;
 use crate::domain::error::{DomainError, WireError, WireResult};
 use crate::domain::graph::Node;
@@ -53,13 +53,17 @@ fn assert_static_projection_kind(
 /// `assert_static_projection_kind`.
 ///
 /// Resolution order:
-/// - `template_engine_hint` (defaults to `"handlebars"`)
+/// - `template_engine_hint` (defaults to `"handlebars"`) — sanity-checked against
+///   the registry to surface unknown-engine errors early; the actual engine is
+///   held by the resolved [`ProjectionRenderer`] adapter (Hole-1 解消).
 /// - `projection_kind_hint` (defaults to `"static"`)
 ///
 /// Both must be registered in `registry`; missing ids surface a structured
 /// `WireError::Storage`.
 ///
 /// P3a Phase 2 (c) — the actual consumer of `NamedProjection.projection_kind`.
+///
+/// [`ProjectionRenderer`]: crate::domain::port::ProjectionRenderer
 #[allow(clippy::too_many_arguments)]
 async fn resolve_projection_render_async(
     registry: &PluginRegistry,
@@ -72,9 +76,11 @@ async fn resolve_projection_render_async(
     config: Option<&serde_json::Value>,
 ) -> WireResult<String> {
     let engine_id = template_engine_hint.unwrap_or("handlebars");
-    let engine = registry.engine(engine_id).ok_or_else(|| {
-        WireError::Storage(format!("template engine '{engine_id}' not registered"))
-    })?;
+    if registry.engine(engine_id).is_none() {
+        return Err(WireError::Storage(format!(
+            "template engine '{engine_id}' not registered"
+        )));
+    }
     let kind_id = projection_kind_hint.unwrap_or("static");
     let projection = registry
         .projection(kind_id)
@@ -83,7 +89,6 @@ async fn resolve_projection_render_async(
     let input = ProjectionInput {
         spec_result,
         template,
-        template_engine: engine.as_ref(),
         target_form,
         persona_id,
         config: config.unwrap_or(&null),

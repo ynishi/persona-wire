@@ -6,6 +6,7 @@
 //! - [`adapter`]   — Layer 6 SoT Adapter Plugin trait (`FileAdapter`; mini-app は外部 crate `persona-wire-adapter-mini-app`)
 
 pub mod adapter;
+pub mod projection;
 pub mod rendering;
 pub mod storage;
 pub mod template;
