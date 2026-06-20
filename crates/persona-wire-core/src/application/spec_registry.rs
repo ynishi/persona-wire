@@ -4,7 +4,7 @@
 //! JSON-serialised form of a `Specification`. Domain-neutral: callers register
 //! arbitrary Specifications (BP: Specification pattern).
 
-use crate::domain::error::{WireError, WireResult};
+use crate::domain::error::{DomainError, WireError, WireResult};
 use crate::domain::specification::Specification;
 use crate::infrastructure::storage::SqliteStorage;
 
@@ -19,7 +19,7 @@ impl<'a> SpecRegistry<'a> {
 
     pub fn register(&self, name: &str, spec: &Specification) -> WireResult<()> {
         let expr =
-            serde_json::to_string(spec).map_err(|e| WireError::InvalidSpec(e.to_string()))?;
+            serde_json::to_string(spec).map_err(|e| WireError::Domain(DomainError::InvalidSpec(e.to_string())))?;
         self.storage.upsert_specification(name, &expr)
     }
 
@@ -29,7 +29,7 @@ impl<'a> SpecRegistry<'a> {
         };
         serde_json::from_str(&expr)
             .map(Some)
-            .map_err(|e| WireError::InvalidSpec(e.to_string()))
+            .map_err(|e| WireError::Domain(DomainError::InvalidSpec(e.to_string())))
     }
 
     pub fn list(&self) -> WireResult<Vec<String>> {

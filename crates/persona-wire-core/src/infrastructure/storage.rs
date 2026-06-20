@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use crate::domain::autoversion::{VersionRecord, VersionTargetKind};
-use crate::domain::error::{WireError, WireResult};
+use crate::domain::error::{DomainError, WireError, WireResult};
 use crate::domain::graph::{Edge, EdgeId, Node, NodeId, Severity};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -57,24 +57,24 @@ fn normalize_metadata_storage(metadata: &serde_json::Value) -> WireResult<serde_
         Value::Object(_) => Ok(metadata.clone()),
         Value::String(s) => {
             let parsed: Value = serde_json::from_str(s).map_err(|e| {
-                WireError::InvalidMetadata(format!(
+                WireError::Domain(DomainError::InvalidMetadata(format!(
                     "node metadata is a string but does not parse as JSON object: {}",
                     e
-                ))
+                )))
             })?;
             if matches!(parsed, Value::Object(_)) {
                 Ok(parsed)
             } else {
-                Err(WireError::InvalidMetadata(format!(
+                Err(WireError::Domain(DomainError::InvalidMetadata(format!(
                     "node metadata string parsed to non-object JSON: {}",
                     parsed
-                )))
+                ))))
             }
         }
-        other => Err(WireError::InvalidMetadata(format!(
+        other => Err(WireError::Domain(DomainError::InvalidMetadata(format!(
             "node metadata must be a JSON object, got: {}",
             other
-        ))),
+        )))),
     }
 }
 
@@ -882,7 +882,7 @@ mod tests {
         let mut n = bare_node("bad1", "persona");
         n.metadata = serde_json::Value::String("not json at all".into());
         let err = s.insert_node(&n);
-        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+        assert!(matches!(err, Err(WireError::Domain(DomainError::InvalidMetadata(_)))));
     }
 
     #[test]
@@ -892,7 +892,7 @@ mod tests {
         // Valid JSON, but parses to an array — non-object shapes must be rejected.
         n.metadata = serde_json::Value::String(r#"[1, 2, 3]"#.into());
         let err = s.insert_node(&n);
-        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+        assert!(matches!(err, Err(WireError::Domain(DomainError::InvalidMetadata(_)))));
     }
 
     #[test]
@@ -901,7 +901,7 @@ mod tests {
         let mut n = bare_node("bad3", "persona");
         n.metadata = json!([1, 2, 3]);
         let err = s.insert_node(&n);
-        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+        assert!(matches!(err, Err(WireError::Domain(DomainError::InvalidMetadata(_)))));
     }
 
     #[test]
@@ -910,7 +910,7 @@ mod tests {
         let mut n = bare_node("bad4", "persona");
         n.metadata = json!(42);
         let err = s.insert_node(&n);
-        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+        assert!(matches!(err, Err(WireError::Domain(DomainError::InvalidMetadata(_)))));
     }
 
     #[test]
@@ -929,7 +929,7 @@ mod tests {
         let s = setup();
         s.insert_node(&bare_node("p2", "persona")).unwrap();
         let err = s.update_node_metadata("p2", &json!("plain string"));
-        assert!(matches!(err, Err(WireError::InvalidMetadata(_))));
+        assert!(matches!(err, Err(WireError::Domain(DomainError::InvalidMetadata(_)))));
     }
 
     // Mirrors the batch path: `wire_nodes_create_batch` iterates `insert_node`

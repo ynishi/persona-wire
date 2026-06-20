@@ -4,7 +4,7 @@ use crate::application::plugin_registry::PluginRegistry;
 use crate::application::projection::ProjectionInput;
 use crate::application::projection_registry::{ProjectionRegistry, TargetForm};
 use crate::application::spec_registry::SpecRegistry;
-use crate::domain::error::{WireError, WireResult};
+use crate::domain::error::{DomainError, WireError, WireResult};
 use crate::domain::graph::Node;
 use crate::domain::specification::Specification;
 use crate::infrastructure::storage::SqliteStorage;
@@ -602,16 +602,16 @@ pub fn wire_query(input: WireQueryInput, storage: &SqliteStorage) -> WireResult<
         (Some(s), None) => s,
         (None, Some(name)) => SpecRegistry::new(storage)
             .get(name)?
-            .ok_or_else(|| crate::domain::error::WireError::NotFound(format!("spec: {name}")))?,
+            .ok_or_else(|| crate::domain::error::WireError::Domain(DomainError::NotFound(format!("spec: {name}"))))?,
         (Some(_), Some(_)) => {
-            return Err(crate::domain::error::WireError::InvalidSpec(
+            return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
                 "spec and spec_ref are mutually exclusive".into(),
-            ));
+            )));
         }
         (None, None) => {
-            return Err(crate::domain::error::WireError::InvalidSpec(
+            return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
                 "either spec or spec_ref is required".into(),
-            ));
+            )));
         }
     };
 
@@ -669,18 +669,18 @@ pub fn wire_render(
     let proj = ProjectionRegistry::new(storage)
         .get(&input.projection_ref)?
         .ok_or_else(|| {
-            crate::domain::error::WireError::NotFound(format!(
+            crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
                 "projection: {}",
                 input.projection_ref
-            ))
+            )))
         })?;
     let spec = SpecRegistry::new(storage)
         .get(&proj.spec_ref)?
         .ok_or_else(|| {
-            crate::domain::error::WireError::NotFound(format!(
+            crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
                 "spec_ref (dangling): {}",
                 proj.spec_ref
-            ))
+            )))
         })?;
     let matched = collect_matching_nodes(storage, &spec)?;
     let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
@@ -791,7 +791,7 @@ pub fn wire_node_update(
         )));
     }
     let Some(existing) = storage.get_node(&input.id)? else {
-        return Err(WireError::NotFound(format!("node: {}", input.id)));
+        return Err(WireError::Domain(DomainError::NotFound(format!("node: {}", input.id))));
     };
 
     let final_metadata = match input.mode {
@@ -1026,10 +1026,10 @@ pub fn wire_workflow_register(
 ) -> WireResult<WireWorkflowRegisterOutput> {
     let trigger_kind = read_kind(&input.trigger, "trigger")?;
     if !TRIGGER_KINDS_P5A.contains(&trigger_kind.as_str()) {
-        return Err(crate::domain::error::WireError::InvalidSpec(format!(
+        return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!(
             "trigger.kind '{trigger_kind}' not supported in P5-a (allowed: {:?})",
             TRIGGER_KINDS_P5A
-        )));
+        ))));
     }
     if trigger_kind == "on_event" {
         require_string_field(&input.trigger, "event", "trigger.event")?;
@@ -1037,10 +1037,10 @@ pub fn wire_workflow_register(
 
     let action_kind = read_kind(&input.action, "action")?;
     if !ACTION_KINDS_P5A.contains(&action_kind.as_str()) {
-        return Err(crate::domain::error::WireError::InvalidSpec(format!(
+        return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!(
             "action.kind '{action_kind}' not supported in P5-a (allowed: {:?})",
             ACTION_KINDS_P5A
-        )));
+        ))));
     }
     if action_kind == "emit_projection" {
         let names = input
@@ -1048,22 +1048,22 @@ pub fn wire_workflow_register(
             .get("projection_names")
             .and_then(|v| v.as_array())
             .ok_or_else(|| {
-                crate::domain::error::WireError::InvalidSpec(
+                crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
                     "action.projection_names (array) is required for action.kind \
                      'emit_projection'"
                         .to_string(),
-                )
+                ))
             })?;
         if names.is_empty() {
-            return Err(crate::domain::error::WireError::InvalidSpec(
+            return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
                 "action.projection_names must contain at least one axis name".to_string(),
-            ));
+            )));
         }
         for n in names {
             if !n.is_string() {
-                return Err(crate::domain::error::WireError::InvalidSpec(
+                return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
                     "action.projection_names entries must all be strings".to_string(),
-                ));
+                )));
             }
         }
     }
@@ -1101,9 +1101,9 @@ fn read_kind(value: &serde_json::Value, label: &str) -> WireResult<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            crate::domain::error::WireError::InvalidSpec(format!(
+            crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!(
                 "{label}.kind (string) is required"
-            ))
+            )))
         })
 }
 
@@ -1113,7 +1113,7 @@ fn require_string_field(value: &serde_json::Value, field: &str, label: &str) -> 
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            crate::domain::error::WireError::InvalidSpec(format!("{label} (string) is required"))
+            crate::domain::error::WireError::Domain(DomainError::InvalidSpec(format!("{label} (string) is required")))
         })
 }
 
@@ -1239,9 +1239,9 @@ pub fn wire_workflow_fire(
     storage: &SqliteStorage,
 ) -> WireResult<WireWorkflowFireOutput> {
     if input.id.is_some() == input.event.is_some() {
-        return Err(crate::domain::error::WireError::InvalidSpec(
+        return Err(crate::domain::error::WireError::Domain(DomainError::InvalidSpec(
             "exactly one of `id` or `event` is required".to_string(),
-        ));
+        )));
     }
     let dry_run = input.dry_run.unwrap_or(false);
 
