@@ -4,8 +4,25 @@
 //! intent (which Specification to evaluate + which template / form / plugin
 //! to render with). Persisted via the application-layer
 //! [`crate::application::projection_registry::ProjectionRegistry`] using the
-//! Data Mapper pattern (Fowler PoEAA); see
-//! `docs/design/projection-data-mapper.md`.
+//! Data Mapper pattern (Fowler PoEAA Ch.10).
+//!
+//! ## Persistence pattern (SoT)
+//!
+//! - **PoEAA Registry** ([`crate::application::projection_registry`]) —
+//!   named application-layer lookup surface (`register / get / list`).
+//!   This is the only entry point CLI / MCP / use cases use to reach a
+//!   `Projection`.
+//! - **PoEAA Data Mapper** ([`crate::application::projection_mapper`]) —
+//!   shape translation between the [`Projection`] Entity (this module)
+//!   and `NamedProjection` (the SQLite row mirror DTO). The Registry
+//!   owns the Mapper bridge — persona-wire takes the **narrow** reading
+//!   of Fowler's Mapper class and does not split out a separate
+//!   `Mapper<Dto, Entity>` trait until a second parallel mapper exists.
+//! - **DDD Repository** — **not adopted.** A Domain Port trait would
+//!   collapse the application-layer Registry into a pass-through; the
+//!   PoEAA Registry stance is intentional. See
+//!   [`crate::application::projection_registry`] module docs for the
+//!   recorded decision.
 //!
 //! ## Invariants
 //!

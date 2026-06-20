@@ -1,10 +1,25 @@
 //! Mapper boundary: [`Projection`] Domain Entity ↔ `projections` table row.
 //!
-//! Fowler PoEAA Data Mapper — `NamedProjection` is the persistence-shape DTO
-//! (anemic row mirror), [`Projection`] is the Domain Entity carrying VO and
-//! cross-field invariants. This module is the **single SoT** for translating
-//! between the two shapes; `ProjectionRegistry` and any future projection
-//! consumer route through here instead of touching the DTO struct directly.
+//! Fowler PoEAA Data Mapper (Ch.10) — `NamedProjection` is the
+//! persistence-shape DTO (anemic row mirror), [`Projection`] is the Domain
+//! Entity carrying VO and cross-field invariants. This module is the
+//! **single SoT** for translating between the two shapes;
+//! [`ProjectionRegistry`](super::projection_registry::ProjectionRegistry)
+//! and any future projection consumer route through here instead of
+//! touching the DTO struct directly.
+//!
+//! # Pattern selection (SoT)
+//!
+//! Persona-wire takes the **narrow** reading of Data Mapper: the Registry
+//! (PoEAA Ch.18) acts as the Mapper bridge through this module, instead of
+//! introducing an independent `Mapper<Dto, Entity>` trait. See
+//! [`projection_registry`](super::projection_registry) module docs for the
+//! PoEAA Registry vs DDD Repository decision recorded in code.
+//!
+//! Promoting this to a literal Fowler Mapper trait is a carry that fires
+//! only when a second parallel Mapper (Spec Mapper / overlay Mapper)
+//! arrives and the inherent helpers start duplicating shape — until then,
+//! the free functions below are intentionally not behind a trait.
 //!
 //! Sibling of [`wiring_mapper`](super::wiring_mapper) and
 //! [`workflow_mapper`](super::workflow_mapper). The three together complete
