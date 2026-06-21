@@ -564,6 +564,49 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn projection_name_string_surface_roundtrip() {
+        let raw = "active_personas";
+        let n = ProjectionName::new(raw).unwrap();
+        assert_eq!(n.to_string(), raw); // Display
+        assert_eq!(<ProjectionName as AsRef<str>>::as_ref(&n), raw); // AsRef
+        let back: String = n.into();
+        assert_eq!(back, raw); // From<ProjectionName> for String
+    }
+
+    #[test]
+    fn spec_name_string_surface_roundtrip() {
+        let raw = "active_personas";
+        let n = SpecName::new(raw).unwrap();
+        assert_eq!(n.to_string(), raw);
+        assert_eq!(<SpecName as AsRef<str>>::as_ref(&n), raw);
+        let back: String = n.into();
+        assert_eq!(back, raw);
+    }
+
+    #[test]
+    fn projection_template_string_surface_and_serde_roundtrip() {
+        let raw = "hello {{persona}}";
+        let t = ProjectionTemplate::new(raw).unwrap();
+        // string surface
+        assert_eq!(t.to_string(), raw);
+        assert_eq!(<ProjectionTemplate as AsRef<str>>::as_ref(&t), raw);
+        // serde round-trip (constructor + rejects-empty 以外の coverage を補完)
+        let json = serde_json::to_string(&t).unwrap();
+        let parsed: ProjectionTemplate = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, t);
+        // From consume 経路
+        let back: String = t.into();
+        assert_eq!(back, raw);
+    }
+
+    #[test]
+    fn projection_template_serde_rejects_empty() {
+        let err = serde_json::from_str::<ProjectionTemplate>("\"\"")
+            .expect_err("empty must reject through deserialize");
+        assert!(err.to_string().contains("template must not be empty"));
+    }
+
     // -- TargetForm ----------------------------------------------------------
 
     #[test]

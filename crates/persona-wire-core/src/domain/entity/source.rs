@@ -195,4 +195,33 @@ mod tests {
             .expect_err("missing scheme must reject");
         assert!(err.to_string().contains("scheme prefix"));
     }
+
+    #[test]
+    fn scheme_only_uri_is_accepted() {
+        // `<scheme>:` with empty rest is valid per `parse_scheme_len` (scheme非空 OK)
+        let src = Source::new("file:").expect("scheme-only must be accepted");
+        assert_eq!(src.scheme(), "file");
+        assert_eq!(src.as_str(), "file:");
+    }
+
+    #[test]
+    fn new_rejects_empty_scheme_with_colon() {
+        // `:rest` — colon ありだが scheme が空。`parse_scheme_len` の non-empty guard で reject。
+        let err = Source::new(":foo").expect_err("empty scheme must reject");
+        assert!(matches!(
+            err,
+            WireError::Domain(DomainError::InvalidSource(_))
+        ));
+    }
+
+    #[test]
+    fn string_surface_roundtrip() {
+        // Display / AsRef<str> / From<Source> for String の string-level surface が全て同じ literal を返す。
+        let raw = "mini-app://mailbox?alias=for_alice";
+        let src = Source::new(raw).unwrap();
+        assert_eq!(src.to_string(), raw); // Display
+        assert_eq!(<Source as AsRef<str>>::as_ref(&src), raw); // AsRef
+        let back: String = src.into();
+        assert_eq!(back, raw); // From<Source> for String
+    }
 }

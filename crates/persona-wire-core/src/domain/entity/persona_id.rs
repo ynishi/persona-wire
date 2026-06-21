@@ -132,4 +132,10 @@ mod tests {
         let err = serde_json::from_str::<PersonaId>("\"\"").expect_err("empty must reject");
         assert!(err.to_string().contains("persona id must not be empty"));
     }
+
+    #[test]
+    fn as_ref_str_returns_underlying() {
+        let id = PersonaId::new("dave").unwrap();
+        assert_eq!(<PersonaId as AsRef<str>>::as_ref(&id), "dave");
+    }
 }

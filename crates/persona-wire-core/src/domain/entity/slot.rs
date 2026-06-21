@@ -162,4 +162,10 @@ mod tests {
         let err = serde_json::from_str::<Slot>("\"a.b\"").expect_err("dot must reject");
         assert!(err.to_string().contains("must not contain '.'"));
     }
+
+    #[test]
+    fn as_ref_str_returns_underlying() {
+        let s = Slot::new("inbox").unwrap();
+        assert_eq!(<Slot as AsRef<str>>::as_ref(&s), "inbox");
+    }
 }
