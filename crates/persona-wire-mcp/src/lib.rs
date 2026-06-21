@@ -17,13 +17,12 @@ use persona_wire_core::application::projection_registry::ProjectionRegistry;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_context_get, wire_doctor, wire_edge_delete, wire_edges_create_batch,
-    wire_init, wire_node_delete, wire_node_update, wire_nodes_create_batch,
-    wire_projection_delete, wire_prompt_context, wire_query, wire_render, wire_spec_delete,
-    wire_workflow_fire, wire_workflow_list, wire_workflow_register, WireCloseInput,
-    WireContextGetInput, WireDeleteInput, WireEdgesCreateBatchInput, WireInitInput,
-    WireNodeUpdateInput, WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput,
-    WireQueryInput, WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput,
-    WireWorkflowRegisterInput,
+    wire_init, wire_node_delete, wire_node_update, wire_nodes_create_batch, wire_projection_delete,
+    wire_prompt_context, wire_query, wire_render, wire_spec_delete, wire_workflow_fire,
+    wire_workflow_list, wire_workflow_register, WireCloseInput, WireContextGetInput,
+    WireDeleteInput, WireEdgesCreateBatchInput, WireInitInput, WireNodeUpdateInput,
+    WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
+    WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
 use persona_wire_core::domain::entity::TargetForm;

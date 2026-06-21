@@ -562,12 +562,21 @@ pub(crate) fn is_self_attached_wiring(node: &crate::domain::graph::Node) -> bool
 /// self-attached wiring entry (see `is_self_attached_wiring`). Shared scan
 /// primitive for `wire_close` / `wire_doctor`; P3 daemon will extend this with
 /// stale / asymmetric / high-fanout checks.
+///
+/// `workflow_def` Node は graph axis 検知対象集合に含まれない (issue
+/// `f3bb100e` — Workflow Entity は trigger / action で動作完結、 edge を
+/// 持たないのが正常) ため、 本集計でも除外する。 さもなくば `wire_close`
+/// 経路でも workflow node を orphan として false-positive 算入していた。
 pub fn graph_scan_summary(storage: &SqliteStorage) -> WireResult<GraphScanSummary> {
+    use crate::application::workflow_mapper::WORKFLOW_TYPE;
     let mut total_nodes = 0_usize;
     let mut total_edges = 0_usize;
     let mut orphan = 0_usize;
 
     for t in storage.list_types_by_kind("node")? {
+        if t == WORKFLOW_TYPE {
+            continue;
+        }
         for n in storage.list_nodes_by_type(&t)? {
             total_nodes += 1;
             let out_edges = storage.list_edges_from(&n.id)?;
@@ -2539,10 +2548,22 @@ mod tests {
     #[test]
     fn context_get_returns_wirings_and_workflows_for_persona() {
         let s = setup();
-        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+        seed_wiring(
+            &s,
+            "alpha",
+            "mailbox",
+            "mini-app://mailbox?alias=for_alpha",
+            false,
+        );
         seed_wiring(&s, "alpha", "mail", "mini-app://mail?alias=for_alpha", true);
         // Different persona — must NOT appear in alpha's snapshot.
-        seed_wiring(&s, "beta", "mailbox", "mini-app://mailbox?alias=for_beta", false);
+        seed_wiring(
+            &s,
+            "beta",
+            "mailbox",
+            "mini-app://mailbox?alias=for_beta",
+            false,
+        );
 
         wire_workflow_register(
             WireWorkflowRegisterInput {
@@ -2592,7 +2613,13 @@ mod tests {
     #[test]
     fn context_get_resolves_projection_ref_via_naming_convention() {
         let s = setup();
-        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+        seed_wiring(
+            &s,
+            "alpha",
+            "mailbox",
+            "mini-app://mailbox?alias=for_alpha",
+            false,
+        );
         // Register the projection at the convention-derived name.
         ProjectionRegistry::new(&s)
             .register(
@@ -2626,7 +2653,13 @@ mod tests {
     #[test]
     fn context_get_leaves_projection_ref_none_when_not_registered() {
         let s = setup();
-        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+        seed_wiring(
+            &s,
+            "alpha",
+            "mailbox",
+            "mini-app://mailbox?alias=for_alpha",
+            false,
+        );
 
         let out = wire_context_get(
             WireContextGetInput {
@@ -2643,7 +2676,13 @@ mod tests {
     #[test]
     fn context_get_returns_empty_for_unknown_persona() {
         let s = setup();
-        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+        seed_wiring(
+            &s,
+            "alpha",
+            "mailbox",
+            "mini-app://mailbox?alias=for_alpha",
+            false,
+        );
 
         let out = wire_context_get(
             WireContextGetInput {
@@ -2686,7 +2725,13 @@ mod tests {
         });
         s.insert_node(&drift).unwrap();
         // Valid wiring alongside.
-        seed_wiring(&s, "alpha", "mail", "mini-app://mail?alias=for_alpha", false);
+        seed_wiring(
+            &s,
+            "alpha",
+            "mail",
+            "mini-app://mail?alias=for_alpha",
+            false,
+        );
 
         let out = wire_context_get(
             WireContextGetInput {

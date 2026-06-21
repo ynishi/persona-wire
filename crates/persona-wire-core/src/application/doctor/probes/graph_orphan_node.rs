@@ -7,6 +7,7 @@ use crate::application::doctor::finding::Axis;
 use crate::application::doctor::finding::{Finding, Kind, Location, Severity};
 use crate::application::doctor::probe::{FindingSink, Probe, ProbeCtx};
 use crate::application::use_cases;
+use crate::application::workflow_mapper::WORKFLOW_TYPE;
 use crate::domain::error::WireResult;
 use crate::domain::graph::Node;
 
@@ -20,6 +21,13 @@ impl Probe for GraphOrphanNode {
     fn scan(&self, ctx: &ProbeCtx, sink: &mut FindingSink) -> WireResult<()> {
         let storage = ctx.storage;
         for t in storage.list_types_by_kind("node")? {
+            // workflow_def Node は edge を持たないのが正常 (= Workflow Entity は
+            // trigger / action で動作完結、 graph axis の edge-based 接続概念に
+            // 属さない)。 issue `f3bb100e` — `mia.workflow.session_close` 等
+            // workflow node を orphan として false-positive 報告していた。
+            if t == WORKFLOW_TYPE {
+                continue;
+            }
             for n in storage.list_nodes_by_type(&t)? {
                 if !matches_persona_filter(&n, ctx.persona_filter.as_deref()) {
                     continue;
@@ -99,5 +107,25 @@ mod tests {
         s.insert_edge(&edge("e1", "a", "b")).unwrap();
         let f = scan(&GraphOrphanNode, &s, None).unwrap();
         assert!(f.is_empty());
+    }
+
+    #[test]
+    fn workflow_def_node_is_not_orphan() {
+        // issue f3bb100e regression: workflow_def Node は edge を持たないのが
+        // 正常 = orphan 判定対象から除外。
+        let s = setup();
+        let wf = workflow_node(
+            "mia.workflow.session_close",
+            Some("mia"),
+            serde_json::json!({"kind": "on_event", "event": "session_close"}),
+            serde_json::json!({"kind": "no_op"}),
+            true,
+        );
+        s.insert_node(&wf).unwrap();
+        let f = scan(&GraphOrphanNode, &s, None).unwrap();
+        assert!(
+            f.is_empty(),
+            "workflow_def node must not be reported as orphan: {f:?}"
+        );
     }
 }

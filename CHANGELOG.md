@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.5.1] - 2026-06-21
+
+### Fixed
+
+- **`wire_doctor` graph axis false-positive 2 件除去** (issues `9f70b493` / `f3bb100e`) — persona-scoped mode (`wire_doctor(persona_id=Some(_))`) で `graph.edges_zero` probe を skip するよう変更 (Phase A 時点で個別 persona は graph axis の edge-based 接続対象でない設計判断、 mia 等が `BROKEN` verdict を取る false-positive を構造除去)。 加えて `workflow_def` Node (= Workflow Entity は trigger/action で動作完結し edge を持たないのが正常) を graph axis の検知対象集合から phase-invariant に除外 — `graph.orphan_node` / `graph.edges_zero` / `graph_scan_summary` (= `wire_close` 経路) すべてで sweep。 `mia.workflow.session_close` 等が orphan 警告で報告される現象を解消。
+- **`wire_doctor(persona="mia")` が `HEALTHY` 着地** — 上記 2 件の sibling fix により、 wiring を意図的に持たない Phase A persona の doctor は `error=0 warn=0 info=0` を返す。 旧挙動 (`BROKEN` verdict + `graph.edges_zero` error + `mia.workflow.session_close` orphan warn) は仕様判断の outdated に起因した false-positive。
+
+### Changed
+
+- **`graph_edges_zero` probe module rustdoc 整備** — Phase A applicability scope / Phase β 切替前提 3 条件 / `workflow_def` phase-invariant exclusion を module-level doc に集約 (rustdoc-as-SoT、 intra-doc link で `crate::application::workflow_mapper::WORKFLOW_TYPE` 等を参照)。
+
 ## [0.5.0] - 2026-06-21
 
 ### Added
