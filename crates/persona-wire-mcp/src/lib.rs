@@ -16,13 +16,14 @@ use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::ProjectionRegistry;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
-    wire_close, wire_doctor, wire_edge_delete, wire_edges_create_batch, wire_init,
-    wire_node_delete, wire_node_update, wire_nodes_create_batch, wire_projection_delete,
-    wire_prompt_context, wire_query, wire_render, wire_spec_delete, wire_workflow_fire,
-    wire_workflow_list, wire_workflow_register, WireCloseInput, WireDeleteInput,
-    WireEdgesCreateBatchInput, WireInitInput, WireNodeUpdateInput, WireNodeUpdateMode,
-    WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput, WireRenderInput,
-    WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
+    wire_close, wire_context_get, wire_doctor, wire_edge_delete, wire_edges_create_batch,
+    wire_init, wire_node_delete, wire_node_update, wire_nodes_create_batch,
+    wire_projection_delete, wire_prompt_context, wire_query, wire_render, wire_spec_delete,
+    wire_workflow_fire, wire_workflow_list, wire_workflow_register, WireCloseInput,
+    WireContextGetInput, WireDeleteInput, WireEdgesCreateBatchInput, WireInitInput,
+    WireNodeUpdateInput, WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput,
+    WireQueryInput, WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput,
+    WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
 use persona_wire_core::domain::entity::TargetForm;
@@ -221,6 +222,12 @@ pub struct WirePromptContextParams {
     /// `[extra.persona_wire.sections]`.
     #[serde(default)]
     pub projection_names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireContextGetParams {
+    /// The persona whose `ContextWiring` consistency boundary to read.
+    pub persona_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -742,6 +749,59 @@ impl WireServer {
             "warnings": out.warnings,
         });
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    /// One-shot structured read of a persona's `ContextWiring` boundary —
+    /// returns the `Wiring` + `Workflow` set as summary DTOs in a single
+    /// call (no rendering). Counterpart to `wire_prompt_context` (which
+    /// returns rendered text).
+    #[tool(
+        name = "wire_context_get",
+        description = "Return the per-persona ContextWiring read snapshot: {persona_id, wirings: [{slot, source_uri, projection_ref?, maintenance_exempt}], workflows: [{id, persona_id?, trigger, action, enabled}]}. 1-call structured aggregate (no rendering); use wire_prompt_context for the rendered surface."
+    )]
+    async fn wire_context_get_tool(
+        &self,
+        Parameters(p): Parameters<WireContextGetParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_context_get(
+            WireContextGetInput {
+                persona_id: p.persona_id,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        let wirings: Vec<serde_json::Value> = out
+            .wirings
+            .into_iter()
+            .map(|w| {
+                serde_json::json!({
+                    "slot": w.slot,
+                    "source_uri": w.source_uri,
+                    "projection_ref": w.projection_ref,
+                    "maintenance_exempt": w.maintenance_exempt,
+                })
+            })
+            .collect();
+        let workflows: Vec<serde_json::Value> = out
+            .workflows
+            .into_iter()
+            .map(|w| {
+                serde_json::json!({
+                    "id": w.id,
+                    "persona_id": w.persona_id,
+                    "trigger": w.trigger,
+                    "action": w.action,
+                    "enabled": w.enabled,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({
+            "persona_id": out.persona_id,
+            "wirings": wirings,
+            "workflows": workflows,
+        }))
+        .map_err(|e| e.to_string())
     }
 
     /// Delete a NamedProjection by name.

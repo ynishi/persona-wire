@@ -777,6 +777,152 @@ pub fn wire_render(
     })
 }
 
+// ---- wire_context_get (ContextWiring read-aggregate / persona 1-call) ----
+
+/// Input for `wire_context_get`. Just the persona scope.
+#[derive(Debug)]
+pub struct WireContextGetInput {
+    pub persona_id: String,
+}
+
+/// Application-layer summary of one `Wiring`. Carries only the fields a
+/// caller (MCP / CLI / orchestrator) needs to make routing decisions —
+/// the typed `Wiring` Domain Entity stays internal to the entity layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WiringSummary {
+    pub slot: String,
+    pub source_uri: String,
+    /// Registered NamedProjection for this slot, derived as
+    /// `<persona>.section.<slot>` (see
+    /// [`crate::application::projection_naming::workflow_emit_projection_name`]).
+    /// `None` when no projection is registered for the slot yet.
+    pub projection_ref: Option<String>,
+    pub maintenance_exempt: bool,
+}
+
+/// 1-call read view of a `ContextWiring` (per-persona Aggregate boundary).
+///
+/// Returns the persona's `Wiring` set + `Workflow` set as application-layer
+/// summary DTOs. This is the structured counterpart of
+/// `wire_prompt_context` (which returns rendered string instead of raw
+/// aggregate). Use it when an orchestrator needs the persona's complete
+/// wiring topology in one call — e.g. to plan a reset, to inspect routing,
+/// or as the pre-render snapshot consumed by future write-side use cases.
+#[derive(Debug)]
+pub struct WireContextGetOutput {
+    pub persona_id: String,
+    pub wirings: Vec<WiringSummary>,
+    pub workflows: Vec<WorkflowSummary>,
+}
+
+/// Walk one persona's consistency boundary and return a structured
+/// snapshot. Wiring nodes whose metadata cannot be parsed (drift) are
+/// skipped silently — the doctor probes are the surface that flag them.
+///
+/// Layering: the `ContextWiring` Aggregate Root stays an identity marker
+/// in `domain::entity`; this use case owns the Repository traversal so the
+/// domain layer keeps no dependency on `application` / `infrastructure`.
+pub fn wire_context_get(
+    input: WireContextGetInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireContextGetOutput> {
+    use crate::application::wiring_mapper;
+    use crate::application::workflow_mapper::WORKFLOW_TYPE;
+    use crate::domain::entity::context_wiring::ContextWiring;
+    use crate::domain::entity::persona_id::PersonaId;
+
+    let persona = PersonaId::new(input.persona_id.clone())?;
+    let context = ContextWiring::new(persona.clone());
+
+    let wirings = list_persona_wirings(&context, storage)?;
+    let workflows = list_persona_workflow_summaries(&context, storage)?;
+
+    // Sort by slot / id for stable output (callers compare snapshots).
+    let mut wirings = wirings;
+    wirings.sort_by(|a, b| a.slot.cmp(&b.slot));
+    let mut workflows = workflows;
+    workflows.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // Touch the constants once so the wiring spec helper keeps the
+    // workflow_def literal aligned with the mapper SoT.
+    let _ = (wiring_mapper::WIRING_TYPE, WORKFLOW_TYPE);
+
+    Ok(WireContextGetOutput {
+        persona_id: context.persona_id().as_str().to_owned(),
+        wirings,
+        workflows,
+    })
+}
+
+/// Persona-scoped wiring summaries. Translates wiring nodes via the
+/// `wiring_mapper` and resolves `projection_ref` against the registered
+/// `<persona>.section.<slot>` convention.
+fn list_persona_wirings(
+    context: &crate::domain::entity::context_wiring::ContextWiring,
+    storage: &SqliteStorage,
+) -> WireResult<Vec<WiringSummary>> {
+    use crate::application::projection_naming::workflow_emit_projection_name;
+    use crate::application::wiring_mapper::{self, WIRING_TYPE};
+    use crate::domain::specification::Specification;
+
+    let spec = Specification::And(vec![
+        Specification::TypeIs(WIRING_TYPE.to_string()),
+        Specification::MetadataEq {
+            path: wiring_mapper::META_PERSONA.to_string(),
+            value: serde_json::Value::String(context.persona_id().as_str().to_owned()),
+        },
+    ]);
+    let nodes = collect_matching_nodes(storage, &spec)?;
+    let registry = ProjectionRegistry::new(storage);
+
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        let Some(slot) = wiring_mapper::extract_slot(node) else {
+            continue;
+        };
+        let Some(source_uri) = wiring_mapper::extract_source_uri(node) else {
+            continue;
+        };
+        let derived = workflow_emit_projection_name(context.persona_id().as_str(), slot);
+        let projection_ref = if registry.get(&derived)?.is_some() {
+            Some(derived)
+        } else {
+            None
+        };
+        out.push(WiringSummary {
+            slot: slot.to_owned(),
+            source_uri: source_uri.to_owned(),
+            projection_ref,
+            maintenance_exempt: wiring_mapper::extract_maintenance_exempt(node),
+        });
+    }
+    Ok(out)
+}
+
+/// Persona-scoped workflow summaries. Reuses the tolerant `node_to_summary`
+/// path so doctor-surfaced drift rows still appear in the snapshot.
+fn list_persona_workflow_summaries(
+    context: &crate::domain::entity::context_wiring::ContextWiring,
+    storage: &SqliteStorage,
+) -> WireResult<Vec<WorkflowSummary>> {
+    use crate::application::workflow_mapper::{self, WORKFLOW_TYPE};
+    use crate::domain::specification::Specification;
+
+    let spec = Specification::And(vec![
+        Specification::TypeIs(WORKFLOW_TYPE.to_string()),
+        Specification::MetadataEq {
+            path: workflow_mapper::META_PERSONA.to_string(),
+            value: serde_json::Value::String(context.persona_id().as_str().to_owned()),
+        },
+    ]);
+    let nodes = collect_matching_nodes(storage, &spec)?;
+    let summaries = nodes
+        .into_iter()
+        .filter_map(|n| node_to_summary(n).ok())
+        .collect();
+    Ok(summaries)
+}
+
 // ---- wire_node_update (P3a Phase 2 (d) — wiring-entry metadata tuning) ----
 
 /// Merge strategy for `wire_node_update`. Mirrors RFC 7396 shallow merge for
@@ -2358,5 +2504,200 @@ mod tests {
             WireNodeUpdateMode::Replace
         );
         assert!(WireNodeUpdateMode::parse("upsert").is_err());
+    }
+
+    // ---- wire_context_get (ContextWiring read-aggregate) tests ----
+
+    /// Helper: insert a wiring node `<persona>.<slot>` with optional
+    /// `maintenance_exempt` flag.
+    fn seed_wiring(
+        s: &SqliteStorage,
+        persona: &str,
+        slot: &str,
+        source_uri: &str,
+        maintenance_exempt: bool,
+    ) {
+        let meta = if maintenance_exempt {
+            json!({
+                "persona": persona,
+                "axis": slot,
+                "source_uri": source_uri,
+                "maintenance_exempt": true,
+            })
+        } else {
+            json!({
+                "persona": persona,
+                "axis": slot,
+                "source_uri": source_uri,
+            })
+        };
+        let mut n = bare_node(&format!("{persona}.{slot}"), "outline_node");
+        n.metadata = meta;
+        s.insert_node(&n).unwrap();
+    }
+
+    #[test]
+    fn context_get_returns_wirings_and_workflows_for_persona() {
+        let s = setup();
+        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+        seed_wiring(&s, "alpha", "mail", "mini-app://mail?alias=for_alpha", true);
+        // Different persona — must NOT appear in alpha's snapshot.
+        seed_wiring(&s, "beta", "mailbox", "mini-app://mailbox?alias=for_beta", false);
+
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "alpha.workflow.session_close".into(),
+                persona_id: Some("alpha".into()),
+                trigger: json!({"kind":"on_event","event":"session_close"}),
+                action: json!({"kind":"emit_projection","projection_names":["mailbox"]}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+        // Different persona's workflow — also excluded.
+        wire_workflow_register(
+            WireWorkflowRegisterInput {
+                id: "beta.workflow.session_close".into(),
+                persona_id: Some("beta".into()),
+                trigger: json!({"kind":"on_demand"}),
+                action: json!({"kind":"no_op"}),
+                enabled: None,
+            },
+            &s,
+        )
+        .unwrap();
+
+        let out = wire_context_get(
+            WireContextGetInput {
+                persona_id: "alpha".into(),
+            },
+            &s,
+        )
+        .unwrap();
+
+        assert_eq!(out.persona_id, "alpha");
+        // Sorted by slot: "mail" < "mailbox".
+        assert_eq!(out.wirings.len(), 2);
+        assert_eq!(out.wirings[0].slot, "mail");
+        assert!(out.wirings[0].maintenance_exempt);
+        assert_eq!(out.wirings[1].slot, "mailbox");
+        assert!(!out.wirings[1].maintenance_exempt);
+
+        assert_eq!(out.workflows.len(), 1);
+        assert_eq!(out.workflows[0].id, "alpha.workflow.session_close");
+        assert_eq!(out.workflows[0].persona_id.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn context_get_resolves_projection_ref_via_naming_convention() {
+        let s = setup();
+        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+        // Register the projection at the convention-derived name.
+        ProjectionRegistry::new(&s)
+            .register(
+                &Projection::from_parts(
+                    "alpha.section.mailbox",
+                    "spec_ignored_here",
+                    "tpl",
+                    TargetForm::Prompt,
+                    PluginDispatch::Default,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let out = wire_context_get(
+            WireContextGetInput {
+                persona_id: "alpha".into(),
+            },
+            &s,
+        )
+        .unwrap();
+
+        assert_eq!(out.wirings.len(), 1);
+        assert_eq!(
+            out.wirings[0].projection_ref.as_deref(),
+            Some("alpha.section.mailbox"),
+            "projection_ref must resolve via <persona>.section.<slot> naming convention",
+        );
+    }
+
+    #[test]
+    fn context_get_leaves_projection_ref_none_when_not_registered() {
+        let s = setup();
+        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+
+        let out = wire_context_get(
+            WireContextGetInput {
+                persona_id: "alpha".into(),
+            },
+            &s,
+        )
+        .unwrap();
+
+        assert_eq!(out.wirings.len(), 1);
+        assert!(out.wirings[0].projection_ref.is_none());
+    }
+
+    #[test]
+    fn context_get_returns_empty_for_unknown_persona() {
+        let s = setup();
+        seed_wiring(&s, "alpha", "mailbox", "mini-app://mailbox?alias=for_alpha", false);
+
+        let out = wire_context_get(
+            WireContextGetInput {
+                persona_id: "ghost".into(),
+            },
+            &s,
+        )
+        .unwrap();
+
+        assert_eq!(out.persona_id, "ghost");
+        assert!(out.wirings.is_empty());
+        assert!(out.workflows.is_empty());
+    }
+
+    #[test]
+    fn context_get_rejects_empty_persona_id() {
+        let s = setup();
+        let err = wire_context_get(
+            WireContextGetInput {
+                persona_id: String::new(),
+            },
+            &s,
+        )
+        .expect_err("empty persona id must reject");
+        assert!(matches!(
+            err,
+            WireError::Domain(DomainError::InvalidPersonaId(_))
+        ));
+    }
+
+    #[test]
+    fn context_get_skips_drift_wiring_nodes_silently() {
+        let s = setup();
+        // Wiring node missing the source_uri metadata — drift case.
+        let mut drift = bare_node("alpha.mailbox", "outline_node");
+        drift.metadata = json!({
+            "persona": "alpha",
+            "axis": "mailbox",
+            // source_uri missing
+        });
+        s.insert_node(&drift).unwrap();
+        // Valid wiring alongside.
+        seed_wiring(&s, "alpha", "mail", "mini-app://mail?alias=for_alpha", false);
+
+        let out = wire_context_get(
+            WireContextGetInput {
+                persona_id: "alpha".into(),
+            },
+            &s,
+        )
+        .unwrap();
+
+        // Only the valid wiring survives; drift is doctored, not surfaced.
+        assert_eq!(out.wirings.len(), 1);
+        assert_eq!(out.wirings[0].slot, "mail");
     }
 }
