@@ -16,15 +16,20 @@
 //! that says "these are the rows that move together as one consistency
 //! unit".
 //!
-//! This is a deliberate choice. Holding an in-memory `Vec<Wiring>` would
-//! force load / mutate / save round-trips for every change and pull the
-//! Aggregate into operations that don't need transactional consistency.
-//! Today no application call site requires multi-`Wiring` atomic updates;
-//! batch operations are explicitly non-atomic at the application surface.
-//! Until such a requirement appears, the Aggregate Root stays an identity
-//! marker — invariant-checking methods, atomic multi-wiring updates, and
-//! collection ownership are deferred and added when they are actually
-//! needed.
+//! The persona-scoped **read view** lives in
+//! [`wire_context_get`](crate::application::use_cases::wire_context_get):
+//! the application use case takes a `ContextWiring` (or its persona id),
+//! walks the consistency boundary via the Math backend repository, and
+//! returns a summary snapshot. Multi-`Wiring` atomic write boundaries
+//! (reset / replication / migration) are deliberately not modelled yet;
+//! until a real use case appears, batch writes stay non-atomic at the
+//! application surface and the Aggregate Root keeps no in-memory collection
+//! state.
+//!
+//! Keeping the traversal in the application layer preserves the standard
+//! DDD layering (`domain → ⊥`, no inbound dependency on application or
+//! infrastructure) — the same discipline the rest of `domain::entity`
+//! follows.
 //!
 //! # Surface
 //!
