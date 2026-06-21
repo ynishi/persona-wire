@@ -21,7 +21,9 @@ such renderings into a wake-time prompt context.
   [`persona-wire-core/src/lib.rs`][lib-rs]. Run locally with
   `cargo doc --workspace --open -p persona-wire-core`, or read the
   published docs at <https://docs.rs/persona-wire-core/>.
-- Concept seed (early, narrative): [`docs/concept-2026-06-14.md`][concept].
+- Concept seed (archived, early narrative): [`docs/_archive/concept-2026-06-14.md`][concept].
+  The current design SoT is the crate Rustdoc — the early concept doc is
+  kept as a historical reference for the P0 framing.
 - MCP tool surface: published docs for
   [`persona-wire-mcp`](https://docs.rs/persona-wire-mcp/).
 - CLI subcommands: `persona-wire --help` (or
@@ -46,7 +48,7 @@ persona-wire/
 |---|---|---|
 | Surface | `mcp` / `cli` | MCP Tool surface, clap subcommands |
 | Application | `core::application` | Use cases; `SpecRegistry` (dynamic) and `ProjectionRegistry` (named) read model; `MergeStrategy`; persona-pack overlay resolver |
-| Domain Core | `core::domain` | `Node` / `Edge`, composable [`Specification`][spec], autoversion, repository trait |
+| Domain Core | `core::domain` | `Node` / `Edge` / composable [`Specification`][spec] / autoversion / repository trait (in `domain::graph`); first-class persona vocabulary `Wiring` / `Workflow` / `Projection` / `ContextWiring` + Value Objects `PersonaId` / `Slot` / `Source` / `SpecRef` / `TargetForm` (in `domain::entity`); Hexagonal Driven Port `ProjectionRenderer` (in `domain::port`) |
 | Infrastructure | `core::infrastructure` | SQLite storage, handlebars rendering, Layer 6 SoT Adapter (`file:` via `std::fs`; `mini-app://` via the external `persona-wire-adapter-mini-app` crate; `sqlite://` via the external `persona-wire-adapter-sqlite-x` crate) |
 
 Two complementary query axes, both first-class:
@@ -57,16 +59,19 @@ Two complementary query axes, both first-class:
   registered by name (`wire_render`, `wire_prompt_context`). Good for
   stable surfaces like wake-time injection.
 
-Two health / diagnostic use cases, both first-class:
+Diagnostic surface:
 
-- **`wire_graph_check`** — axis 1: graph connectivity (orphan count, total
-  nodes, total edges). Callable standalone as an MCP tool, or composed
-  inside `wire_doctor`.
 - **`wire_doctor`** — 2-axis integrated health report: axis 1 graph
-  connectivity (via `wire_graph_check`) + axis 2 workflow coverage (via
-  `wire_workflow_check`). Top-level backward-compatible flat fields
+  connectivity + axis 2 workflow coverage. Both axes are evaluated
+  through the internal `application::doctor::probes` registry
+  (`graph_*` / `workflow_*` Probes) and emitted as a structured JSON
+  response (`graph_check` / `workflow_check` sub-objects + `findings[]`
+  with Severity). Top-level backward-compatible flat fields
   (`orphan_node_count` / `total_node_count` / `total_edge_count`) are
-  retained as mirrors of the nested `graph_check` sub-object.
+  retained as mirrors of `graph_check.*`. Earlier 0.3.x exposed
+  `wire_graph_check` / `wire_workflow_check` as standalone MCP tools;
+  both were retired in 0.4.0 and folded into the `wire_doctor` Probe
+  registry.
 
 There is **no hard-coded projection list in the crate** — every projection
 is data, registered through `ProjectionRegistry`. Optional template
@@ -102,4 +107,4 @@ Dual: MIT OR Apache-2.0.
 
 [spec]: https://en.wikipedia.org/wiki/Specification_pattern
 [lib-rs]: https://github.com/ynishi/persona-wire/blob/main/crates/persona-wire-core/src/lib.rs
-[concept]: docs/concept-2026-06-14.md
+[concept]: docs/_archive/concept-2026-06-14.md

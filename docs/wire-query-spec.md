@@ -308,6 +308,7 @@ mcp__persona-wire__wire_query({
 
 ## 関連
 
-- `docs/concept-2026-06-14.md` §3 Architecture / §3.1 Specification (BP 由来) / §7 Phase plan (P2b land 済 marker)
+- `docs/_archive/concept-2026-06-14.md` §3 Architecture / §3.1 Specification (BP 由来) / §7 Phase plan (P0 設計 trace、 land 済)
+- `crates/persona-wire-core/src/lib.rs` `//!` block — 設計 SoT (Layer split / Render flow / Persistence schema)
 - `docs/runbook-verify.md` TC-012 (wire_query 動作検証手順)
 - `crates/persona-wire-core/tests/p2b_e2e.rs` (integration test 4 case)

@@ -222,6 +222,18 @@ CLI と同等 flow を MCP Tool 経由で:
 
 - 期待: `wire_doctor` 返り値の markdown が `# wire_doctor report` で始まり、 wire_close と数値一致
 
+### 0.5.1 refine — persona-scoped graph axis skip / `workflow_def` 除外
+
+- `wire_doctor(persona_id=Some(_))` は **graph.edges_zero probe を skip** する
+  (Phase A 時点で個別 persona は graph axis の edge-based 接続対象でない設計、
+  mia 等の persona-scoped doctor が `BROKEN` 取る false-positive を構造除去)。
+  graph-wide (`persona_id=None`) は従来通り全 probe 実行。
+- `workflow_def` Node は **graph axis の検知集合から phase-invariant 除外**
+  (Workflow Entity は trigger/action で動作完結し edge を持たないのが正常)。
+  `graph.orphan_node` / `graph.edges_zero` / `graph_scan_summary` (= `wire_close`
+  経路) 全 sweep。 詳細は `application::doctor::probes::graph_edges_zero`
+  module rustdoc + CHANGELOG 0.5.1 参照。
+
 ---
 
 ## TC-010: bulk import (wire_nodes_create_batch / wire_edges_create_batch)
