@@ -1153,6 +1153,7 @@ dependencies = [
  "async-trait",
  "gray_matter",
  "persona-wire-core",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

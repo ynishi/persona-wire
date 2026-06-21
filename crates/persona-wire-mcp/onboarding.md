@@ -27,17 +27,26 @@ NamedProjections** — no persona content lives inside.
 
 ### Concept
 
-The graph holds **wiring entries** — one `Node` per axis you want to expose
-for the persona. Each wiring entry carries a `metadata.source_uri` that
-points at the real Source-of-Truth (mini-app table, file, …). A
-**Specification** picks the wiring entries; a **NamedProjection** binds the
-Specification to a handlebars template and a target form. `wire_render`
-fetches the source fresh through the Layer 6 Adapter and renders the
-template. `wire_prompt_context` walks every axis for the persona, optionally
-filtered by `projection_names`, and concatenates the rendered blocks into a
-single PromptContext string. Optional per-persona overlays live in
-persona-pack under `[extra.persona_wire.projections.<axis>]` and are folded
-into the base template through a `MergeStrategy`.
+The graph holds **wiring entries** — one `Node` per **Slot** you want to
+expose for the persona. A Slot is the persona-context binding identifier
+(e.g. `active` / `handoff` / `mailbox`); it is a first-class Value Object
+on `domain::entity::wiring::Wiring`. The narrative below uses the word
+*Slot* for the concept, but the storage metadata key and the persona-pack
+overlay key are still literally `axis` (legacy SQLite rows + persona-pack
+TOML keys); `application::wiring_mapper` is the single translation
+boundary (`Slot ↔ Node.metadata["axis"]`). New code should route through
+the mapper rather than reading `metadata["axis"]` directly.
+
+Each wiring entry carries a `metadata.source_uri` that points at the real
+Source-of-Truth (mini-app table, file, …). A **Specification** picks the
+wiring entries; a **NamedProjection** binds the Specification to a
+handlebars template and a target form. `wire_render` fetches the source
+fresh through the Layer 6 Adapter and renders the template.
+`wire_prompt_context` walks every Slot for the persona, optionally
+filtered by `projection_names`, and concatenates the rendered blocks into
+a single PromptContext string. Optional per-persona overlays live in
+persona-pack under `[extra.persona_wire.projections.<axis>]` (literal
+key) and are folded into the base template through a `MergeStrategy`.
 
 ## 1. Install + run
 
@@ -58,10 +67,11 @@ with `--db <path>` or the `PERSONA_WIRE_DB` env var). The MCP server
 exposes the `wire_*` tools listed in the server `instructions` and the
 guide resource at `wire-guide://onboarding`.
 
-## 2. Set up a persona's wiring entries (one Node per axis)
+## 2. Set up a persona's wiring entries (one Node per Slot)
 
-Pick the axes you want (`active` / `ng` / `trigger` / `handoff` / `toolmap`
-is one common shape, but anything works). For each axis create one node
+Pick the Slots you want (`active` / `ng` / `trigger` / `handoff` / `toolmap`
+is one common shape, but anything works). The Slot name lives on the
+node's `metadata.axis` (legacy literal key). For each Slot create one node
 with a `source_uri`. Add an edge from the persona node for traceability
 (optional but recommended — wiring entries that carry `metadata.source_uri`
 or `metadata.maintenance_exempt: true` are recognised as **self-attached**
@@ -353,9 +363,10 @@ field to silence it.
 
 ### wire_doctor — 2-axis integrated health report
 
-`wire_doctor` is now a 2-axis integrated health check. It internally calls
-`wire_graph_check` (axis 1: graph connectivity) and `wire_workflow_check` (axis
-2: workflow coverage) and returns a structured JSON response:
+`wire_doctor` is a 2-axis integrated health check: axis 1 (graph
+connectivity) and axis 2 (workflow coverage) are evaluated through the
+internal `application::doctor::probes` registry (`graph_*` / `workflow_*`
+Probes) and emitted into a structured JSON response:
 
 ```jsonc
 // MCP: wire_doctor — 2-axis integrated health check
@@ -393,26 +404,11 @@ fields are backward-compat mirrors of `graph_check.orphan_count` /
 `graph_check.total_nodes` / `graph_check.total_edges` respectively. Existing
 callers that read only the flat fields continue to work unchanged.
 
-### wire_graph_check — standalone axis 1 health check
-
-`wire_graph_check` is also available as an independent MCP tool when you only
-need graph connectivity data (without workflow coverage):
-
-```jsonc
-// MCP: wire_graph_check — axis 1 graph connectivity only
-{}
-```
-
-Response shape:
-
-```json
-{
-  "orphan_count": 0,
-  "total_nodes": 3,
-  "total_edges": 2,
-  "report_markdown": "## graph_check (axis 1: graph connectivity)\n…"
-}
-```
+> Axis-1-only inspection used to ship as a standalone `wire_graph_check`
+> MCP tool. From 0.4.0 the tool was retired and graph connectivity is
+> reported through the `wire_doctor` 2-axis report (the `graph_check`
+> sub-object). For implementation detail see the
+> `application::doctor::probes::graph_*` Probe registry in the Rustdoc.
 
 ```jsonc
 // MCP: wire_prompt_context — renders every registered axis for the persona
@@ -568,12 +564,20 @@ trigger surfaces:
 
 All four share one wire call; the loop / cadence lives in the Trigger.
 
-### Implemented — `wire_workflow_*`
+### Implemented — `wire_workflow_*` + `wire_doctor` coverage audit
 
 The trigger / action portion (`wire_workflow_fire` /
-`wire_workflow_check`) is implemented. A workflow is a Node carrying
+`wire_workflow_register` / `wire_workflow_list` / `wire_workflow_delete`)
+is implemented. A workflow is a Node carrying
 `metadata.maintained_by.event = "<event>"`; firing the event runs the
-declared action and the check tool reports coverage.
+declared action.
+
+The coverage audit (declared maintenance plan ↔ actually-wired workflow
+Nodes) used to ship as a standalone `wire_workflow_check` MCP tool.
+From 0.4.0 the tool was retired and the audit is now reported through
+the `wire_doctor` 2-axis report (the `workflow_check` sub-object plus
+`findings[]` with Severity). See `application::doctor::probes::workflow_*`
+in the Rustdoc for the Probe registry shape.
 
 ```jsonc
 // MCP: wire_workflow_fire — invoke every workflow whose
@@ -582,18 +586,15 @@ declared action and the check tool reports coverage.
 //   → { "fired": [ { "node_id": "...", "result": { "prompt_context": "..." } } ],
 //       "skipped": [ ... ] }
 
-// MCP: wire_workflow_check — coverage audit between declared maintenance
-// plans (Nodes that say "I expect to be maintained by X") and the
-// actually-wired workflow Nodes.
+// MCP: wire_doctor — graph (axis 1) + workflow coverage (axis 2) audit.
 { "persona_id": "alpha" }
-//   → { "covered": N, "uncovered": N, "undeclared": N, "exempt": N,
-//       "declared_uncovered": [ ... ] }
+//   → { "graph_check": { ... }, "workflow_check": { ... }, "findings": [ ... ] }
 ```
 
 Declarative cadence (e.g. `every 7d`) and write-side helpers are still
 in the carry roadmap; until those land, model time-aware cadence one
-layer out as described in the recipe above and use `wire_workflow_*`
-for the discrete-event trigger.
+layer out as described in the recipe above and use `wire_workflow_*` +
+`wire_doctor` for the discrete-event trigger / coverage audit.
 
 ## 6c. Migrating from a per-persona config layer
 

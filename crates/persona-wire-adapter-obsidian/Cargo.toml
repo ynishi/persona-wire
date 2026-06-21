@@ -12,6 +12,7 @@ description = "persona-wire Adapter for Obsidian vault (scheme `obsidian://`). R
 
 [dependencies]
 persona-wire-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 gray_matter.workspace = true
