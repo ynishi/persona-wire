@@ -268,4 +268,24 @@ mod tests {
         assert_eq!(v["source_uri"], "mini-app://x");
         assert_eq!(v["maintenance_exempt"], true);
     }
+
+    #[test]
+    fn node_to_wiring_rejects_missing_persona_and_source() {
+        // missing axis 以外の reject path: persona 欠落 / source_uri 欠落 をそれぞれ独立検証。
+        let no_persona = raw_node("x.y", json!({"axis": "mailbox", "source_uri": "mini-app://x"}));
+        let err = node_to_wiring(&no_persona, None).expect_err("missing persona must reject");
+        assert!(matches!(
+            err,
+            crate::domain::error::WireError::Domain(DomainError::InvalidMetadata(_))
+        ));
+        assert!(err.to_string().contains("persona"));
+
+        let no_source = raw_node("x.y", json!({"persona": "x", "axis": "mailbox"}));
+        let err = node_to_wiring(&no_source, None).expect_err("missing source must reject");
+        assert!(matches!(
+            err,
+            crate::domain::error::WireError::Domain(DomainError::InvalidMetadata(_))
+        ));
+        assert!(err.to_string().contains("source_uri"));
+    }
 }

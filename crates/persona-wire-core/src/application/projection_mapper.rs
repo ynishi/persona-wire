@@ -145,4 +145,81 @@ mod tests {
             WireError::Domain(DomainError::InvalidProjection(_))
         ));
     }
+
+    #[test]
+    fn dto_to_projection_to_dto_roundtrip_default_plugin() {
+        // Reverse direction: DTO → Entity → DTO equality on Default plugin shape.
+        let original = NamedProjection {
+            name: "_persona_toc".into(),
+            spec_ref: "active_personas".into(),
+            template: "Active personas ({{count}}): {{names}}".into(),
+            target_form: TargetForm::Prompt,
+            template_engine: None,
+            projection_kind: None,
+            projection_config: None,
+        };
+        let entity = dto_to_projection(original.clone()).unwrap();
+        let back = projection_to_dto(&entity);
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn roundtrip_preserves_custom_plugin_with_config() {
+        // Custom plugin with config Value must round-trip without field loss.
+        let cfg = serde_json::json!({"model": "claude-haiku", "temperature": 0.7});
+        let p = Projection::from_parts(
+            "render_llm",
+            "active_personas",
+            "{{prompt}}",
+            TargetForm::Markdown,
+            PluginDispatch::custom("handlebars", "llm", Some(cfg.clone())).unwrap(),
+        )
+        .unwrap();
+        let dto = projection_to_dto(&p);
+        // DTO 側に 3 Optional が全部 flatten されている。
+        assert_eq!(dto.template_engine.as_deref(), Some("handlebars"));
+        assert_eq!(dto.projection_kind.as_deref(), Some("llm"));
+        assert_eq!(dto.projection_config, Some(cfg));
+        // Entity round-trip 等価。
+        let back = dto_to_projection(dto).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn dto_to_projection_propagates_vo_errors() {
+        // 空 name / spec_ref / template が DTO 経由でも Domain VO で reject される。
+        for (name, spec, tmpl) in [("", "s", "t"), ("n", "", "t"), ("n", "s", "")] {
+            let dto = NamedProjection {
+                name: name.into(),
+                spec_ref: spec.into(),
+                template: tmpl.into(),
+                target_form: TargetForm::Prompt,
+                template_engine: None,
+                projection_kind: None,
+                projection_config: None,
+            };
+            let err = dto_to_projection(dto).expect_err("VO empty must reject");
+            assert!(matches!(
+                err,
+                WireError::Domain(DomainError::InvalidProjection(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn projection_to_dto_preserves_all_target_form_variants() {
+        // TargetForm の 4 variant が DTO 側に丸ごと保たれること (target_form column 損失なし)。
+        for tf in [
+            TargetForm::Prompt,
+            TargetForm::Markdown,
+            TargetForm::Json,
+            TargetForm::Ascii,
+        ] {
+            let p = Projection::from_parts("n", "s", "t", tf, PluginDispatch::Default).unwrap();
+            let dto = projection_to_dto(&p);
+            assert_eq!(dto.target_form, tf);
+            let back = dto_to_projection(dto).unwrap();
+            assert_eq!(back.target_form(), tf);
+        }
+    }
 }

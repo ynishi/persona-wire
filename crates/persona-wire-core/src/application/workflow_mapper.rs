@@ -344,4 +344,27 @@ mod tests {
         let back = node_to_workflow(&workflow_to_node(&w)).unwrap();
         assert_eq!(w, back);
     }
+
+    #[test]
+    fn node_to_workflow_propagates_empty_workflow_id() {
+        // 空 Node.id が WorkflowId::new の VO invariant に当たって reject される (DTO → Entity 経路の VO propagation)。
+        let node = Node {
+            id: String::new(),
+            r#type: WORKFLOW_TYPE.into(),
+            sot_ref: None,
+            confidence: None,
+            applicability: None,
+            last_verified_at: None,
+            review_due: None,
+            version: 1,
+            prev_id: None,
+            metadata: serde_json::json!({
+                "trigger": {"kind": "on_demand"},
+                "action": {"kind": "no_op"},
+                "enabled": true,
+            }),
+        };
+        let err = node_to_workflow(&node).expect_err("empty workflow id must reject");
+        assert!(err.to_string().to_lowercase().contains("workflow"));
+    }
 }
