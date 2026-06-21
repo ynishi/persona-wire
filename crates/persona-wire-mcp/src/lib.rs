@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use persona_wire_adapter_mini_app::MiniAppAdapter;
+use persona_wire_adapter_obsidian::ObsidianAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
@@ -58,6 +59,7 @@ impl WireServer {
                 PluginRegistry::default_builder_for_wire()
                     .with_adapter(MiniAppAdapter)
                     .with_adapter(SqliteAdapter)
+                    .with_adapter(ObsidianAdapter)
                     .with_adapter(persona_pack)
                     .build()
                     .expect("default plugin registry build"),

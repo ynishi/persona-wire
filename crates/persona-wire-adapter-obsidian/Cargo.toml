@@ -1,0 +1,24 @@
+[package]
+name = "persona-wire-adapter-obsidian"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for Obsidian vault (scheme `obsidian://`). Reads Markdown notes from a local vault directory with YAML/TOML frontmatter parse via gray_matter."
+
+[dependencies]
+persona-wire-core.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+gray_matter.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+# TOML frontmatter parse for +++ delimiters (gray_matter TOML engine does not
+# recognise +++ as a delimiter in v0.2.x, so we parse manually via toml crate).
+toml = { version = "0.5", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

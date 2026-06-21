@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use persona_wire_adapter_mini_app::MiniAppAdapter;
+use persona_wire_adapter_obsidian::ObsidianAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
@@ -467,6 +468,7 @@ fn main() -> Result<()> {
             let registry = PluginRegistry::default_builder_for_wire()
                 .with_adapter(MiniAppAdapter)
                 .with_adapter(SqliteAdapter)
+                .with_adapter(ObsidianAdapter)
                 .with_adapter(PersonaPackAdapter::from_env()?)
                 .build()?;
             let out = wire_init(
@@ -544,6 +546,7 @@ fn main() -> Result<()> {
             let registry = PluginRegistry::default_builder_for_wire()
                 .with_adapter(MiniAppAdapter)
                 .with_adapter(SqliteAdapter)
+                .with_adapter(ObsidianAdapter)
                 .with_adapter(PersonaPackAdapter::from_env()?)
                 .build()?;
             let out = wire_render(

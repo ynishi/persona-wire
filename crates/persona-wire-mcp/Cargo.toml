@@ -13,6 +13,7 @@ description = "persona-wire MCP server library — exposes serve_stdio() for the
 [dependencies]
 persona-wire-core.workspace = true
 persona-wire-adapter-mini-app.workspace = true
+persona-wire-adapter-obsidian.workspace = true
 persona-wire-adapter-persona-pack.workspace = true
 persona-wire-adapter-sqlite-x.workspace = true
 rmcp.workspace = true

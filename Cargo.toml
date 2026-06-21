@@ -7,6 +7,7 @@ members = [
     "crates/persona-wire-adapter-mini-app",
     "crates/persona-wire-adapter-persona-pack",
     "crates/persona-wire-adapter-sqlite-x",
+    "crates/persona-wire-adapter-obsidian",
 ]
 
 [workspace.package]
@@ -45,8 +46,12 @@ url = "2"
 # Plugin trait (dyn-compatible async fn — Adapter / Projection)
 async-trait = "0.1"
 
+# Obsidian vault frontmatter parse (YAML / TOML / JSON multiformat)
+gray_matter = "0.2"
+
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.5.1" }
 persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.5.1" }
 persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.5.1" }
 persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.5.1" }
+persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.5.1" }
