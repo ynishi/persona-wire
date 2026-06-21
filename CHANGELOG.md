@@ -9,11 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `wire-adapter-obsidian` crate: new Adapter for `obsidian:///<vault>/<note>` URI scheme.
-  Reads Obsidian vault files via `tokio::fs`, parses YAML/TOML frontmatter via
-  `gray_matter`, and optionally extracts `[[wiki-link]]` references when
-  `?links=edge` is set (default off). See `docs/onboarding.md` §2 for usage.
-
 ### Changed
 
 ### Deprecated
@@ -23,6 +18,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 ### Security
+
+## [0.5.2] - 2026-06-22
+
+### Added
+
+- **`file://` Source Adapter — File metadata expose (R4、 issue `7998607b`)** —
+  `FileAdapter::fetch` が file body と一緒に `metadata` JSON object を返す。
+  Fields: `filename` (basename) / `full_path` (absolute) / `last_modified`
+  (UNIX epoch u64、 `std::time::SystemTime` 経由、 chrono 非依存) / `size_bytes` /
+  `age_days`。 単一 file path / newest-in-dir 両 path で metadata 同梱。
+  Non-existent path は `WireError::Storage` を返さず `{ body: null, metadata: null }`
+  で graceful fail。 handlebars template から `{{metadata.last_modified}}` /
+  `{{metadata.age_days}}` 等で参照可。 backward-compat: 未参照時の emit ゼロ。
+- **`file://` Source Adapter — tail / tail_n query param 拡張 (R5、 issue `eb62ebdb`)** —
+  `?tail=last_section` で markdown `## ` h2 boundary の最後の section 以降を
+  部分 fetch。 `?tail_n=<N>` で末尾 N 行を部分 fetch (`TAIL_N_MAX = 1000` 行で
+  clamp、 context size guard)。 unknown / unparseable query param は full fetch
+  に graceful fail。 R4 metadata は両 tail mode で preserve (= 同 source_uri で
+  `?tail=last_section` + metadata 参照を併用可)。 `resolve_file_path` は `?query`
+  suffix も strip (`#fragment` と並列)。 25 file-adapter tests + 287 core tests
+  全 PASS。
+
+### Changed
+
+- **`crates/persona-wire-mcp/onboarding.md`** を `docs/onboarding.md` と再 sync
+  (build.rs gate baseline 整合)。
 
 ## [0.5.1] - 2026-06-21
 
@@ -44,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hexagonal Driven Port** — `ProjectionRenderer` trait を `domain/port/` 配下に新設 (commit `976cfe5`)。 application 層からの依存方向を逆転、 `StaticProjection` adapter は `infrastructure/projection/` 配下に配置して trait を impl。 `ProjectionInput<'a>` は技術依存ゼロの borrowed view (`TemplateEngine` 参照を除去、 Hole-1 解消)。
 - **Data Mapper Pattern** (`application/{projection,wiring,workflow}_mapper.rs`) — Fowler PoEAA Ch.10 Data Mapper を 3 mapper で land (commits `f7aacfb` / `735f600` / `28112b2` / `25bf20b`)。 Persistence DTO (`NamedProjection` 等) と Domain Entity 間の `Entity ⇄ DTO` round-trip を保証、 不正 DTO は mapper boundary で `DomainError::InvalidProjection` 等で reject。 Registry が Mapper 役を兼任する narrow 解釈 (`docs/design/projection-data-mapper.md`)。
 - **DomainError** を `WireError` から分離 (commit `1d9b977`) — `InvalidPersonaId` / `InvalidSource` / `InvalidMetadata` / `InvalidProjection` / `InvalidTargetForm` variant で Domain invariant 違反を型で表現。 `WireError::Domain(DomainError)` で wrap。
-- **Test coverage +24** — `domain::entity::` (65 → 79 lib test) / `application::` (96 → 102 lib test) / `infrastructure::projection::` (2 → 6 lib test)。 workspace 全体 310 → 334 pass / 0 failed (refactor-verify Step 2-5 で land、 detail は `workspace/tasks/refactor-verify/plan.md`)。
+- **Test coverage +24** — `domain::entity::` (65 → 79 lib test) / `application::` (96 → 102 lib test) / `infrastructure::projection::` (2 → 6 lib test)。 workspace 全体 310 → 334 pass / 0 failed (refactor-verify Step 2-5 で land)。
 
 ### Changed
 
@@ -281,7 +302,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Internal token / persona-literal leak removal**: test fixtures, docs, and README were sanitised of persona-specific identifiers, internal issue IDs, and project labels. Each commit in the 7-commit chain leading to this release was verified by `publish-checker` + `secret-pre-commit-checker` + `content-hygiene-pre-commit-checker` (4-gate sweep).
 
-[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/ynishi/persona-wire/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/ynishi/persona-wire/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/ynishi/persona-wire/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/ynishi/persona-wire/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/ynishi/persona-wire/compare/v0.2.2...v0.3.0
+[0.2.2]: https://github.com/ynishi/persona-wire/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ynishi/persona-wire/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ynishi/persona-wire/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ynishi/persona-wire/compare/441a727...v0.1.0
