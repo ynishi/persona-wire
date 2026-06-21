@@ -158,7 +158,10 @@ pub fn wiring_metadata_object(
     extras: Option<Map<String, Value>>,
 ) -> Value {
     let mut m = Map::new();
-    m.insert(META_PERSONA.to_string(), Value::String(persona.as_str().into()));
+    m.insert(
+        META_PERSONA.to_string(),
+        Value::String(persona.as_str().into()),
+    );
     m.insert(META_SLOT.to_string(), Value::String(slot.as_str().into()));
     m.insert(
         META_SOURCE_URI.to_string(),
@@ -272,7 +275,10 @@ mod tests {
     #[test]
     fn node_to_wiring_rejects_missing_persona_and_source() {
         // missing axis 以外の reject path: persona 欠落 / source_uri 欠落 をそれぞれ独立検証。
-        let no_persona = raw_node("x.y", json!({"axis": "mailbox", "source_uri": "mini-app://x"}));
+        let no_persona = raw_node(
+            "x.y",
+            json!({"axis": "mailbox", "source_uri": "mini-app://x"}),
+        );
         let err = node_to_wiring(&no_persona, None).expect_err("missing persona must reject");
         assert!(matches!(
             err,

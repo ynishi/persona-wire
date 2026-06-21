@@ -445,10 +445,9 @@ fn main() -> Result<()> {
             ProjectionOp::Get { name } => {
                 let s = SqliteStorage::open(&db)?;
                 match ProjectionRegistry::new(&s).get(&name)? {
-                    Some(p) => println!(
-                        "{}",
-                        serde_json::to_string_pretty(&projection_to_dto(&p))?
-                    ),
+                    Some(p) => {
+                        println!("{}", serde_json::to_string_pretty(&projection_to_dto(&p))?)
+                    }
                     None => {
                         eprintln!("not found: {name}");
                         std::process::exit(1);

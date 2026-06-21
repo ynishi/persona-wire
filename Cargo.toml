@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
@@ -46,7 +46,7 @@ url = "2"
 async-trait = "0.1"
 
 # Intra-workspace
-persona-wire-core = { path = "crates/persona-wire-core", version = "0.4.0" }
-persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.4.0" }
-persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.4.0" }
-persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.4.0" }
+persona-wire-core = { path = "crates/persona-wire-core", version = "0.5.0" }
+persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.5.0" }
+persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.5.0" }
+persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.5.0" }

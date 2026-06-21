@@ -19,6 +19,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.5.0] - 2026-06-21
+
+### Added
+
+- **Domain Entity layer 新設** (`domain/entity/`) — `Projection` / `Wiring` / `Workflow` / `ContextWiring` の 4 Aggregate Root + `Slot` / `PersonaId` / `Source` を Domain Entity として land (commits `a5d6fcb` / `faa9054` / `f7aacfb` / `ade40c7`)。 各 Entity は immutable、 mutator を持たず、 構築時に VO invariant を強制 (Vernon IDDD Rule 2 Small Aggregates / Make Illegal States Unrepresentable)。
+- **Value Object 群** — `PersonaId` / `Source` / `ProjectionName` / `SpecName` / `SpecRef` / `ProjectionTemplate` / `TargetForm` enum / `PluginDispatch` enum を新設。 すべて `Display` / `AsRef<str>` / `Serialize` / `Deserialize` / `TryFrom<&str>` / `TryFrom<String>` を備える対称 surface。 `PluginDispatch` は 3 Optional field の組合せ 8 状態を `Default | Custom { engine, kind, config }` の 2 状態に discriminant 化、 illegal combination 6 種を型から排除 (`projection.rs`)。
+- **Hexagonal Driven Port** — `ProjectionRenderer` trait を `domain/port/` 配下に新設 (commit `976cfe5`)。 application 層からの依存方向を逆転、 `StaticProjection` adapter は `infrastructure/projection/` 配下に配置して trait を impl。 `ProjectionInput<'a>` は技術依存ゼロの borrowed view (`TemplateEngine` 参照を除去、 Hole-1 解消)。
+- **Data Mapper Pattern** (`application/{projection,wiring,workflow}_mapper.rs`) — Fowler PoEAA Ch.10 Data Mapper を 3 mapper で land (commits `f7aacfb` / `735f600` / `28112b2` / `25bf20b`)。 Persistence DTO (`NamedProjection` 等) と Domain Entity 間の `Entity ⇄ DTO` round-trip を保証、 不正 DTO は mapper boundary で `DomainError::InvalidProjection` 等で reject。 Registry が Mapper 役を兼任する narrow 解釈 (`docs/design/projection-data-mapper.md`)。
+- **DomainError** を `WireError` から分離 (commit `1d9b977`) — `InvalidPersonaId` / `InvalidSource` / `InvalidMetadata` / `InvalidProjection` / `InvalidTargetForm` variant で Domain invariant 違反を型で表現。 `WireError::Domain(DomainError)` で wrap。
+- **Test coverage +24** — `domain::entity::` (65 → 79 lib test) / `application::` (96 → 102 lib test) / `infrastructure::projection::` (2 → 6 lib test)。 workspace 全体 310 → 334 pass / 0 failed (refactor-verify Step 2-5 で land、 detail は `workspace/tasks/refactor-verify/plan.md`)。
+
+### Changed
+
+- **`domain/*` を `domain/graph/` subdir に整理** (commit `334a0a`) — graph 系 (autoversion / compute / constraint / crud / node / repository / specification) を namespace 化。 Domain Entity 層と分離して module 構造を整える Step A。
+- **application Projection trait を `ProjectionRenderer` に rename + Domain Port 化** (commits `afdf0d2` / `976cfe5`) — Data Mapper land 2/3 で trait rename、 続いて Hexagonal Port として Domain layer に移行。
+- **application callsite を Projection Domain Entity 経由に migrate** (commit `b855d8a`) — Data Mapper land 3/3。 raw `NamedProjection` DTO を直接扱う callsite を Mapper 経路に統一。
+- **axis → slot vocabulary 統一** (commit `b467bcf`) — storage column / API field / Wiring Entity の語彙を `slot` に sweep。 Wiring Slot を first-class concept として表現。
+- **`wire_init` / `wire_render` 薄化** (commit `72166e2`) — Step C-6 Phase 2 で 2 helper に分解、 use_case 本体を読みやすくする。
+- **`wire_prompt_context` per-slot 薄化** (commit `28112b2`) — Workflow mapper 経由で per-slot 単位に分解。 `SpecName` VO も同時 land。
+- **`WiringMetadata` mapper land + `Source::scheme` panic-free 化** (commit `735f600`) — Source の `scheme_len` を構築時 cache、 runtime panic 不能な型保証に再構築。
+- **`projection_mapper` を wiring/workflow mapper の sibling として抽出** (commit `25bf20b`) — application/ 配下の 3 mapper 配置統一。
+- **rustdoc-as-SoT for projection persistence pattern selection** (commit `368f458`) — design 経緯を rustdoc 化、 `docs/design/projection-data-mapper.md` を impermanent な setup doc として残置。
+
+### Removed
+
+- 旧 monolithic `domain/graph.rs` — subdir 化 (`domain/graph/`) で物理分割。
+- 旧 application 層 `Projection` trait — `ProjectionRenderer` rename + Domain Port 化で削除。
+
 ## [0.4.0] - 2026-06-20
 
 ### Added

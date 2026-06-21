@@ -100,7 +100,10 @@ mod tests {
             persona_id: None,
             config: &cfg,
         };
-        let out = proj.render(input).await.expect("engine returns Ok marker, not Err");
+        let out = proj
+            .render(input)
+            .await
+            .expect("engine returns Ok marker, not Err");
         assert!(
             out.contains("{{render-error:"),
             "expected render-error marker, got: {out}"

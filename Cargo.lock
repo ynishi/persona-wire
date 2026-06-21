@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire-adapter-mini-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "mini-app-core",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire-adapter-persona-pack"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "persona-pack",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire-adapter-sqlite-x"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "persona-wire-core",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "persona-wire-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "persona-wire-adapter-mini-app",
