@@ -220,4 +220,36 @@ mod tests {
         let b = sample();
         assert_eq!(a, b);
     }
+
+    #[test]
+    fn new_typed_vo_path_assembles() {
+        // Primary path used by mappers: typed VO 直接受け取り、 validation 済みの instance を組む。
+        let w = Wiring::new(
+            PersonaId::new("test_persona_a").unwrap(),
+            Slot::new("mailbox").unwrap(),
+            Source::new("mini-app://mailbox?alias=for_test_persona_a").unwrap(),
+            Some(ProjectionName::new("test_persona_a.section.mailbox").unwrap()),
+        );
+        assert_eq!(w.persona_id().as_str(), "test_persona_a");
+        assert_eq!(w.slot().as_str(), "mailbox");
+        assert_eq!(
+            w.source().as_str(),
+            "mini-app://mailbox?alias=for_test_persona_a"
+        );
+        assert_eq!(
+            w.projection_ref().map(|p| p.as_str()),
+            Some("test_persona_a.section.mailbox")
+        );
+    }
+
+    #[test]
+    fn from_parts_rejects_empty_slot() {
+        // Slot 空文字 invariant が Wiring::from_parts 経由でも propagation する。
+        let err = Wiring::from_parts("test_persona_a", "", "mini-app://x", None)
+            .expect_err("empty slot must reject");
+        assert!(matches!(
+            err,
+            WireError::Domain(DomainError::InvalidMetadata(_))
+        ));
+    }
 }

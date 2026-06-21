@@ -784,4 +784,51 @@ mod tests {
                 .unwrap();
         assert_eq!(p1, p2);
     }
+
+    #[test]
+    fn projection_new_typed_vo_path_assembles() {
+        // Primary path used by mappers: typed VO 直接受け取り、 validation 済みの instance を組む。
+        let p = Projection::new(
+            ProjectionName::new("toc").unwrap(),
+            SpecName::new("active_personas").unwrap(),
+            ProjectionTemplate::new("Count: {{n}}").unwrap(),
+            TargetForm::Json,
+            PluginDispatch::custom("handlebars", "llm", None).unwrap(),
+        );
+        assert_eq!(p.name().as_str(), "toc");
+        assert_eq!(p.spec_ref().as_str(), "active_personas");
+        assert_eq!(p.template().as_str(), "Count: {{n}}");
+        assert_eq!(p.target_form(), TargetForm::Json);
+        assert!(matches!(p.plugin(), PluginDispatch::Custom { .. }));
+    }
+
+    #[test]
+    fn plugin_dispatch_from_optional_parts_rejects_engine_with_config() {
+        // (Some, None, Some): kind 欠落、 config だけ伴う engine。
+        let err = PluginDispatch::from_optional_parts(
+            Some("handlebars".into()),
+            None,
+            Some(serde_json::json!({"x": 1})),
+        )
+        .expect_err("engine + config without kind must reject");
+        assert!(matches!(
+            err,
+            WireError::Domain(DomainError::InvalidProjection(_))
+        ));
+    }
+
+    #[test]
+    fn plugin_dispatch_from_optional_parts_rejects_kind_with_config() {
+        // (None, Some, Some): engine 欠落、 config だけ伴う kind。
+        let err = PluginDispatch::from_optional_parts(
+            None,
+            Some("static".into()),
+            Some(serde_json::json!({"x": 1})),
+        )
+        .expect_err("kind + config without engine must reject");
+        assert!(matches!(
+            err,
+            WireError::Domain(DomainError::InvalidProjection(_))
+        ));
+    }
 }
