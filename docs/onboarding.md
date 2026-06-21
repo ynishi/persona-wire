@@ -119,6 +119,12 @@ edge-less wiring entry will not be flagged as a graph-health issue).
 - `file://<path>` or `file:<path>` — `std::fs::read`. `~/` is expanded.
   Directory paths return the newest mtime child (handy for
   `handoff/YYYY-MM-DD.md` patterns).
+- `obsidian:///<vault-root>/<note>[?frontmatter={on|off}&links={off|edge}]` —
+  reads a Markdown note from a local Obsidian vault directory via `tokio::fs`,
+  parses YAML / TOML frontmatter via `gray_matter`, and optionally extracts
+  `[[wiki-link]]` references when `?links=edge` is set (default `off`).
+  Returns `{ vault_path, note_path, frontmatter, body, wiki_links? }`.
+  Example: `obsidian:////Users/me/vault/daily.md?frontmatter=on&links=edge`.
 
 Bulk-insert through `wire_nodes_create_batch` / `wire_edges_create_batch`
 when you have many axes at once.

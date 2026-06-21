@@ -16,6 +16,8 @@
 //!   metadata (R4):
 //!   - `size_bytes` — ファイル全体のバイト数 (tail 適用後 body size ではなく元 file 全体の size)
 //!   - `modified_at` — 最終更新時刻 (Unix epoch 秒, u64)
+//!   - `metadata` — ネスト metadata オブジェクト (`filename` / `full_path` / `last_modified` /
+//!     `size_bytes` / `age_days`)
 //!
 //! 外部 crate で提供 (P3b で分離済):
 //! - `mini-app://<table>...` → `persona-wire-adapter-mini-app` crate (`MiniAppAdapter`)
@@ -77,9 +79,10 @@ enum TailMode {
 impl FileAdapter {
     /// `file://<path>` or `file:<path>` の path 部分を受けて、 std::fs::read で raw 字面を取得。
     /// `~/` で始まる場合は HOME 展開。 directory が渡された場合は最新 mtime の child file 1 件を読む。
+    /// non-existent path は `body: null, metadata: null` で `Ok` を返す (graceful)。
     ///
     /// query param なし = backward-compat (全体 fetch)。
-    /// R4 metadata (`size_bytes` / `modified_at`) を結果に含む。
+    /// R4 metadata (`size_bytes` / `modified_at` / ネスト `metadata` フィールド) を結果に含む。
     pub async fn fetch_file(&self, raw_path: &str) -> WireResult<serde_json::Value> {
         self.fetch_file_impl(raw_path, TailMode::Full).await
     }
@@ -90,6 +93,18 @@ impl FileAdapter {
         mode: TailMode,
     ) -> WireResult<serde_json::Value> {
         let resolved = resolve_file_path(raw_path)?;
+
+        // Graceful: non-existent path → body: null, metadata: null (WireError にしない)
+        if !resolved.exists() {
+            return Ok(serde_json::json!({
+                "scheme": "file",
+                "kind": "file",
+                "path": resolved.display().to_string(),
+                "body": serde_json::Value::Null,
+                "metadata": serde_json::Value::Null,
+            }));
+        }
+
         let meta = std::fs::metadata(&resolved)
             .map_err(|e| WireError::Storage(format!("file adapter: stat: {e}")))?;
         if meta.is_dir() {
@@ -100,6 +115,7 @@ impl FileAdapter {
                 .map_err(|e| WireError::Storage(format!("file adapter: stat child: {e}")))?;
             let size_bytes = child_meta.len();
             let modified_at = mtime_unix(&child_meta);
+            let meta_json = build_file_metadata(&newest);
             let body = apply_tail(&body_full, &mode);
             Ok(serde_json::json!({
                 "scheme": "file",
@@ -109,12 +125,14 @@ impl FileAdapter {
                 "body": body,
                 "size_bytes": size_bytes,
                 "modified_at": modified_at,
+                "metadata": meta_json,
             }))
         } else {
             let body_full = std::fs::read_to_string(&resolved)
                 .map_err(|e| WireError::Storage(format!("file adapter: read: {e}")))?;
             let size_bytes = meta.len();
             let modified_at = mtime_unix(&meta);
+            let meta_json = build_file_metadata(&resolved);
             let body = apply_tail(&body_full, &mode);
             Ok(serde_json::json!({
                 "scheme": "file",
@@ -123,6 +141,7 @@ impl FileAdapter {
                 "body": body,
                 "size_bytes": size_bytes,
                 "modified_at": modified_at,
+                "metadata": meta_json,
             }))
         }
     }
@@ -216,6 +235,43 @@ fn mtime_unix(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+/// stat(path) から R4 metadata JSON を構築する。 stat 失敗は Null を返す (no panic)。
+/// `last_modified` は UNIX epoch 秒 (u64)、 `age_days` は現在時刻との差分日数 (u64)。
+/// chrono 非依存 — std::time::SystemTime のみ使用。
+fn build_file_metadata(path: &std::path::Path) -> serde_json::Value {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let size_bytes = meta.len();
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let full_path = path.display().to_string();
+            let last_modified: Option<u64> = meta.modified().ok().and_then(|mtime| {
+                mtime
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs())
+            });
+            let age_days: Option<u64> = meta.modified().ok().and_then(|mtime| {
+                std::time::SystemTime::now()
+                    .duration_since(mtime)
+                    .ok()
+                    .map(|d| d.as_secs() / 86400)
+            });
+            serde_json::json!({
+                "filename": filename,
+                "full_path": full_path,
+                "last_modified": last_modified,
+                "size_bytes": size_bytes,
+                "age_days": age_days,
+            })
+        }
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
 fn resolve_file_path(raw: &str) -> WireResult<PathBuf> {
     // `~/...` -> $HOME 展開
     // `#fragment` と `?query` を path から剥がす (どちらも filesystem lookup では無効)
@@ -294,7 +350,7 @@ mod tests {
         assert!(r.is_err());
     }
 
-    // ---- R4: metadata ----
+    // ---- R4: metadata (topic style — flat top-level fields) ----
 
     #[tokio::test]
     async fn file_adapter_r4_metadata_size_and_mtime() {
@@ -514,5 +570,102 @@ mod tests {
     fn parse_tail_mode_no_params_returns_full() {
         let uri = WireUri::parse("file:///tmp/x").unwrap();
         assert_eq!(parse_tail_mode(&uri), TailMode::Full);
+    }
+
+    // ---- R4 tests (metadata expose — main style: nested metadata object) ----
+
+    #[tokio::test]
+    async fn r4_metadata_present_for_existing_file() {
+        // Use this source file itself — guaranteed to exist at test time.
+        let me = file!();
+        let abs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(me);
+        let a = FileAdapter;
+        let v = a.fetch_file(&abs.display().to_string()).await.unwrap();
+        let meta = &v["metadata"];
+        assert!(
+            !meta.is_null(),
+            "metadata should be present for an existing file"
+        );
+        assert!(meta["filename"].is_string(), "filename should be a string");
+        assert!(
+            meta["full_path"].is_string(),
+            "full_path should be a string"
+        );
+        assert!(
+            meta["size_bytes"].is_number(),
+            "size_bytes should be a number"
+        );
+        // age_days may be null on platforms without mtime, but should be present as a key
+        assert!(meta.get("age_days").is_some(), "age_days key should exist");
+    }
+
+    #[tokio::test]
+    async fn r4_metadata_null_for_nonexistent_file() {
+        let a = FileAdapter;
+        let v = a
+            .fetch_file("/tmp/__persona_wire_nonexistent_r4_test_file__")
+            .await
+            .unwrap();
+        assert!(
+            v["body"].is_null(),
+            "body should be null for a non-existent file"
+        );
+        assert!(
+            v["metadata"].is_null(),
+            "metadata should be null for a non-existent file"
+        );
+    }
+
+    #[tokio::test]
+    async fn r4_body_backward_compat() {
+        // body field should still be a string for an existing file (backward-compat).
+        let me = file!();
+        let abs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(me);
+        let a = FileAdapter;
+        let v = a.fetch_file(&abs.display().to_string()).await.unwrap();
+        assert!(
+            v["body"].is_string(),
+            "body should remain a string for an existing file"
+        );
+        assert!(
+            v["body"].as_str().unwrap().contains("Layer 6 Adapter"),
+            "body should contain expected file content"
+        );
+    }
+
+    #[tokio::test]
+    async fn r4_metadata_field_types() {
+        // filename must match the basename; full_path must be absolute.
+        let me = file!();
+        let abs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(me);
+        let a = FileAdapter;
+        let v = a.fetch_file(&abs.display().to_string()).await.unwrap();
+        let meta = &v["metadata"];
+        let filename = meta["filename"].as_str().unwrap();
+        assert_eq!(filename, "adapter.rs", "filename should be the basename");
+        let full_path = meta["full_path"].as_str().unwrap();
+        assert!(
+            full_path.ends_with("adapter.rs"),
+            "full_path should end with adapter.rs"
+        );
+        assert!(
+            full_path.starts_with('/'),
+            "full_path should be an absolute path"
+        );
     }
 }

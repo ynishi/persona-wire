@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `wire-adapter-obsidian` crate: new Adapter for `obsidian:///<vault>/<note>` URI scheme.
+  Reads Obsidian vault files via `tokio::fs`, parses YAML/TOML frontmatter via
+  `gray_matter`, and optionally extracts `[[wiki-link]]` references when
+  `?links=edge` is set (default off). See `docs/onboarding.md` §2 for usage.
+
 ### Changed
 
 ### Deprecated
