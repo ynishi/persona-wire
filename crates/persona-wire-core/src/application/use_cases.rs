@@ -60,8 +60,8 @@ fn assert_static_projection_kind(
 ///
 /// Step C-6 phase 2 — broadcast data shape (graph spec result aggregated
 /// into a single object) is distinct from the per-slot shape used by the
-/// async `wire_prompt_context` path; see
-/// `docs/design/render-trinity-domain-entity.md` §1.2.
+/// async `wire_prompt_context` path; see the crate-level "Slot vocabulary"
+/// rationale in [`crate`] docs.
 fn build_broadcast_render_data(matched: &[Node], persona_id: Option<&str>) -> serde_json::Value {
     let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
     let nodes_json: Vec<serde_json::Value> = matched
@@ -348,7 +348,7 @@ async fn resolve_persona_overlays(
 /// そのまま使い、 None なら wire DB の wiring entry (= persona-scoped Node) を
 /// spec query で全件取得し、 `wiring_mapper::extract_slot` 経由で slot 名を
 /// 抽出する (storage 互換 key `metadata.axis` の直リードは禁止、
-/// docs/design/render-trinity-domain-entity.md Appendix B 参照)。
+/// crate-level "Slot vocabulary" rationale 参照)。
 fn enumerate_slot_names(
     storage: &SqliteStorage,
     persona_id: &str,

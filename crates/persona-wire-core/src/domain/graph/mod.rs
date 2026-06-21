@@ -4,7 +4,8 @@
 //! AutoVersion / Repository / Specification). Tenant-agnostic, persona-agnostic.
 //!
 //! Domain knowledge (persona-wire vocabulary) lives in `domain::entity` and uses
-//! this module as a backend SDK. See `docs/design/render-trinity-domain-entity.md`.
+//! this module as a backend SDK. See the crate-level "Three-layer split"
+//! rationale in [`crate`] docs.
 
 pub mod autoversion;
 pub mod compute;

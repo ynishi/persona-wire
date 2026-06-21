@@ -393,7 +393,7 @@ pub fn wire_one_slot(
             "metadata": {
                 "persona": persona_id,
                 // `axis` is the legacy storage-compat key for Slot
-                // (see docs/design/render-trinity-domain-entity.md Appendix B).
+                // (see persona_wire_core crate-level "Slot vocabulary" docs).
                 "axis": slot,
                 "source_uri": source_uri,
             },
