@@ -8,6 +8,7 @@ members = [
     "crates/persona-wire-adapter-persona-pack",
     "crates/persona-wire-adapter-sqlite-x",
     "crates/persona-wire-adapter-obsidian",
+    "crates/persona-wire-adapter-mcp",
 ]
 
 [workspace.package]
@@ -55,3 +56,4 @@ persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app",
 persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.5.2" }
 persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.5.2" }
 persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.5.2" }
+persona-wire-adapter-mcp = { path = "crates/persona-wire-adapter-mcp", version = "0.5.2" }

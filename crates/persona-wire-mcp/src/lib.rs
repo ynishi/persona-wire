@@ -9,6 +9,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use persona_wire_adapter_mcp::McpAdapter;
 use persona_wire_adapter_mini_app::MiniAppAdapter;
 use persona_wire_adapter_obsidian::ObsidianAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
@@ -61,6 +62,10 @@ impl WireServer {
                     .with_adapter(SqliteAdapter)
                     .with_adapter(ObsidianAdapter)
                     .with_adapter(persona_pack)
+                    // McpAdapter: empty endpoint map by default — every fetch
+                    // returns `unknown server alias` until a caller supplies
+                    // a populated map via a future config-loading layer.
+                    .with_adapter(McpAdapter::new(std::collections::BTreeMap::new()))
                     .build()
                     .expect("default plugin registry build"),
             ),

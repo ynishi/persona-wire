@@ -1,0 +1,36 @@
+[package]
+name = "persona-wire-adapter-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for any MCP server (scheme `mcp://`). Routes tool calls and resource reads to MCP servers (stdio or streamable-HTTP) via rmcp 1.x."
+
+[dependencies]
+persona-wire-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "process", "time", "io-util"] }
+tracing.workspace = true
+# MCP client runtime — stdio (transport-child-process) + streamable HTTP client.
+rmcp = { version = "1", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+] }
+# Percent-decoding for resource URI passthrough and query values.
+percent-encoding = "2"
+
+[dev-dependencies]
+# In-process MCP server for round-trip smoke tests.
+rmcp = { version = "1", features = [
+    "server",
+    "transport-async-rw",
+] }
+tokio = { version = "1", features = ["full"] }
