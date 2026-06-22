@@ -9,7 +9,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use persona_wire_adapter_mcp::McpAdapter;
+use persona_wire_adapter_mcp::{McpAdapter, McpEndpointResolver, SqliteEndpointResolver};
 use persona_wire_adapter_mini_app::MiniAppAdapter;
 use persona_wire_adapter_obsidian::ObsidianAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
@@ -54,18 +54,22 @@ impl WireServer {
     pub fn new(storage: SqliteStorage) -> Self {
         let persona_pack =
             PersonaPackAdapter::from_env().expect("PersonaPackAdapter::from_env (HOME unset?)");
+        let storage_arc = Arc::new(Mutex::new(storage));
+        // McpAdapter: graph-backed endpoint resolution. Every `mcp://<alias>/...`
+        // fetch reads node `<alias>` from the shared SqliteStorage; the node
+        // must have `type = "mcp_server"` and `metadata.endpoint = <ServerEndpoint>`.
+        // See `wire-guide://onboarding` for the registration recipe.
+        let mcp_resolver: Arc<dyn McpEndpointResolver> =
+            Arc::new(SqliteEndpointResolver::new(storage_arc.clone()));
         Self {
-            storage: Arc::new(Mutex::new(storage)),
+            storage: storage_arc,
             registry: Arc::new(
                 PluginRegistry::default_builder_for_wire()
                     .with_adapter(MiniAppAdapter)
                     .with_adapter(SqliteAdapter)
                     .with_adapter(ObsidianAdapter)
                     .with_adapter(persona_pack)
-                    // McpAdapter: empty endpoint map by default — every fetch
-                    // returns `unknown server alias` until a caller supplies
-                    // a populated map via a future config-loading layer.
-                    .with_adapter(McpAdapter::new(std::collections::BTreeMap::new()))
+                    .with_adapter(McpAdapter::new(mcp_resolver))
                     .build()
                     .expect("default plugin registry build"),
             ),

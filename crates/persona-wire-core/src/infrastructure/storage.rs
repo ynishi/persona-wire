@@ -145,6 +145,11 @@ impl SqliteStorage {
             ("channel", "node", None),
             ("workflow_def", "node", None),
             ("projection_def", "node", None),
+            // P3b Layer 6 Adapter — endpoint vocabulary for `mcp://` Adapter.
+            // Carries `metadata.endpoint` (ServerEndpoint JSON) +
+            // `metadata.maintenance_exempt = true` so doctor's orphan_node
+            // probe (`is_self_attached_wiring`) skips it cleanly.
+            ("mcp_server", "node", None),
             ("triggers_review_of", "edge", Some("hard,soft,advisory")),
             ("cites", "edge", None),
             ("derives_from", "edge", None),
@@ -799,13 +804,14 @@ mod tests {
     }
 
     #[test]
-    fn seed_inserts_9_node_and_9_edge_types() {
+    fn seed_inserts_10_node_and_9_edge_types() {
         let s = setup();
         let nodes = s.list_types_by_kind("node").unwrap();
         let edges = s.list_types_by_kind("edge").unwrap();
-        assert_eq!(nodes.len(), 9);
+        assert_eq!(nodes.len(), 10);
         assert_eq!(edges.len(), 9);
         assert!(nodes.contains(&"persona".to_string()));
+        assert!(nodes.contains(&"mcp_server".to_string()));
         assert!(edges.contains(&"triggers_review_of".to_string()));
     }
 
@@ -814,7 +820,7 @@ mod tests {
         let s = setup();
         s.seed_default_types().unwrap();
         s.seed_default_types().unwrap();
-        assert_eq!(s.list_types().unwrap().len(), 18);
+        assert_eq!(s.list_types().unwrap().len(), 19);
     }
 
     #[test]

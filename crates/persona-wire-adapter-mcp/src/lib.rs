@@ -12,8 +12,11 @@
 //! mcp://<server>/resources/<resource_uri_passthrough>
 //! ```
 //!
-//! - `<server>` — server alias resolved against the `endpoints` map passed to
-//!   [`McpAdapter::new`].
+//! - `<server>` — server alias resolved via the [`McpEndpointResolver`]
+//!   passed to [`McpAdapter::new`]. The production resolver
+//!   ([`SqliteEndpointResolver`]) looks up a graph node with
+//!   `type = "mcp_server"` (see [`MCP_SERVER_NODE_TYPE`]) and reads
+//!   `metadata.endpoint` as a [`ServerEndpoint`].
 //! - `path` 1st segment dispatches the RPC kind:
 //!   - `tools/<tool_name>` → `tools/call`
 //!   - `resources?uri=<encoded>` → `resources/read` (default form)
@@ -30,10 +33,12 @@
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use percent_encoding::percent_decode_str;
+use persona_wire_core::infrastructure::storage::SqliteStorage;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
 use persona_wire_core::{WireError, WireResult};
 use rmcp::{
@@ -50,12 +55,24 @@ use tracing::warn;
 /// Default per-call RPC timeout. Matches `agent-block::mcp_client::DEFAULT_RPC_TIMEOUT`.
 pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Node `type` literal that identifies an MCP server endpoint in the graph.
+///
+/// Shared between [`SqliteEndpointResolver`] (consumer) and callers that
+/// register endpoint nodes via `wire_node_create(type = "mcp_server", ...)`.
+/// `workflow_def` の `WORKFLOW_TYPE` 定数と同じ運用 — vocabulary 登録 layer は
+/// 存在せず、 literal 一致と `maintenance_exempt: true` で orphan 判定を抑制する。
+pub const MCP_SERVER_NODE_TYPE: &str = "mcp_server";
+
+/// `metadata.endpoint` key holding the serialized [`ServerEndpoint`] payload.
+pub const META_ENDPOINT: &str = "endpoint";
+
 // ── Server endpoint config ────────────────────────────────────────────────────
 
 /// Resolved endpoint for a server alias.
 ///
-/// Caller (Wire runtime / `persona-wire-mcp` registry) assembles the map.
-/// File / env loading is out of scope for this adapter.
+/// Caller (Wire runtime / `persona-wire-mcp` registry) supplies the
+/// [`McpEndpointResolver`] that produces these values; for the production
+/// graph-based path see [`SqliteEndpointResolver`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ServerEndpoint {
@@ -71,21 +88,90 @@ pub enum ServerEndpoint {
     Http { url: String },
 }
 
+// ── Endpoint resolver abstraction ─────────────────────────────────────────────
+
+/// Resolve a server alias to a [`ServerEndpoint`] connectable by the adapter.
+///
+/// Production implementation: [`SqliteEndpointResolver`] reads `mcp_server`
+/// nodes from the Wire graph. Test implementations typically use a static
+/// `BTreeMap`-backed resolver so unit tests do not need a live storage.
+///
+/// Errors are returned with a hint about *why* resolution failed (alias
+/// unknown, node type mismatch, metadata malformed) — callers do not need to
+/// second-guess.
+#[async_trait]
+pub trait McpEndpointResolver: Send + Sync {
+    async fn resolve(&self, alias: &str) -> WireResult<ServerEndpoint>;
+}
+
+/// Graph-backed resolver: looks up a node with `type = "mcp_server"` and
+/// returns its `metadata.endpoint` deserialized as a [`ServerEndpoint`].
+///
+/// The shared `Arc<Mutex<SqliteStorage>>` is the same handle held by
+/// `WireServer` — so endpoint changes go live the moment they are committed
+/// via `wire_node_create` / `wire_node_update`.
+pub struct SqliteEndpointResolver {
+    storage: Arc<Mutex<SqliteStorage>>,
+}
+
+impl SqliteEndpointResolver {
+    pub fn new(storage: Arc<Mutex<SqliteStorage>>) -> Self {
+        Self { storage }
+    }
+}
+
+#[async_trait]
+impl McpEndpointResolver for SqliteEndpointResolver {
+    async fn resolve(&self, alias: &str) -> WireResult<ServerEndpoint> {
+        // Sync lock + sync get_node — guard is dropped before any await.
+        let node_opt = {
+            let guard = self.storage.lock().map_err(|e| {
+                WireError::Storage(format!("mcp adapter: storage lock poisoned: {e}"))
+            })?;
+            guard.get_node(&alias.to_string())?
+        };
+        let node = node_opt.ok_or_else(|| {
+            WireError::Storage(format!(
+                "mcp adapter: unknown server alias '{alias}' \
+                 (no graph node with type='{MCP_SERVER_NODE_TYPE}' and id='{alias}')"
+            ))
+        })?;
+        if node.r#type != MCP_SERVER_NODE_TYPE {
+            return Err(WireError::Storage(format!(
+                "mcp adapter: alias '{alias}' is not an {MCP_SERVER_NODE_TYPE} node \
+                 (got type='{}')",
+                node.r#type
+            )));
+        }
+        let endpoint_value = node.metadata.get(META_ENDPOINT).ok_or_else(|| {
+            WireError::Storage(format!(
+                "mcp adapter: node '{alias}' missing metadata.{META_ENDPOINT} \
+                 (expected ServerEndpoint JSON)"
+            ))
+        })?;
+        serde_json::from_value::<ServerEndpoint>(endpoint_value.clone()).map_err(|e| {
+            WireError::Storage(format!(
+                "mcp adapter: node '{alias}' metadata.{META_ENDPOINT} malformed: {e}"
+            ))
+        })
+    }
+}
+
 // ── Adapter struct ────────────────────────────────────────────────────────────
 
 /// persona-wire Adapter for MCP servers (`mcp://` scheme).
 pub struct McpAdapter {
-    endpoints: BTreeMap<String, ServerEndpoint>,
+    resolver: Arc<dyn McpEndpointResolver>,
     rpc_timeout: Duration,
 }
 
 impl McpAdapter {
-    /// Construct an adapter with the given server alias map.
+    /// Construct an adapter with the given endpoint resolver.
     ///
     /// Uses [`DEFAULT_RPC_TIMEOUT`] (30s) for every RPC.
-    pub fn new(endpoints: BTreeMap<String, ServerEndpoint>) -> Self {
+    pub fn new(resolver: Arc<dyn McpEndpointResolver>) -> Self {
         Self {
-            endpoints,
+            resolver,
             rpc_timeout: DEFAULT_RPC_TIMEOUT,
         }
     }
@@ -96,7 +182,7 @@ impl McpAdapter {
     /// immediately and the failure mode would be indistinguishable from
     /// "everything is broken".
     pub fn with_rpc_timeout(
-        endpoints: BTreeMap<String, ServerEndpoint>,
+        resolver: Arc<dyn McpEndpointResolver>,
         rpc_timeout: Duration,
     ) -> WireResult<Self> {
         if rpc_timeout.is_zero() {
@@ -105,7 +191,7 @@ impl McpAdapter {
             ));
         }
         Ok(Self {
-            endpoints,
+            resolver,
             rpc_timeout,
         })
     }
@@ -297,16 +383,11 @@ impl Adapter for McpAdapter {
 
     async fn fetch(&self, uri: &WireUri) -> WireResult<Value> {
         let spec = parse_mcp_uri(uri)?;
-        let endpoint = self.endpoints.get(&spec.server).ok_or_else(|| {
-            WireError::Storage(format!(
-                "mcp adapter: unknown server alias '{}'",
-                spec.server
-            ))
-        })?;
+        let endpoint = self.resolver.resolve(&spec.server).await?;
 
         // Connect (stateless: per-fetch). `()` is a minimal `ClientHandler`
         // with no-op notification handling — adequate for single-shot fetch.
-        let running = connect(endpoint, self.rpc_timeout).await?;
+        let running = connect(&endpoint, self.rpc_timeout).await?;
 
         // Execute the RPC.
         let result = match &spec.kind {
@@ -570,16 +651,156 @@ mod tests {
         );
     }
 
+    /// In-test resolver: returns whatever the caller put in the map, or an
+    /// `unknown server alias` error matching the production hint shape.
+    struct StaticResolver(BTreeMap<String, ServerEndpoint>);
+
+    #[async_trait]
+    impl McpEndpointResolver for StaticResolver {
+        async fn resolve(&self, alias: &str) -> WireResult<ServerEndpoint> {
+            self.0.get(alias).cloned().ok_or_else(|| {
+                WireError::Storage(format!(
+                    "mcp adapter: unknown server alias '{alias}' \
+                     (no graph node with type='{MCP_SERVER_NODE_TYPE}' and id='{alias}')"
+                ))
+            })
+        }
+    }
+
     #[test]
     fn adapter_unknown_alias_errors() {
         use tokio::runtime::Runtime;
-        let adapter = McpAdapter::new(BTreeMap::new());
+        let resolver: Arc<dyn McpEndpointResolver> = Arc::new(StaticResolver(BTreeMap::new()));
+        let adapter = McpAdapter::new(resolver);
         let rt = Runtime::new().unwrap();
         let uri = WireUri::parse("mcp://nowhere/tools/t").unwrap();
         let err = rt.block_on(adapter.fetch(&uri)).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown server alias 'nowhere'"),
+            "unexpected error: {msg}"
+        );
+        // Graph-aware hint must be carried through verbatim by the production
+        // SqliteEndpointResolver — guarded so the message form does not silently drift.
+        assert!(
+            msg.contains("type='mcp_server'"),
+            "expected graph-aware hint, got: {msg}"
+        );
+    }
+
+    // ── SqliteEndpointResolver — graph round-trip ──────────────────────────────
+
+    fn sqlite_resolver_with_node(
+        node_id: &str,
+        node_type: &str,
+        metadata: serde_json::Value,
+    ) -> SqliteEndpointResolver {
+        use persona_wire_core::domain::graph::Node;
+        let storage = SqliteStorage::open_in_memory().unwrap();
+        storage.migrate().unwrap();
+        storage.seed_default_types().unwrap();
+        let node = Node {
+            id: node_id.to_string(),
+            r#type: node_type.to_string(),
+            sot_ref: None,
+            confidence: None,
+            applicability: None,
+            last_verified_at: None,
+            review_due: None,
+            version: 1,
+            prev_id: None,
+            metadata,
+        };
+        storage.insert_node(&node).unwrap();
+        SqliteEndpointResolver::new(Arc::new(Mutex::new(storage)))
+    }
+
+    #[test]
+    fn sqlite_resolver_resolves_stdio_endpoint() {
+        use tokio::runtime::Runtime;
+        let resolver = sqlite_resolver_with_node(
+            "outline",
+            MCP_SERVER_NODE_TYPE,
+            serde_json::json!({
+                "endpoint": {"kind": "stdio", "command": "outline-mcp", "args": ["--foo"]},
+                "maintenance_exempt": true,
+            }),
+        );
+        let rt = Runtime::new().unwrap();
+        let ep = rt.block_on(resolver.resolve("outline")).unwrap();
+        match ep {
+            ServerEndpoint::Stdio { command, args, .. } => {
+                assert_eq!(command, "outline-mcp");
+                assert_eq!(args, vec!["--foo".to_string()]);
+            }
+            _ => panic!("expected Stdio"),
+        }
+    }
+
+    #[test]
+    fn sqlite_resolver_missing_node_errors() {
+        use tokio::runtime::Runtime;
+        let storage = SqliteStorage::open_in_memory().unwrap();
+        storage.migrate().unwrap();
+        storage.seed_default_types().unwrap();
+        let resolver = SqliteEndpointResolver::new(Arc::new(Mutex::new(storage)));
+        let rt = Runtime::new().unwrap();
+        let err = rt.block_on(resolver.resolve("ghost")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown server alias 'ghost'") && msg.contains("type='mcp_server'"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn sqlite_resolver_wrong_type_errors() {
+        use tokio::runtime::Runtime;
+        let resolver = sqlite_resolver_with_node(
+            "wrong",
+            "persona",
+            serde_json::json!({"endpoint": {"kind": "stdio", "command": "x"}}),
+        );
+        let rt = Runtime::new().unwrap();
+        let err = rt.block_on(resolver.resolve("wrong")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("not an mcp_server node") && msg.contains("got type='persona'"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn sqlite_resolver_missing_endpoint_field_errors() {
+        use tokio::runtime::Runtime;
+        let resolver = sqlite_resolver_with_node(
+            "barebones",
+            MCP_SERVER_NODE_TYPE,
+            serde_json::json!({"maintenance_exempt": true}),
+        );
+        let rt = Runtime::new().unwrap();
+        let err = rt.block_on(resolver.resolve("barebones")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("missing metadata.endpoint"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn sqlite_resolver_malformed_endpoint_errors() {
+        use tokio::runtime::Runtime;
+        let resolver = sqlite_resolver_with_node(
+            "bad",
+            MCP_SERVER_NODE_TYPE,
+            // Missing required `kind` discriminant → serde fails.
+            serde_json::json!({"endpoint": {"command": "x"}}),
+        );
+        let rt = Runtime::new().unwrap();
+        let err = rt.block_on(resolver.resolve("bad")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("metadata.endpoint malformed"),
             "unexpected error: {msg}"
         );
     }
