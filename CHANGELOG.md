@@ -19,6 +19,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.6.0] - 2026-06-22
+
+### Added
+
+- **`mcp://` Source Adapter (`persona-wire-adapter-mcp` crate)** —
+  Wire の Layer 6 Adapter として `mcp://<server>/tools/<tool>` /
+  `mcp://<server>/resources?uri=<encoded>` の 2 grammar を dispatch、 stdio
+  (rmcp `transport-child-process`) と Streamable HTTP の両 transport を
+  サポート。 tool args は scalar query (`?k=v`) と JSON 一括 (`?_args=<json>`)
+  の 2 系統、 後者が precedence。 connect / call / disconnect は per-fetch
+  stateless 設計。 (issue ea99f9e1 Phase A、 commit `53fd351`)
+- **`McpEndpointResolver` trait + `SqliteEndpointResolver`** —
+  `McpAdapter` が endpoint を解決する経路を trait 抽象化、 production 経路は
+  `SqliteEndpointResolver` が graph node (`type="mcp_server"`,
+  `metadata.endpoint=<ServerEndpoint JSON>`, `metadata.maintenance_exempt=true`)
+  を `SqliteStorage::get_node` で resolve。 type 不一致 / endpoint 欠落 /
+  malformed JSON はそれぞれ hint 付き `WireError::Storage` で返す。
+  (issue 3ca10673、 commit `0c62f90`)
+- **`mcp_server` node type vocabulary** — `seed_default_types` の SEED に
+  追加、 `wire init` 時に登録される (10 node + 9 edge types に増加)。
+  consumer は `wire_node_create(type="mcp_server", ...)` で endpoint node を
+  登録可能。 `is_self_attached_wiring` 経路で `maintenance_exempt=true` flag
+  に対応し doctor の `graph.orphan_node` warn を抑制。 (commit `0c62f90`)
+- **E2E round-trip test (`crates/persona-wire/tests/e2e_adapter_mcp.rs`)** —
+  `persona-wire mcp` 自身を MCP endpoint として dogfood する dual-process
+  scenario。 Outer の `wire_prompt_context` が `McpAdapter` を経由して Inner
+  `persona-wire mcp` を stdio で spawn、 `wire_doctor` を call、 markdown を
+  prompt に embed する round-trip を検証。 (親 issue ea99f9e1 acceptance #3
+  closure、 commit `0c62f90`)
+
+### Changed
+
+- **`McpAdapter::new` / `McpAdapter::with_rpc_timeout` signature を変更
+  (BREAKING)** — `BTreeMap<String, ServerEndpoint>` 受け取りを
+  `Arc<dyn McpEndpointResolver>` に置換。 `WireServer::new` は
+  `SqliteEndpointResolver(storage_arc)` を渡す経路に更新済 (consumer 側
+  対応)。 (commit `0c62f90`)
+- **`SqliteStorage::seed_default_types` SEED 件数 9 → 10** — `mcp_server`
+  追加に伴い `seed_inserts_*_node_and_*_edge_types` / `seed_is_idempotent` /
+  `full_pipeline_init_seed_register_render_close` の count assertion を 10/19
+  に更新。 (commit `0c62f90`)
+
 ## [0.5.2] - 2026-06-22
 
 ### Added
