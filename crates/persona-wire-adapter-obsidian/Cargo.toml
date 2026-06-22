@@ -16,7 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 gray_matter.workspace = true
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "fs"] }
 # TOML frontmatter parse for +++ delimiters (gray_matter TOML engine does not
 # recognise +++ as a delimiter in v0.2.x, so we parse manually via toml crate).
 toml = { version = "0.5", default-features = false }
