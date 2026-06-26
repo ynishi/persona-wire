@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `pw-migrate` binary + `persona_wire::migrations` library framework
+  (Diesel / sqlx style runner). Subcommands `list` / `status` /
+  `up [--target ID]` / `apply <id>` over a `--db <path>` SQLite store.
+  `--dry-run` default; `--apply` opts in and auto-writes a
+  `<db>.pre-migrate.bak` (override with `--backup`, overwrite with
+  `--force`). Each migration runs inside a `BEGIN IMMEDIATE`
+  transaction with `PRAGMA foreign_keys = OFF` + `foreign_key_check`
+  post-validation; a `schema_migrations(version, description,
+  applied_at)` ledger tracks applied ids for idempotent re-runs.
+- `crates/persona-wire/src/migrations/m001_node_id_ulid.rs` —
+  v0.6.x→v0.7.0 nodes/edges ULID rewrite (was phase A of the legacy
+  `migrate_id_to_ulid` bin).
+- `crates/persona-wire/src/migrations/m002_registry_id_ulid.rs` —
+  specifications/projections rebuild (was phase B).
+
+### Changed (extended)
+
+- `migrate_id_to_ulid` binary is now a deprecated alias that forwards
+  to `pw-migrate up --db <path>` (warns on stderr; the
+  `--mapping-out` flag still writes a compatibility marker file).
+  Removal target: v0.8.0.
+
 - `Node.name` / `Edge.name` fields carry the human-readable label that
   used to live in `Node.id` / `Edge.id`. `name` has no uniqueness
   constraint; duplicates are allowed and surface as `WireError::AmbiguousName`
