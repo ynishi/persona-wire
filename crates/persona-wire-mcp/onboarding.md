@@ -78,14 +78,19 @@ or `metadata.maintenance_exempt: true` are recognised as **self-attached**
 and are excluded from the `wire_doctor` / `wire_close` orphan count, so an
 edge-less wiring entry will not be flagged as a graph-health issue).
 
-**Identity model (v0.7+)**: `wire_node_create` / `wire_edge_create` accept
-a human-readable `name` only; the server mints the opaque ULID `id` and
-returns it in the response (`{"id": "<26-char ULID>", "name": "..."}`).
-All subsequent operations (`wire_node_update` / `wire_node_delete` /
-`wire_edge_delete` / `wire_edge_create.src` / `.tgt`) accept either the
-ULID **or** the `name` and resolve internally. Two rows with the same
-`name` are allowed at the storage layer — but the resolver returns
-`AmbiguousName` and forces ULID disambiguation when that happens.
+**Identity model (v0.7+)**: `wire_node_create` / `wire_edge_create` /
+`wire_spec_register` / `wire_projection_register` accept a human-readable
+`name` only; the server mints the opaque ULID `id` and returns it in
+the response (`{"id": "<26-char ULID>", "name": "..."}`). All subsequent
+operations (`wire_node_update` / `wire_node_delete` / `wire_edge_delete`
+/ `wire_edge_create.src` / `.tgt` / `wire_spec_delete` /
+`wire_projection_delete` / `wire_render.projection_ref` /
+`wire_query.spec_ref`) accept either the ULID **or** the `name` and
+resolve internally. Nodes and edges allow duplicate `name`s — the
+resolver returns `AmbiguousName` and forces ULID disambiguation when
+that happens. Specifications and projections enforce `UNIQUE(name)` at
+the storage layer (registry semantics), so name lookups there are
+always single-row.
 
 ```jsonc
 // MCP: wire_node_create  (server mints id, returns {id, name})

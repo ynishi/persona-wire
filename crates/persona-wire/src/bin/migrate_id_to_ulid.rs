@@ -99,14 +99,30 @@ fn main() -> Result<()> {
 
     let state = inspect_schema(&conn)?;
     println!("== schema inspection ==");
-    println!("  nodes.name col   : {}", state.has_nodes_name);
-    println!("  edges.name col   : {}", state.has_edges_name);
-    println!("  rows: nodes={} edges={} versions={}", state.node_count, state.edge_count, state.version_count);
+    println!("  nodes.name col          : {}", state.has_nodes_name);
+    println!("  edges.name col          : {}", state.has_edges_name);
+    println!("  specifications.id col   : {}", state.has_specs_id);
+    println!("  projections.id col      : {}", state.has_projs_id);
+    println!(
+        "  rows: nodes={} edges={} versions={} specs={} projs={}",
+        state.node_count, state.edge_count, state.version_count,
+        state.spec_count, state.proj_count
+    );
 
-    if state.has_nodes_name && state.has_edges_name {
-        println!("[skip] schema already migrated (both name columns present). Nothing to do.");
+    let needs_phase_a = !state.has_nodes_name || !state.has_edges_name;
+    let needs_phase_b = !state.has_specs_id || !state.has_projs_id;
+    if !needs_phase_a && !needs_phase_b {
+        println!("[skip] schema already migrated. Nothing to do.");
         return Ok(());
     }
+    println!(
+        "\n  phase A (nodes/edges → ULID) : {}",
+        if needs_phase_a { "PENDING" } else { "skip" }
+    );
+    println!(
+        "  phase B (registries → ULID)  : {}",
+        if needs_phase_b { "PENDING" } else { "skip" }
+    );
 
     let mode = if args.apply { "APPLY" } else { "DRY-RUN" };
     println!("\n== plan ({mode}) ==");
@@ -127,21 +143,44 @@ fn main() -> Result<()> {
         println!("  (--dry-run) backup skipped — pass --apply to mutate.");
     }
 
-    // Build id mapping in-memory: load all old ids and mint a fresh Ulid each.
-    let node_map = build_id_map(&conn, "nodes")?;
-    let edge_map = build_id_map(&conn, "edges")?;
-    println!(
-        "  mapping built: {} node ids → ULID, {} edge ids → ULID",
-        node_map.len(),
-        edge_map.len()
-    );
+    // Phase A — node/edge id mapping (skipped if columns already present).
+    let (node_map, edge_map) = if needs_phase_a {
+        let n = build_id_map(&conn, "nodes")?;
+        let e = build_id_map(&conn, "edges")?;
+        println!(
+            "  phase A mapping: {} node ids → ULID, {} edge ids → ULID",
+            n.len(),
+            e.len()
+        );
+        (n, e)
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
+
+    // Phase B — registry name → id mapping. Existing rows have no `id`
+    // column yet, so we key the map by `name` (already UNIQUE PK).
+    let (spec_map, proj_map) = if needs_phase_b {
+        let s = build_id_map_keyed_by_name(&conn, "specifications")?;
+        let p = build_id_map_keyed_by_name(&conn, "projections")?;
+        println!(
+            "  phase B mapping: {} spec names → ULID, {} projection names → ULID",
+            s.len(),
+            p.len()
+        );
+        (s, p)
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
 
     if let Some(path) = args.mapping_out.as_ref() {
         let dump = json!({
             "nodes": node_map.iter().map(|(k, v)| (k.clone(), v.to_string())).collect::<HashMap<_, _>>(),
             "edges": edge_map.iter().map(|(k, v)| (k.clone(), v.to_string())).collect::<HashMap<_, _>>(),
+            "specifications": spec_map.iter().map(|(k, v)| (k.clone(), v.to_string())).collect::<HashMap<_, _>>(),
+            "projections": proj_map.iter().map(|(k, v)| (k.clone(), v.to_string())).collect::<HashMap<_, _>>(),
             "db": args.db.display().to_string(),
             "applied": args.apply,
+            "phases": json!({ "A": needs_phase_a, "B": needs_phase_b }),
         });
         std::fs::write(path, serde_json::to_string_pretty(&dump)?)
             .with_context(|| format!("write mapping to {}", path.display()))?;
@@ -153,8 +192,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Mutating phase — chained UPDATE inside one transaction.
-    apply_migration(&conn, &node_map, &edge_map)?;
+    if needs_phase_a {
+        apply_migration(&conn, &node_map, &edge_map)?;
+    }
+    if needs_phase_b {
+        apply_registry_migration(&conn, &spec_map, &proj_map)?;
+    }
 
     println!("\n[apply complete] migration committed. DB: {}", args.db.display());
     Ok(())
@@ -178,9 +221,13 @@ fn resolve_backup_path(args: &Args) -> Result<PathBuf> {
 struct SchemaState {
     has_nodes_name: bool,
     has_edges_name: bool,
+    has_specs_id: bool,
+    has_projs_id: bool,
     node_count: i64,
     edge_count: i64,
     version_count: i64,
+    spec_count: i64,
+    proj_count: i64,
 }
 
 fn inspect_schema(conn: &Connection) -> Result<SchemaState> {
@@ -200,13 +247,171 @@ fn inspect_schema(conn: &Connection) -> Result<SchemaState> {
         conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .with_context(|| format!("count {table}"))
     }
+    fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+    fn count_if_exists(conn: &Connection, table: &str) -> Result<i64> {
+        if table_exists(conn, table)? { count(conn, table) } else { Ok(0) }
+    }
+    fn has_col_if_exists(conn: &Connection, table: &str, col: &str) -> Result<bool> {
+        if table_exists(conn, table)? { has_column(conn, table, col) } else { Ok(true) }
+    }
     Ok(SchemaState {
         has_nodes_name: has_column(conn, "nodes", "name")?,
         has_edges_name: has_column(conn, "edges", "name")?,
+        has_specs_id: has_col_if_exists(conn, "specifications", "id")?,
+        has_projs_id: has_col_if_exists(conn, "projections", "id")?,
         node_count: count(conn, "nodes")?,
         edge_count: count(conn, "edges")?,
         version_count: count(conn, "versions")?,
+        spec_count: count_if_exists(conn, "specifications")?,
+        proj_count: count_if_exists(conn, "projections")?,
     })
+}
+
+/// Build a `name → fresh ULID` mapping for a table whose current PK is `name`
+/// (specifications / projections in the legacy schema). Used by phase B.
+fn build_id_map_keyed_by_name(conn: &Connection, table: &str) -> Result<HashMap<String, Ulid>> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT name FROM {table}"))
+        .with_context(|| format!("prepare select name from {table}"))?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut map = HashMap::new();
+    for r in rows {
+        map.insert(r?, Ulid::new());
+    }
+    Ok(map)
+}
+
+/// Phase B: rebuild `specifications` / `projections` with `id TEXT PK + name UNIQUE`,
+/// minting a fresh ULID per legacy row. SQLite cannot rename PK in place, so we
+/// follow the canonical 12-step ALTER recipe (CREATE new + INSERT SELECT + DROP
+/// old + RENAME). Inside one transaction.
+fn apply_registry_migration(
+    conn: &Connection,
+    spec_map: &HashMap<String, Ulid>,
+    proj_map: &HashMap<String, Ulid>,
+) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")
+        .context("open phase B transaction")?;
+
+    let res: Result<()> = (|| {
+        // ----- specifications -----
+        if !column_exists(conn, "specifications", "id")? {
+            conn.execute(
+                "CREATE TABLE specifications_new (
+                    id          TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL UNIQUE,
+                    expr_json   TEXT NOT NULL,
+                    created_at  INTEGER NOT NULL DEFAULT 0
+                )",
+                [],
+            )?;
+            {
+                let mut stmt = conn.prepare(
+                    "INSERT INTO specifications_new(id, name, expr_json, created_at) \
+                     SELECT ?1, name, expr_json, created_at FROM specifications WHERE name = ?2",
+                )?;
+                for (name, id) in spec_map {
+                    stmt.execute(params![id.to_string(), name])?;
+                }
+            }
+            conn.execute("DROP TABLE specifications", [])?;
+            conn.execute("ALTER TABLE specifications_new RENAME TO specifications", [])?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_specifications_name ON specifications(name)",
+                [],
+            )?;
+            println!("  [step] specifications rebuilt with id PK ({} rows)", spec_map.len());
+        }
+
+        // ----- projections -----
+        if !column_exists(conn, "projections", "id")? {
+            conn.execute(
+                "CREATE TABLE projections_new (
+                    id                TEXT PRIMARY KEY,
+                    name              TEXT NOT NULL UNIQUE,
+                    spec_ref          TEXT NOT NULL,
+                    template          TEXT NOT NULL,
+                    target_form       TEXT NOT NULL CHECK (target_form IN ('prompt', 'markdown', 'json', 'ascii')),
+                    created_at        INTEGER NOT NULL DEFAULT 0,
+                    template_engine   TEXT,
+                    projection_kind   TEXT,
+                    projection_config TEXT
+                )",
+                [],
+            )?;
+            {
+                let mut stmt = conn.prepare(
+                    "INSERT INTO projections_new(id, name, spec_ref, template, target_form, created_at, \
+                     template_engine, projection_kind, projection_config) \
+                     SELECT ?1, name, spec_ref, template, target_form, created_at, \
+                       template_engine, projection_kind, projection_config \
+                     FROM projections WHERE name = ?2",
+                )?;
+                for (name, id) in proj_map {
+                    stmt.execute(params![id.to_string(), name])?;
+                }
+            }
+            conn.execute("DROP TABLE projections", [])?;
+            conn.execute("ALTER TABLE projections_new RENAME TO projections", [])?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projections_name ON projections(name)",
+                [],
+            )?;
+            println!("  [step] projections rebuilt with id PK ({} rows)", proj_map.len());
+        }
+
+        // Re-enable FK and run validation.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let mut stmt = conn.prepare("PRAGMA foreign_key_check;")?;
+        let violations: Vec<(String, i64, String, i64)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        if !violations.is_empty() {
+            bail!("foreign_key_check reported {} violation(s): {:?}", violations.len(), violations);
+        }
+
+        // Sanity: every id is a 26-char ULID.
+        let bad_specs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM specifications WHERE length(id) != 26",
+            [],
+            |r| r.get(0),
+        )?;
+        let bad_projs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM projections WHERE length(id) != 26",
+            [],
+            |r| r.get(0),
+        )?;
+        if bad_specs != 0 || bad_projs != 0 {
+            bail!("phase B sanity failed: bad_specs={bad_specs} bad_projs={bad_projs}");
+        }
+
+        Ok(())
+    })();
+
+    match res {
+        Ok(()) => {
+            conn.execute("COMMIT", []).context("commit phase B")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e.context("phase B aborted; transaction rolled back"))
+        }
+    }
 }
 
 fn build_id_map(conn: &Connection, table: &str) -> Result<HashMap<String, Ulid>> {
@@ -513,5 +718,72 @@ mod tests {
         assert!(state.has_nodes_name);
         assert!(state.has_edges_name);
         // (driver code short-circuits before apply_migration on this state)
+    }
+
+    fn legacy_registry_schema(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE specifications (
+                name TEXT PRIMARY KEY,
+                expr_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE projections (
+                name TEXT PRIMARY KEY,
+                spec_ref TEXT NOT NULL,
+                template TEXT NOT NULL,
+                target_form TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                template_engine TEXT,
+                projection_kind TEXT,
+                projection_config TEXT
+            );
+            INSERT INTO specifications(name, expr_json) VALUES
+                ('active_personas', '{"TypeIs":"persona"}'),
+                ('outline_only', '{"TypeIs":"outline_node"}');
+            INSERT INTO projections(name, spec_ref, template, target_form) VALUES
+                ('alpha.section.active', 'active_personas', '## {{name}}', 'markdown');
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn phase_b_rebuilds_registries_with_ulid_pk() {
+        let conn = Connection::open_in_memory().unwrap();
+        legacy_registry_schema(&conn);
+
+        let spec_map = build_id_map_keyed_by_name(&conn, "specifications").unwrap();
+        let proj_map = build_id_map_keyed_by_name(&conn, "projections").unwrap();
+        assert_eq!(spec_map.len(), 2);
+        assert_eq!(proj_map.len(), 1);
+
+        apply_registry_migration(&conn, &spec_map, &proj_map).unwrap();
+
+        // id col is now PK + 26-char ULID.
+        let bad: i64 = conn
+            .query_row("SELECT COUNT(*) FROM specifications WHERE length(id) != 26", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bad, 0);
+        let bad: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projections WHERE length(id) != 26", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bad, 0);
+
+        // name preserved + UNIQUE.
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM specifications ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(names, vec!["active_personas".to_string(), "outline_only".to_string()]);
+
+        // projections.spec_ref untouched (still by name).
+        let spec_ref: String = conn
+            .query_row("SELECT spec_ref FROM projections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(spec_ref, "active_personas");
     }
 }

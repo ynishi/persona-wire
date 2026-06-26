@@ -74,8 +74,12 @@ impl<'a> ProjectionRegistry<'a> {
         Self { storage }
     }
 
-    /// Persist a Domain Entity through the Data Mapper boundary.
-    pub fn register(&self, p: &Projection) -> WireResult<()> {
+    /// Persist a Domain Entity through the Data Mapper boundary. Returns
+    /// the row's ULID `id` (new on insert; preserved on overwrite).
+    pub fn register(
+        &self,
+        p: &Projection,
+    ) -> WireResult<crate::domain::entity::projection::ProjectionId> {
         let dto = projection_to_dto(p);
         self.upsert_dto(&dto)
     }
@@ -97,7 +101,10 @@ impl<'a> ProjectionRegistry<'a> {
     // -- Column tuple ↔ DTO internals (kept private; DTO does not leak past
     //    the boundary except via the mapper re-export).
 
-    fn upsert_dto(&self, p: &NamedProjection) -> WireResult<()> {
+    fn upsert_dto(
+        &self,
+        p: &NamedProjection,
+    ) -> WireResult<crate::domain::entity::projection::ProjectionId> {
         let cfg_text = match &p.projection_config {
             Some(v) => {
                 Some(serde_json::to_string(v).map_err(|e| WireError::Storage(e.to_string()))?)

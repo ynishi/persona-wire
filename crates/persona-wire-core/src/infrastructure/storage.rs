@@ -485,18 +485,29 @@ impl SqliteStorage {
 
     // ---- Specifications ----
 
-    pub fn upsert_specification(&self, name: &str, expr_json: &str) -> WireResult<()> {
+    /// Upsert a Specification by name. Returns the row's ULID `id` (newly
+    /// minted on insert; preserved on update of an existing name).
+    pub fn upsert_specification(
+        &self,
+        name: &str,
+        expr_json: &str,
+    ) -> WireResult<crate::domain::entity::projection::SpecificationId> {
+        let existing = self.lookup_specification_id_by_name(name)?;
+        let id = existing.unwrap_or_else(Ulid::new);
         self.conn
             .execute(
-                "INSERT INTO specifications (name, expr_json, created_at) \
-                 VALUES (?1, ?2, 0) \
+                "INSERT INTO specifications (id, name, expr_json, created_at) \
+                 VALUES (?1, ?2, ?3, 0) \
                  ON CONFLICT(name) DO UPDATE SET expr_json = excluded.expr_json",
-                params![name, expr_json],
+                params![id.to_string(), name, expr_json],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
-        Ok(())
+        Ok(id)
     }
 
+    /// Read the `expr_json` body of a Specification by its human-readable
+    /// `name`. Kept for caller compatibility; new code may prefer
+    /// `get_specification_by_id`.
     pub fn get_specification(&self, name: &str) -> WireResult<Option<String>> {
         self.conn
             .query_row(
@@ -506,6 +517,38 @@ impl SqliteStorage {
             )
             .optional()
             .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Lookup a Specification's `id` from its `name`. Returns `Ok(None)`
+    /// for no match; `name` is UNIQUE so multi-row resolution cannot occur.
+    pub fn lookup_specification_id_by_name(
+        &self,
+        name: &str,
+    ) -> WireResult<Option<crate::domain::entity::projection::SpecificationId>> {
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM specifications WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        row.map(|s| Ulid::from_string(&s).map_err(|e| WireError::Storage(e.to_string())))
+            .transpose()
+    }
+
+    /// Resolve a string that is either a 26-char ULID or a `name` to a
+    /// concrete `SpecificationId`. Mirrors `resolve_node_id_or_name` so MCP
+    /// `wire_spec_*` callers can pass whichever they have.
+    pub fn resolve_specification_id_or_name(
+        &self,
+        id_or_name: &str,
+    ) -> WireResult<Option<crate::domain::entity::projection::SpecificationId>> {
+        if let Ok(ulid) = Ulid::from_string(id_or_name) {
+            return Ok(Some(ulid));
+        }
+        self.lookup_specification_id_by_name(id_or_name)
     }
 
     pub fn list_specifications(&self) -> WireResult<Vec<(String, String)>> {
@@ -528,6 +571,7 @@ impl SqliteStorage {
     /// `projection_config` are stored as NULL when `None`, signalling that the
     /// use-case layer should fall back to `PluginRegistry` defaults at
     /// dispatch time.
+    /// Upsert a NamedProjection by name. Returns the row's ULID `id`.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_projection(
         &self,
@@ -538,11 +582,13 @@ impl SqliteStorage {
         template_engine: Option<&str>,
         projection_kind: Option<&str>,
         projection_config: Option<&str>,
-    ) -> WireResult<()> {
+    ) -> WireResult<crate::domain::entity::projection::ProjectionId> {
+        let existing = self.lookup_projection_id_by_name(name)?;
+        let id = existing.unwrap_or_else(Ulid::new);
         self.conn
             .execute(
-                "INSERT INTO projections (name, spec_ref, template, target_form, created_at, template_engine, projection_kind, projection_config) \
-                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7) \
+                "INSERT INTO projections (id, name, spec_ref, template, target_form, created_at, template_engine, projection_kind, projection_config) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8) \
                  ON CONFLICT(name) DO UPDATE SET \
                     spec_ref = excluded.spec_ref, \
                     template = excluded.template, \
@@ -551,6 +597,7 @@ impl SqliteStorage {
                     projection_kind = excluded.projection_kind, \
                     projection_config = excluded.projection_config",
                 params![
+                    id.to_string(),
                     name,
                     spec_ref,
                     template,
@@ -561,7 +608,68 @@ impl SqliteStorage {
                 ],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
-        Ok(())
+        Ok(id)
+    }
+
+    /// Lookup a Projection's `id` from its `name`. UNIQUE on `name` so 0/1.
+    pub fn lookup_projection_id_by_name(
+        &self,
+        name: &str,
+    ) -> WireResult<Option<crate::domain::entity::projection::ProjectionId>> {
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM projections WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        row.map(|s| Ulid::from_string(&s).map_err(|e| WireError::Storage(e.to_string())))
+            .transpose()
+    }
+
+    /// Resolve a string that is either a 26-char ULID or a `name` to a
+    /// concrete `ProjectionId`.
+    pub fn resolve_projection_id_or_name(
+        &self,
+        id_or_name: &str,
+    ) -> WireResult<Option<crate::domain::entity::projection::ProjectionId>> {
+        if let Ok(ulid) = Ulid::from_string(id_or_name) {
+            return Ok(Some(ulid));
+        }
+        self.lookup_projection_id_by_name(id_or_name)
+    }
+
+    /// Reverse lookup: ULID → `name`. Used by `wire_render` etc to feed a
+    /// resolved id back into the legacy name-keyed API (`ProjectionRegistry::get`).
+    pub fn get_projection_name_by_id(
+        &self,
+        id: &crate::domain::entity::projection::ProjectionId,
+    ) -> WireResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT name FROM projections WHERE id = ?1",
+                params![id.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Reverse lookup: ULID → `name` (Specification).
+    pub fn get_specification_name_by_id(
+        &self,
+        id: &crate::domain::entity::projection::SpecificationId,
+    ) -> WireResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT name FROM specifications WHERE id = ?1",
+                params![id.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
     }
 
     /// Row tuple returned by `get_projection`:
@@ -646,27 +754,33 @@ impl SqliteStorage {
         Ok(n > 0)
     }
 
-    /// Delete a Specification by name. Returns `true` if a row was deleted.
+    /// Delete a Specification by ULID id. Returns `true` if a row was deleted.
     /// Projections referencing this spec via `spec_ref` will start returning
     /// dangling-spec errors at render time (existing wire_render contract).
-    pub fn delete_specification(&self, name: &str) -> WireResult<bool> {
+    pub fn delete_specification(
+        &self,
+        id: &crate::domain::entity::projection::SpecificationId,
+    ) -> WireResult<bool> {
         let n = self
             .conn
             .execute(
-                "DELETE FROM specifications WHERE name = ?1",
-                rusqlite::params![name],
+                "DELETE FROM specifications WHERE id = ?1",
+                rusqlite::params![id.to_string()],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(n > 0)
     }
 
-    /// Delete a NamedProjection by name. Returns `true` if a row was deleted.
-    pub fn delete_projection(&self, name: &str) -> WireResult<bool> {
+    /// Delete a NamedProjection by ULID id. Returns `true` if a row was deleted.
+    pub fn delete_projection(
+        &self,
+        id: &crate::domain::entity::projection::ProjectionId,
+    ) -> WireResult<bool> {
         let n = self
             .conn
             .execute(
-                "DELETE FROM projections WHERE name = ?1",
-                rusqlite::params![name],
+                "DELETE FROM projections WHERE id = ?1",
+                rusqlite::params![id.to_string()],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(n > 0)
@@ -829,13 +943,17 @@ CREATE TABLE IF NOT EXISTS versions (
 );
 
 CREATE TABLE IF NOT EXISTS specifications (
-    name        TEXT PRIMARY KEY,
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
     expr_json   TEXT NOT NULL,
     created_at  INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE INDEX IF NOT EXISTS idx_specifications_name ON specifications(name);
+
 CREATE TABLE IF NOT EXISTS projections (
-    name              TEXT PRIMARY KEY,
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL UNIQUE,
     spec_ref          TEXT NOT NULL,
     template          TEXT NOT NULL,
     target_form       TEXT NOT NULL CHECK (target_form IN ('prompt', 'markdown', 'json', 'ascii')),
@@ -845,6 +963,8 @@ CREATE TABLE IF NOT EXISTS projections (
     projection_kind   TEXT,
     projection_config TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_projections_name ON projections(name);
 
 CREATE TABLE IF NOT EXISTS workflow_runs (
     id          TEXT PRIMARY KEY,

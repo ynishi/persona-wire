@@ -628,10 +628,10 @@ impl WireServer {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
         let spec: Specification =
             serde_json::from_str(&p.json).map_err(|e| format!("parse Specification JSON: {e}"))?;
-        SpecRegistry::new(&s)
+        let id = SpecRegistry::new(&s)
             .register(&p.name, &spec)
             .map_err(|e| e.to_string())?;
-        Ok(format!("registered spec: {}", p.name))
+        Ok(serde_json::json!({ "id": id.to_string(), "name": p.name }).to_string())
     }
 
     /// Register a NamedProjection (fixed / named view: spec + template + form).
@@ -656,10 +656,10 @@ impl WireServer {
             PluginDispatch::Default,
         )
         .map_err(|e| e.to_string())?;
-        ProjectionRegistry::new(&s)
+        let id = ProjectionRegistry::new(&s)
             .register(&entity)
             .map_err(|e| e.to_string())?;
-        Ok(format!("registered projection: {}", p.name))
+        Ok(serde_json::json!({ "id": id.to_string(), "name": p.name }).to_string())
     }
 
     /// Patch a node's metadata in place (merge or replace). Use for tuning

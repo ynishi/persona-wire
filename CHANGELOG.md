@@ -22,9 +22,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v0.6.x → v0.7.0 SQLite data migration. Dry-run by default, requires
   `--apply` to mutate; auto-backs up to `<db>.pre-ulid.bak` (override
   with `--backup`), optional `--mapping-out <json>` dumps the old→new
-  id map. Idempotent at schema detection.
+  id map. Idempotent at schema detection. Now runs in two phases:
+  phase A (`nodes` / `edges` → ULID + `name` extraction) and phase B
+  (`specifications` / `projections` table rebuild with `id` PK + `name`
+  UNIQUE). Each phase short-circuits independently when its columns
+  are already in the new shape.
 - `scripts/migrate_id_to_ulid.sql` — pointer + validation-query stub
   for the migration binary.
+- `SpecificationId` / `ProjectionId` type aliases over `ulid::Ulid`
+  (`domain/entity/projection`). Registry rows now carry both the ULID
+  `id` (server-minted, sortable, immutable, what Persona-Share /
+  Templating workflows should pin to) and the human-readable `name`
+  (UNIQUE within the registry, the existing CLI / MCP surface key).
+- `SqliteStorage::lookup_specification_id_by_name`,
+  `lookup_projection_id_by_name`, `resolve_specification_id_or_name`,
+  `resolve_projection_id_or_name`, `get_specification_name_by_id`,
+  `get_projection_name_by_id` — name ↔ id ↔ row resolver helpers
+  mirroring the node/edge surface.
+
+### Changed (extended)
+
+- **BREAKING**: `SqliteStorage::delete_specification` /
+  `delete_projection` now take `&SpecificationId` / `&ProjectionId`
+  (were `&str` name). Use-case-layer `wire_spec_delete` /
+  `wire_projection_delete` accept `id_or_name` and resolve internally.
+- **BREAKING**: `SpecRegistry::register` / `ProjectionRegistry::register`
+  now return the row's `Id` (were `()`).
+- `wire_spec_register` / `wire_projection_register` MCP responses now
+  return `{"id": "<ULID>", "name": "..."}` (were a plain status string).
+- `wire_render.projection_ref` / `wire_query.spec_ref` accept either a
+  ULID or the human-readable name (resolved via the new
+  `resolve_*_id_or_name` helpers).
+- `specifications` / `projections` SQLite schema gains `id TEXT PRIMARY KEY`
+  and `name TEXT NOT NULL UNIQUE` + matching `idx_*_name` index.
+  Existing rows are migrated by the `migrate_id_to_ulid` binary
+  (phase B — table rebuild via canonical SQLite ALTER recipe).
 
 ### Changed
 
