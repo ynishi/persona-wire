@@ -54,9 +54,9 @@ ulid = { version = "1", features = ["serde"] }
 gray_matter = "0.2"
 
 # Intra-workspace
-persona-wire-core = { path = "crates/persona-wire-core", version = "0.6.0" }
-persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.6.0" }
-persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.6.0" }
-persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.6.0" }
-persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.6.0" }
-persona-wire-adapter-mcp = { path = "crates/persona-wire-adapter-mcp", version = "0.6.0" }
+persona-wire-core = { path = "crates/persona-wire-core", version = "0.7.0" }
+persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.7.0" }
+persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.7.0" }
+persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.7.0" }
+persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.7.0" }
+persona-wire-adapter-mcp = { path = "crates/persona-wire-adapter-mcp", version = "0.7.0" }
