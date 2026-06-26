@@ -464,7 +464,7 @@ async fn regression_stringified_metadata_recovered_by_normalize() {
     client.call_tool_text(
         "wire_node_create",
         json!({
-            "id": persona_id,
+            "name": persona_id,
             "type": "persona",
             "metadata": {},
         }),
@@ -480,7 +480,7 @@ async fn regression_stringified_metadata_recovered_by_normalize() {
     client.call_tool_text(
         "wire_node_create",
         json!({
-            "id": entry_id,
+            "name": entry_id,
             "type": "outline_node",
             "metadata": stringified_meta,
         }),
@@ -490,7 +490,7 @@ async fn regression_stringified_metadata_recovered_by_normalize() {
     client.call_tool_text(
         "wire_edge_create",
         json!({
-            "id": format!("e.{persona_id}.active"),
+            "name": format!("e.{persona_id}.active"),
             "src": persona_id,
             "tgt": entry_id,
             "kind": "routes_to",

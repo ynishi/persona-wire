@@ -24,6 +24,10 @@ pub struct McpClient {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    /// Names of persona nodes already created via the test helpers. Used
+    /// for client-side idempotency now that `name` carries no uniqueness
+    /// constraint at the storage layer (v0.7+ ULID identity model).
+    created_personas: std::collections::HashSet<String>,
 }
 
 impl McpClient {
@@ -45,6 +49,7 @@ impl McpClient {
             stdin,
             stdout,
             next_id: 1,
+            created_personas: std::collections::HashSet::new(),
         };
         c.handshake();
         c
@@ -75,6 +80,7 @@ impl McpClient {
             stdin,
             stdout,
             next_id: 1,
+            created_personas: std::collections::HashSet::new(),
         };
         c.handshake();
         c
@@ -375,20 +381,25 @@ pub fn wire_one_slot(
             "target_form": "markdown",
         }),
     );
-    // Persona node may already exist (multi-slot tests). Tolerate dup via the
-    // best-effort path (UNIQUE violation is silently ignored).
-    let _ = client.try_call_tool_text(
-        "wire_node_create",
-        json!({
-            "id": persona_id,
-            "type": "persona",
-            "metadata": {},
-        }),
-    );
+    // Persona node may already exist (multi-slot tests). Client-side
+    // idempotency: only create the persona node on first request for this
+    // name. Storage no longer enforces UNIQUE on `name` (v0.7+ ULID id
+    // model); duplicates would make `wire_edge_create`'s src/tgt
+    // resolution return AmbiguousName.
+    if client.created_personas.insert(persona_id.to_string()) {
+        client.call_tool_text(
+            "wire_node_create",
+            json!({
+                "name": persona_id,
+                "type": "persona",
+                "metadata": {},
+            }),
+        );
+    }
     client.call_tool_text(
         "wire_node_create",
         json!({
-            "id": entry_id,
+            "name": entry_id,
             "type": "outline_node",
             "metadata": {
                 "persona": persona_id,
@@ -402,7 +413,7 @@ pub fn wire_one_slot(
     client.call_tool_text(
         "wire_edge_create",
         json!({
-            "id": format!("e.{persona_id}.{slot}"),
+            "name": format!("e.{persona_id}.{slot}"),
             "src": persona_id,
             "tgt": entry_id,
             "kind": "routes_to",

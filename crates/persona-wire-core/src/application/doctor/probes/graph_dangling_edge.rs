@@ -8,6 +8,7 @@
 use crate::application::doctor::finding::{Axis, Finding, Kind, Location, Severity};
 use crate::application::doctor::probe::{FindingSink, Probe, ProbeCtx};
 use crate::domain::error::WireResult;
+use crate::domain::graph::NodeId;
 use std::collections::HashSet;
 
 pub struct GraphDanglingEdge;
@@ -20,11 +21,11 @@ impl Probe for GraphDanglingEdge {
     fn scan(&self, ctx: &ProbeCtx, sink: &mut FindingSink) -> WireResult<()> {
         let storage = ctx.storage;
         // 1. 全 node id を 1 度収集 (HashSet で O(1) lookup)
-        let mut node_ids: HashSet<String> = HashSet::new();
-        let mut all_node_ids: Vec<String> = Vec::new();
+        let mut node_ids: HashSet<NodeId> = HashSet::new();
+        let mut all_node_ids: Vec<NodeId> = Vec::new();
         for t in storage.list_types_by_kind("node")? {
             for n in storage.list_nodes_by_type(&t)? {
-                node_ids.insert(n.id.clone());
+                node_ids.insert(n.id);
                 all_node_ids.push(n.id);
             }
         }
@@ -40,7 +41,7 @@ impl Probe for GraphDanglingEdge {
                     axis: kind.axis(),
                     kind,
                     location: Location {
-                        edge: Some((e.src_node.clone(), e.tgt_node.clone())),
+                        edge: Some((e.src_node.to_string(), e.tgt_node.to_string())),
                         ..Default::default()
                     },
                     description: format!(

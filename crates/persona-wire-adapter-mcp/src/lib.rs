@@ -128,7 +128,7 @@ impl McpEndpointResolver for SqliteEndpointResolver {
             let guard = self.storage.lock().map_err(|e| {
                 WireError::Storage(format!("mcp adapter: storage lock poisoned: {e}"))
             })?;
-            guard.get_node(&alias.to_string())?
+            guard.get_node_by_name(alias)?
         };
         let node = node_opt.ok_or_else(|| {
             WireError::Storage(format!(
@@ -695,12 +695,13 @@ mod tests {
         node_type: &str,
         metadata: serde_json::Value,
     ) -> SqliteEndpointResolver {
-        use persona_wire_core::domain::graph::Node;
+        use persona_wire_core::domain::graph::{ulid_from_seed, Node};
         let storage = SqliteStorage::open_in_memory().unwrap();
         storage.migrate().unwrap();
         storage.seed_default_types().unwrap();
         let node = Node {
-            id: node_id.to_string(),
+            id: ulid_from_seed(node_id),
+            name: node_id.to_string(),
             r#type: node_type.to_string(),
             sot_ref: None,
             confidence: None,

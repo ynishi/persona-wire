@@ -81,11 +81,13 @@ fn extract_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::graph::ulid_from_seed;
     use serde_json::json;
 
     fn node(id: &str, type_: &str, metadata: serde_json::Value) -> Node {
         Node {
-            id: id.into(),
+            id: ulid_from_seed(id),
+            name: id.into(),
             r#type: type_.into(),
             sot_ref: None,
             confidence: None,

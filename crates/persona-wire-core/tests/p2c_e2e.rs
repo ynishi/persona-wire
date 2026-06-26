@@ -9,13 +9,14 @@ use persona_wire_core::application::use_cases::{
     graph_scan_summary, wire_doctor, wire_edges_create_batch, wire_nodes_create_batch,
     WireEdgesCreateBatchInput, WireNodesCreateBatchInput,
 };
-use persona_wire_core::domain::graph::{Edge, Node};
+use persona_wire_core::domain::graph::{ulid_from_seed, Edge, Node};
 use persona_wire_core::infrastructure::storage::SqliteStorage;
 use serde_json::json;
 
 fn bare_node(id: &str, type_: &str) -> Node {
     Node {
-        id: id.into(),
+        id: ulid_from_seed(id),
+        name: id.into(),
         r#type: type_.into(),
         sot_ref: None,
         confidence: None,
@@ -30,9 +31,10 @@ fn bare_node(id: &str, type_: &str) -> Node {
 
 fn bare_edge(id: &str, src: &str, tgt: &str, kind: &str) -> Edge {
     Edge {
-        id: id.into(),
-        src_node: src.into(),
-        tgt_node: tgt.into(),
+        id: ulid_from_seed(id),
+        name: Some(id.into()),
+        src_node: ulid_from_seed(src),
+        tgt_node: ulid_from_seed(tgt),
         kind: kind.into(),
         severity: None,
         metadata: json!({}),

@@ -14,14 +14,15 @@ use persona_wire_core::application::use_cases::{
 };
 use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
 use persona_wire_core::domain::entity::TargetForm;
-use persona_wire_core::domain::graph::Node;
+use persona_wire_core::domain::graph::{ulid_from_seed, Node};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;
 use serde_json::json;
 
 fn bare_node(id: &str, type_: &str, metadata: serde_json::Value) -> Node {
     Node {
-        id: id.into(),
+        id: ulid_from_seed(id),
+        name: id.into(),
         r#type: type_.into(),
         sot_ref: None,
         confidence: None,
@@ -72,7 +73,7 @@ fn inline_spec_returns_matched_nodes_in_slim_form() {
 
     assert_eq!(out.total_count, 4);
     assert_eq!(out.returned_count, 4);
-    let ids: Vec<&str> = out.matched.iter().map(|n| n.id.as_str()).collect();
+    let ids: Vec<&str> = out.matched.iter().map(|n| n.name.as_str()).collect();
     assert!(ids.contains(&"p1"));
     assert!(ids.contains(&"p2"));
     assert!(ids.contains(&"p3"));
@@ -112,7 +113,7 @@ fn spec_ref_resolves_registered_specification() {
 
     assert_eq!(out.total_count, 3);
     assert_eq!(out.returned_count, 3);
-    let ids: Vec<&str> = out.matched.iter().map(|n| n.id.as_str()).collect();
+    let ids: Vec<&str> = out.matched.iter().map(|n| n.name.as_str()).collect();
     assert!(ids.contains(&"p1"));
     assert!(ids.contains(&"p2"));
     assert!(ids.contains(&"p3"));

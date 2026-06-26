@@ -50,6 +50,9 @@ pub enum WireError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    #[error("ambiguous name '{name}': resolves to {count} rows — specify by ULID")]
+    AmbiguousName { name: String, count: usize },
+
     #[error("other: {0}")]
     Other(String),
 }

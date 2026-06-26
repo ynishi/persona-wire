@@ -7,8 +7,21 @@ use std::path::PathBuf;
 
 use crate::domain::autoversion::{VersionRecord, VersionTargetKind};
 use crate::domain::error::{DomainError, WireError, WireResult};
-use crate::domain::graph::{Edge, EdgeId, Node, NodeId, Severity};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use crate::domain::graph::{Edge, EdgeId, Node, NodeId, Severity, Ulid};
+#[cfg(test)]
+use crate::domain::graph::ulid_from_seed;
+use rusqlite::{params, types::Type as SqlType, Connection, OptionalExtension, Row};
+
+/// Decode a ULID stored as 26-char Crockford base32 TEXT. Used in `row_to_*`
+/// helpers since `ulid::Ulid` does not implement `rusqlite::FromSql` directly.
+fn text_to_ulid(s: &str) -> rusqlite::Result<Ulid> {
+    Ulid::from_string(s)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, SqlType::Text, Box::new(e)))
+}
+
+fn opt_text_to_ulid(s: Option<String>) -> rusqlite::Result<Option<Ulid>> {
+    s.map(|t| text_to_ulid(&t)).transpose()
+}
 
 /// Resolve the default DB path for persona-wire. Follows the persona-x family
 /// convention (= persona-work `store-sqlite/src/lib.rs:96-109`):
@@ -206,11 +219,12 @@ impl SqliteStorage {
             serde_json::to_string(&normalized).map_err(|e| WireError::Storage(e.to_string()))?;
         self.conn
             .execute(
-                "INSERT INTO nodes (id, type, sot_ref, confidence, applicability, \
+                "INSERT INTO nodes (id, name, type, sot_ref, confidence, applicability, \
                  last_verified_at, review_due, version, prev_id, metadata) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
-                    node.id,
+                    node.id.to_string(),
+                    node.name,
                     node.r#type,
                     node.sot_ref,
                     node.confidence,
@@ -218,7 +232,7 @@ impl SqliteStorage {
                     node.last_verified_at,
                     node.review_due,
                     node.version,
-                    node.prev_id,
+                    node.prev_id.as_ref().map(|u| u.to_string()),
                     metadata_str,
                 ],
             )
@@ -229,13 +243,69 @@ impl SqliteStorage {
     pub fn get_node(&self, id: &NodeId) -> WireResult<Option<Node>> {
         self.conn
             .query_row(
-                "SELECT id, type, sot_ref, confidence, applicability, last_verified_at, \
+                "SELECT id, name, type, sot_ref, confidence, applicability, last_verified_at, \
                  review_due, version, prev_id, metadata FROM nodes WHERE id = ?1",
-                params![id],
+                params![id.to_string()],
                 row_to_node,
             )
             .optional()
             .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Fetch a node by its human-readable `name`. Returns `Ok(None)` for no
+    /// match and `Err(WireError::AmbiguousName)` for multiple matches.
+    /// Convenience wrapper over `lookup_node_id_by_name` + `get_node`.
+    pub fn get_node_by_name(&self, name: &str) -> WireResult<Option<Node>> {
+        match self.lookup_node_id_by_name(name)? {
+            Some(id) => self.get_node(&id),
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve a string that is either a 26-char ULID or a `name` to a
+    /// concrete `NodeId`. Used by every MCP entry that exposes `id_or_name`
+    /// at the boundary.
+    pub fn resolve_node_id_or_name(&self, id_or_name: &str) -> WireResult<Option<NodeId>> {
+        if let Ok(ulid) = Ulid::from_string(id_or_name) {
+            return Ok(Some(ulid));
+        }
+        self.lookup_node_id_by_name(id_or_name)
+    }
+
+    /// Edge-side counterpart to `resolve_node_id_or_name`.
+    pub fn resolve_edge_id_or_name(&self, id_or_name: &str) -> WireResult<Option<EdgeId>> {
+        if let Ok(ulid) = Ulid::from_string(id_or_name) {
+            return Ok(Some(ulid));
+        }
+        self.lookup_edge_id_by_name(id_or_name)
+    }
+
+    /// Resolve a `NodeId` by its human-readable `name`. Returns
+    /// `Ok(Some(_))` when exactly one row matches, `Ok(None)` when zero,
+    /// and `Err(WireError::AmbiguousName)` when more than one row shares
+    /// the name (callers should fall back to ULID for disambiguation).
+    pub fn lookup_node_id_by_name(&self, name: &str) -> WireResult<Option<NodeId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM nodes WHERE name = ?1")
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map(params![name], |r| r.get::<_, String>(0))
+            .map_err(|e| WireError::Storage(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        match rows.len() {
+            0 => Ok(None),
+            1 => {
+                let id = Ulid::from_string(&rows[0])
+                    .map_err(|e| WireError::Storage(e.to_string()))?;
+                Ok(Some(id))
+            }
+            n => Err(WireError::AmbiguousName {
+                name: name.to_string(),
+                count: n,
+            }),
+        }
     }
 
     /// Replace a node's `metadata` JSON object in place.
@@ -250,7 +320,7 @@ impl SqliteStorage {
     /// fields (`type` / `sot_ref` / lifecycle timestamps) intentionally stay
     /// immutable on this path; full-row replacement is out of scope for the
     /// metadata-patch UC (= wiring-entry `source_uri` tuning).
-    pub fn update_node_metadata(&self, id: &str, metadata: &serde_json::Value) -> WireResult<bool> {
+    pub fn update_node_metadata(&self, id: &NodeId, metadata: &serde_json::Value) -> WireResult<bool> {
         let normalized = normalize_metadata_storage(metadata)?;
         let metadata_str =
             serde_json::to_string(&normalized).map_err(|e| WireError::Storage(e.to_string()))?;
@@ -258,7 +328,7 @@ impl SqliteStorage {
             .conn
             .execute(
                 "UPDATE nodes SET metadata = ?1 WHERE id = ?2",
-                params![metadata_str, id],
+                params![metadata_str, id.to_string()],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(n > 0)
@@ -268,8 +338,8 @@ impl SqliteStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, type, sot_ref, confidence, applicability, last_verified_at, \
-                 review_due, version, prev_id, metadata FROM nodes WHERE type = ?1 ORDER BY id",
+                "SELECT id, name, type, sot_ref, confidence, applicability, last_verified_at, \
+                 review_due, version, prev_id, metadata FROM nodes WHERE type = ?1 ORDER BY name, id",
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         let rows = stmt
@@ -285,17 +355,18 @@ impl SqliteStorage {
             serde_json::to_string(&edge.metadata).map_err(|e| WireError::Storage(e.to_string()))?;
         self.conn
             .execute(
-                "INSERT INTO edges (id, src_node, tgt_node, kind, severity, metadata, version, prev_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO edges (id, name, src_node, tgt_node, kind, severity, metadata, version, prev_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    edge.id,
-                    edge.src_node,
-                    edge.tgt_node,
+                    edge.id.to_string(),
+                    edge.name,
+                    edge.src_node.to_string(),
+                    edge.tgt_node.to_string(),
                     edge.kind,
                     sev,
                     metadata_str,
                     edge.version,
-                    edge.prev_id,
+                    edge.prev_id.as_ref().map(|u| u.to_string()),
                 ],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
@@ -305,25 +376,51 @@ impl SqliteStorage {
     pub fn get_edge(&self, id: &EdgeId) -> WireResult<Option<Edge>> {
         self.conn
             .query_row(
-                "SELECT id, src_node, tgt_node, kind, severity, metadata, version, prev_id \
+                "SELECT id, name, src_node, tgt_node, kind, severity, metadata, version, prev_id \
                  FROM edges WHERE id = ?1",
-                params![id],
+                params![id.to_string()],
                 row_to_edge,
             )
             .optional()
             .map_err(|e| WireError::Storage(e.to_string()))
     }
 
+    /// Lookup an `EdgeId` by its optional human-readable `name`. Same
+    /// semantics as `lookup_node_id_by_name`: 0/1/many → None/Some/Err.
+    pub fn lookup_edge_id_by_name(&self, name: &str) -> WireResult<Option<EdgeId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM edges WHERE name = ?1")
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map(params![name], |r| r.get::<_, String>(0))
+            .map_err(|e| WireError::Storage(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        match rows.len() {
+            0 => Ok(None),
+            1 => {
+                let id = Ulid::from_string(&rows[0])
+                    .map_err(|e| WireError::Storage(e.to_string()))?;
+                Ok(Some(id))
+            }
+            n => Err(WireError::AmbiguousName {
+                name: name.to_string(),
+                count: n,
+            }),
+        }
+    }
+
     pub fn list_edges_from(&self, src_node: &NodeId) -> WireResult<Vec<Edge>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, src_node, tgt_node, kind, severity, metadata, version, prev_id \
-                 FROM edges WHERE src_node = ?1 ORDER BY id",
+                "SELECT id, name, src_node, tgt_node, kind, severity, metadata, version, prev_id \
+                 FROM edges WHERE src_node = ?1 ORDER BY name, id",
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         let rows = stmt
-            .query_map(params![src_node], row_to_edge)
+            .query_map(params![src_node.to_string()], row_to_edge)
             .map_err(|e| WireError::Storage(e.to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| WireError::Storage(e.to_string()))
@@ -333,12 +430,12 @@ impl SqliteStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, src_node, tgt_node, kind, severity, metadata, version, prev_id \
-                 FROM edges WHERE tgt_node = ?1 ORDER BY id",
+                "SELECT id, name, src_node, tgt_node, kind, severity, metadata, version, prev_id \
+                 FROM edges WHERE tgt_node = ?1 ORDER BY name, id",
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         let rows = stmt
-            .query_map(params![tgt_node], row_to_edge)
+            .query_map(params![tgt_node.to_string()], row_to_edge)
             .map_err(|e| WireError::Storage(e.to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| WireError::Storage(e.to_string()))
@@ -522,28 +619,29 @@ impl SqliteStorage {
     /// **cascade-deleted** in the same transaction — schema has NOT-NULL FK
     /// from edges → nodes, so orphan edges are not representable; cascade is
     /// the only consistent option.
-    pub fn delete_node(&self, id: &str) -> WireResult<bool> {
+    pub fn delete_node(&self, id: &NodeId) -> WireResult<bool> {
+        let id_str = id.to_string();
         let tx = self
             .conn
             .unchecked_transaction()
             .map_err(|e| WireError::Storage(e.to_string()))?;
         tx.execute(
             "DELETE FROM edges WHERE src_node = ?1 OR tgt_node = ?1",
-            rusqlite::params![id],
+            rusqlite::params![id_str],
         )
         .map_err(|e| WireError::Storage(e.to_string()))?;
         let n = tx
-            .execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![id])
+            .execute("DELETE FROM nodes WHERE id = ?1", rusqlite::params![id_str])
             .map_err(|e| WireError::Storage(e.to_string()))?;
         tx.commit().map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(n > 0)
     }
 
     /// Delete an edge by id. Returns `true` if a row was deleted.
-    pub fn delete_edge(&self, id: &str) -> WireResult<bool> {
+    pub fn delete_edge(&self, id: &EdgeId) -> WireResult<bool> {
         let n = self
             .conn
-            .execute("DELETE FROM edges WHERE id = ?1", rusqlite::params![id])
+            .execute("DELETE FROM edges WHERE id = ?1", rusqlite::params![id.to_string()])
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(n > 0)
     }
@@ -626,41 +724,53 @@ fn severity_to_str(s: Severity) -> &'static str {
 }
 
 fn row_to_node(row: &Row) -> rusqlite::Result<Node> {
-    let metadata_str: String = row.get(9)?;
+    // Column order: id, name, type, sot_ref, confidence, applicability,
+    //               last_verified_at, review_due, version, prev_id, metadata
+    let id_str: String = row.get(0)?;
+    let prev_str: Option<String> = row.get(9)?;
+    let metadata_str: String = row.get(10)?;
     let metadata = serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null);
     Ok(Node {
-        id: row.get(0)?,
-        r#type: row.get(1)?,
-        sot_ref: row.get(2)?,
-        confidence: row.get(3)?,
-        applicability: row.get(4)?,
-        last_verified_at: row.get(5)?,
-        review_due: row.get(6)?,
-        version: row.get::<_, i64>(7)? as u32,
-        prev_id: row.get(8)?,
+        id: text_to_ulid(&id_str)?,
+        name: row.get(1)?,
+        r#type: row.get(2)?,
+        sot_ref: row.get(3)?,
+        confidence: row.get(4)?,
+        applicability: row.get(5)?,
+        last_verified_at: row.get(6)?,
+        review_due: row.get(7)?,
+        version: row.get::<_, i64>(8)? as u32,
+        prev_id: opt_text_to_ulid(prev_str)?,
         metadata,
     })
 }
 
 fn row_to_edge(row: &Row) -> rusqlite::Result<Edge> {
-    let sev_str: Option<String> = row.get(4)?;
+    // Column order: id, name, src_node, tgt_node, kind, severity, metadata,
+    //               version, prev_id
+    let id_str: String = row.get(0)?;
+    let src_str: String = row.get(2)?;
+    let tgt_str: String = row.get(3)?;
+    let sev_str: Option<String> = row.get(5)?;
     let severity = sev_str.and_then(|s| match s.as_str() {
         "hard" => Some(Severity::Hard),
         "soft" => Some(Severity::Soft),
         "advisory" => Some(Severity::Advisory),
         _ => None,
     });
-    let metadata_str: String = row.get(5)?;
+    let metadata_str: String = row.get(6)?;
     let metadata = serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null);
+    let prev_str: Option<String> = row.get(8)?;
     Ok(Edge {
-        id: row.get(0)?,
-        src_node: row.get(1)?,
-        tgt_node: row.get(2)?,
-        kind: row.get(3)?,
+        id: text_to_ulid(&id_str)?,
+        name: row.get(1)?,
+        src_node: text_to_ulid(&src_str)?,
+        tgt_node: text_to_ulid(&tgt_str)?,
+        kind: row.get(4)?,
         severity,
         metadata,
-        version: row.get::<_, i64>(6)? as u32,
-        prev_id: row.get(7)?,
+        version: row.get::<_, i64>(7)? as u32,
+        prev_id: opt_text_to_ulid(prev_str)?,
     })
 }
 
@@ -676,6 +786,7 @@ CREATE TABLE IF NOT EXISTS type_registry (
 
 CREATE TABLE IF NOT EXISTS nodes (
     id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL DEFAULT '',
     type              TEXT NOT NULL REFERENCES type_registry(name),
     sot_ref           TEXT,
     confidence        REAL,
@@ -688,9 +799,11 @@ CREATE TABLE IF NOT EXISTS nodes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
+CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 
 CREATE TABLE IF NOT EXISTS edges (
     id        TEXT PRIMARY KEY,
+    name      TEXT,
     src_node  TEXT NOT NULL REFERENCES nodes(id),
     tgt_node  TEXT NOT NULL REFERENCES nodes(id),
     kind      TEXT NOT NULL REFERENCES type_registry(name),
@@ -703,6 +816,7 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_src  ON edges(src_node);
 CREATE INDEX IF NOT EXISTS idx_edges_tgt  ON edges(tgt_node);
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+CREATE INDEX IF NOT EXISTS idx_edges_name ON edges(name);
 
 CREATE TABLE IF NOT EXISTS versions (
     target_kind  TEXT NOT NULL CHECK (target_kind IN ('node', 'edge')),
@@ -756,7 +870,8 @@ mod tests {
 
     fn bare_node(id: &str, type_: &str) -> Node {
         Node {
-            id: id.into(),
+            id: ulid_from_seed(id),
+            name: id.into(),
             r#type: type_.into(),
             sot_ref: None,
             confidence: None,
@@ -842,8 +957,8 @@ mod tests {
         n.metadata = json!({"name": "alpha", "tags": ["dev"]});
         s.insert_node(&n).unwrap();
 
-        let got = s.get_node(&"n1".into()).unwrap().expect("exists");
-        assert_eq!(got.id, "n1");
+        let got = s.get_node(&ulid_from_seed("n1")).unwrap().expect("exists");
+        assert_eq!(got.name, "n1");
         assert_eq!(got.r#type, "persona");
         assert_eq!(got.sot_ref.as_deref(), Some("pp://alpha"));
         assert_eq!(got.confidence, Some(0.95));
@@ -854,7 +969,7 @@ mod tests {
     #[test]
     fn get_node_returns_none_when_absent() {
         let s = setup();
-        assert!(s.get_node(&"missing".into()).unwrap().is_none());
+        assert!(s.get_node(&ulid_from_seed("missing")).unwrap().is_none());
     }
 
     #[test]
@@ -874,7 +989,7 @@ mod tests {
         n.metadata =
             serde_json::Value::String(r#"{"display":"shi_like","first_person":"しー"}"#.into());
         s.insert_node(&n).unwrap();
-        let got = s.get_node(&"shi_like".into()).unwrap().expect("exists");
+        let got = s.get_node(&ulid_from_seed("shi_like")).unwrap().expect("exists");
         assert_eq!(
             got.metadata,
             json!({"display": "shi_like", "first_person": "しー"}),
@@ -936,9 +1051,9 @@ mod tests {
         let s = setup();
         s.insert_node(&bare_node("p1", "persona")).unwrap();
         let patched = serde_json::Value::String(r#"{"display":"p1"}"#.into());
-        let updated = s.update_node_metadata("p1", &patched).unwrap();
+        let updated = s.update_node_metadata(&ulid_from_seed("p1"), &patched).unwrap();
         assert!(updated);
-        let got = s.get_node(&"p1".into()).unwrap().expect("exists");
+        let got = s.get_node(&ulid_from_seed("p1")).unwrap().expect("exists");
         assert_eq!(got.metadata, json!({"display": "p1"}));
     }
 
@@ -946,7 +1061,7 @@ mod tests {
     fn update_node_metadata_rejects_non_object_input() {
         let s = setup();
         s.insert_node(&bare_node("p2", "persona")).unwrap();
-        let err = s.update_node_metadata("p2", &json!("plain string"));
+        let err = s.update_node_metadata(&ulid_from_seed("p2"), &json!("plain string"));
         assert!(matches!(
             err,
             Err(WireError::Domain(DomainError::InvalidMetadata(_)))
@@ -965,8 +1080,8 @@ mod tests {
         for n in [&n1, &n2] {
             s.insert_node(n).unwrap();
         }
-        let got1 = s.get_node(&"b1".into()).unwrap().expect("exists");
-        let got2 = s.get_node(&"b2".into()).unwrap().expect("exists");
+        let got1 = s.get_node(&ulid_from_seed("b1")).unwrap().expect("exists");
+        let got2 = s.get_node(&ulid_from_seed("b2")).unwrap().expect("exists");
         assert_eq!(got1.metadata, json!({"display": "b1"}));
         assert_eq!(got2.metadata, json!({"display": "b2"}));
     }
@@ -979,7 +1094,7 @@ mod tests {
         s.insert_node(&bare_node("c1", "channel")).unwrap();
         let personas = s.list_nodes_by_type("persona").unwrap();
         assert_eq!(personas.len(), 2);
-        assert_eq!(personas[0].id, "p1");
+        assert_eq!(personas[0].name, "p1");
     }
 
     #[test]
@@ -988,9 +1103,10 @@ mod tests {
         s.insert_node(&bare_node("p_alpha", "persona")).unwrap();
         s.insert_node(&bare_node("p_beta", "persona")).unwrap();
         let e = Edge {
-            id: "e1".into(),
-            src_node: "p_alpha".into(),
-            tgt_node: "p_beta".into(),
+            id: ulid_from_seed("e1"),
+            name: Some("e1".into()),
+            src_node: ulid_from_seed("p_alpha"),
+            tgt_node: ulid_from_seed("p_beta"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({"weight": 1}),
@@ -999,14 +1115,14 @@ mod tests {
         };
         s.insert_edge(&e).unwrap();
 
-        let edges = s.list_edges_from(&"p_alpha".into()).unwrap();
+        let edges = s.list_edges_from(&ulid_from_seed("p_alpha")).unwrap();
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].id, "e1");
+        assert_eq!(edges[0].name.as_deref(), Some("e1"));
         assert_eq!(edges[0].kind, "routes_to");
         assert_eq!(edges[0].metadata, json!({"weight": 1}));
 
         // reverse direction empty
-        let back = s.list_edges_from(&"p_beta".into()).unwrap();
+        let back = s.list_edges_from(&ulid_from_seed("p_beta")).unwrap();
         assert!(back.is_empty());
     }
 
@@ -1016,9 +1132,10 @@ mod tests {
         s.insert_node(&bare_node("a", "persona")).unwrap();
         s.insert_node(&bare_node("b", "persona")).unwrap();
         let e = Edge {
-            id: "e_ab".into(),
-            src_node: "a".into(),
-            tgt_node: "b".into(),
+            id: ulid_from_seed("e_ab"),
+            name: Some("e_ab".into()),
+            src_node: ulid_from_seed("a"),
+            tgt_node: ulid_from_seed("b"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -1026,9 +1143,9 @@ mod tests {
             prev_id: None,
         };
         s.insert_edge(&e).unwrap();
-        let in_b = s.list_edges_to(&"b".into()).unwrap();
+        let in_b = s.list_edges_to(&ulid_from_seed("b")).unwrap();
         assert_eq!(in_b.len(), 1);
-        assert_eq!(in_b[0].src_node, "a");
+        assert_eq!(in_b[0].src_node, ulid_from_seed("a"));
     }
 
     #[test]
@@ -1042,9 +1159,10 @@ mod tests {
             ("e_a", Severity::Advisory),
         ] {
             let e = Edge {
-                id: id.into(),
-                src_node: "a".into(),
-                tgt_node: "b".into(),
+                id: ulid_from_seed(id),
+                name: Some(id.into()),
+                src_node: ulid_from_seed("a"),
+                tgt_node: ulid_from_seed("b"),
                 kind: "triggers_review_of".into(),
                 severity: Some(sev),
                 metadata: json!({}),
@@ -1053,7 +1171,7 @@ mod tests {
             };
             s.insert_edge(&e).unwrap();
         }
-        let edges = s.list_edges_from(&"a".into()).unwrap();
+        let edges = s.list_edges_from(&ulid_from_seed("a")).unwrap();
         assert_eq!(edges.len(), 3);
         let mut sevs: Vec<_> = edges.iter().filter_map(|e| e.severity).collect();
         sevs.sort_by_key(|s| match s {
@@ -1088,7 +1206,7 @@ mod tests {
         for v in 1..=3 {
             let rec = VersionRecord {
                 target_kind: VersionTargetKind::Node,
-                target_id: "n1".into(),
+                target_id: ulid_from_seed("n1").to_string(),
                 version: v,
                 diff: json!({"step": v}),
                 ts: 1_700_000_000 + v as i64,
@@ -1096,8 +1214,8 @@ mod tests {
             };
             s.insert_version_record(&rec).unwrap();
         }
-        assert_eq!(s.count_versions(VersionTargetKind::Node, "n1").unwrap(), 3);
-        assert_eq!(s.count_versions(VersionTargetKind::Edge, "n1").unwrap(), 0);
+        assert_eq!(s.count_versions(VersionTargetKind::Node, &ulid_from_seed("n1").to_string()).unwrap(), 3);
+        assert_eq!(s.count_versions(VersionTargetKind::Edge, &ulid_from_seed("n1").to_string()).unwrap(), 0);
     }
 
     #[test]
@@ -1105,7 +1223,7 @@ mod tests {
         let s = setup();
         let rec = VersionRecord {
             target_kind: VersionTargetKind::Node,
-            target_id: "dup".into(),
+            target_id: ulid_from_seed("dup").to_string(),
             version: 1,
             diff: json!({}),
             ts: 1,
@@ -1228,9 +1346,10 @@ mod tests {
         }
         for (id, src, tgt) in [("e1", "alpha", "beta"), ("e2", "alpha", "gamma")] {
             s.insert_edge(&Edge {
-                id: id.into(),
-                src_node: src.into(),
-                tgt_node: tgt.into(),
+                id: ulid_from_seed(id),
+                name: Some(id.into()),
+                src_node: ulid_from_seed(src),
+                tgt_node: ulid_from_seed(tgt),
                 kind: "routes_to".into(),
                 severity: None,
                 metadata: json!({}),
@@ -1242,13 +1361,13 @@ mod tests {
         // include alpha (start) via TypeIs::persona match
         let spec = Specification::TypeIs("persona".into());
         let repo: &dyn Repository = &s;
-        let result = traverse(&"alpha".into(), &spec, 1, repo).unwrap();
+        let result = traverse(&ulid_from_seed("alpha"), &spec, 1, repo).unwrap();
         assert_eq!(result.nodes.len(), 3);
         assert_eq!(result.depth_reached, 1);
-        let ids: Vec<_> = result.nodes.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"alpha"));
-        assert!(ids.contains(&"beta"));
-        assert!(ids.contains(&"gamma"));
+        let names: Vec<_> = result.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(names.contains(&"gamma"));
     }
 
     #[test]
@@ -1261,9 +1380,10 @@ mod tests {
         s.insert_node(&bare_node("alpha", "persona")).unwrap();
         s.insert_node(&bare_node("beta", "persona")).unwrap();
         s.insert_edge(&Edge {
-            id: "e1".into(),
-            src_node: "alpha".into(),
-            tgt_node: "beta".into(),
+            id: ulid_from_seed("e1"),
+            name: Some("e1".into()),
+            src_node: ulid_from_seed("alpha"),
+            tgt_node: ulid_from_seed("beta"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -1273,13 +1393,13 @@ mod tests {
         .unwrap();
         let repo: &dyn Repository = &s;
         let result = traverse(
-            &"alpha".into(),
+            &ulid_from_seed("alpha"),
             &Specification::TypeIs("persona".into()),
             0,
             repo,
         )
         .unwrap();
         assert_eq!(result.nodes.len(), 1);
-        assert_eq!(result.nodes[0].id, "alpha");
+        assert_eq!(result.nodes[0].name, "alpha");
     }
 }

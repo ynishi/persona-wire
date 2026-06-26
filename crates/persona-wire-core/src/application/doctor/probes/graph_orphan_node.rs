@@ -47,7 +47,7 @@ impl Probe for GraphOrphanNode {
                     axis: kind.axis(),
                     kind,
                     location: Location {
-                        node_id: Some(n.id.clone()),
+                        node_id: Some(n.name.clone()),
                         persona_id,
                         ..Default::default()
                     },

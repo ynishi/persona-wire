@@ -4,7 +4,7 @@
 
 use crate::application::doctor::probe::{FindingSink, Probe, ProbeCtx};
 use crate::domain::error::WireResult;
-use crate::domain::graph::{Edge, Node};
+use crate::domain::graph::{ulid_from_seed, Edge, Node};
 use crate::infrastructure::storage::SqliteStorage;
 use serde_json::{json, Value};
 
@@ -17,7 +17,8 @@ pub fn setup() -> SqliteStorage {
 
 pub fn node(id: &str, ty: &str, metadata: Value) -> Node {
     Node {
-        id: id.into(),
+        id: ulid_from_seed(id),
+        name: id.into(),
         r#type: ty.into(),
         sot_ref: None,
         confidence: None,
@@ -40,9 +41,10 @@ pub fn bare_persona_node(id: &str) -> Node {
 
 pub fn edge(id: &str, src: &str, tgt: &str) -> Edge {
     Edge {
-        id: id.into(),
-        src_node: src.into(),
-        tgt_node: tgt.into(),
+        id: ulid_from_seed(id),
+        name: Some(id.into()),
+        src_node: ulid_from_seed(src),
+        tgt_node: ulid_from_seed(tgt),
         kind: "routes_to".into(),
         severity: None,
         metadata: json!({}),

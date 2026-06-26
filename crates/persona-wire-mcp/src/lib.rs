@@ -124,7 +124,12 @@ fn normalize_metadata(raw: Option<serde_json::Value>) -> serde_json::Value {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WireNodeCreateParams {
-    pub id: String,
+    /// Human-readable label for the node (e.g. "alpha.workflow.review_close").
+    /// Not required to be unique — the server mints a fresh ULID as the
+    /// opaque `id` and returns it in the response. Subsequent operations
+    /// (update / delete / get / src/tgt) accept either the ULID or this
+    /// `name` via the `id_or_name` resolver.
+    pub name: String,
     /// Node type — must be in type_registry (e.g. "persona", "outline_node").
     #[serde(rename = "type")]
     pub type_: String,
@@ -138,8 +143,14 @@ pub struct WireNodeCreateParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WireEdgeCreateParams {
-    pub id: String,
+    /// Optional human-readable label for the edge. Server mints the opaque
+    /// ULID `id` regardless and returns it. Omit for edges that have no
+    /// natural caller-facing name (e.g. ad-hoc `routes_to` links).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Source endpoint — accepts either the node's ULID or its `name`.
     pub src: String,
+    /// Target endpoint — accepts either the node's ULID or its `name`.
     pub tgt: String,
     /// Edge kind — must be in type_registry (e.g. "routes_to", "cites").
     pub kind: String,
@@ -378,8 +389,10 @@ impl WireServer {
         Parameters(p): Parameters<WireNodeCreateParams>,
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let id = persona_wire_core::domain::graph::Ulid::new();
         let node = Node {
-            id: p.id.clone(),
+            id,
+            name: p.name.clone(),
             r#type: p.type_,
             sot_ref: p.sot_ref,
             confidence: None,
@@ -391,7 +404,7 @@ impl WireServer {
             metadata: normalize_metadata(p.metadata),
         };
         s.insert_node(&node).map_err(|e| e.to_string())?;
-        Ok(format!("created node: {}", p.id))
+        Ok(serde_json::json!({ "id": id.to_string(), "name": p.name }).to_string())
     }
 
     /// Bulk-insert a batch of nodes (1-row-at-a-time loop, stops on first error).
@@ -404,20 +417,26 @@ impl WireServer {
         Parameters(p): Parameters<WireNodesCreateBatchParams>,
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let mut minted: Vec<serde_json::Value> = Vec::with_capacity(p.nodes.len());
         let nodes: Vec<Node> = p
             .nodes
             .into_iter()
-            .map(|np| Node {
-                id: np.id,
-                r#type: np.type_,
-                sot_ref: np.sot_ref,
-                confidence: None,
-                applicability: None,
-                last_verified_at: None,
-                review_due: None,
-                version: 1,
-                prev_id: None,
-                metadata: normalize_metadata(np.metadata),
+            .map(|np| {
+                let id = persona_wire_core::domain::graph::Ulid::new();
+                minted.push(serde_json::json!({ "id": id.to_string(), "name": np.name }));
+                Node {
+                    id,
+                    name: np.name,
+                    r#type: np.type_,
+                    sot_ref: np.sot_ref,
+                    confidence: None,
+                    applicability: None,
+                    last_verified_at: None,
+                    review_due: None,
+                    version: 1,
+                    prev_id: None,
+                    metadata: normalize_metadata(np.metadata),
+                }
             })
             .collect();
         let out = wire_nodes_create_batch(WireNodesCreateBatchInput { nodes }, &s)
@@ -426,6 +445,7 @@ impl WireServer {
             "inserted_count": out.inserted_count,
             "failed_at": out.failed_at,
             "error_message": out.error_message,
+            "minted": minted,
         });
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
@@ -441,6 +461,7 @@ impl WireServer {
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
         let mut edges = Vec::with_capacity(p.edges.len());
+        let mut minted: Vec<serde_json::Value> = Vec::with_capacity(p.edges.len());
         for ep in p.edges {
             let sev = match ep.severity.as_deref() {
                 None => None,
@@ -449,10 +470,26 @@ impl WireServer {
                 Some("advisory") => Some(Severity::Advisory),
                 Some(other) => return Err(format!("unknown severity: {other}")),
             };
+            let src_id = s
+                .resolve_node_id_or_name(&ep.src)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("edge src node not found: {}", ep.src))?;
+            let tgt_id = s
+                .resolve_node_id_or_name(&ep.tgt)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("edge tgt node not found: {}", ep.tgt))?;
+            let id = persona_wire_core::domain::graph::Ulid::new();
+            minted.push(serde_json::json!({
+                "id": id.to_string(),
+                "name": ep.name,
+                "src": src_id.to_string(),
+                "tgt": tgt_id.to_string(),
+            }));
             edges.push(Edge {
-                id: ep.id,
-                src_node: ep.src,
-                tgt_node: ep.tgt,
+                id,
+                name: ep.name,
+                src_node: src_id,
+                tgt_node: tgt_id,
                 kind: ep.kind,
                 severity: sev,
                 metadata: normalize_metadata(ep.metadata),
@@ -466,6 +503,7 @@ impl WireServer {
             "inserted_count": out.inserted_count,
             "failed_at": out.failed_at,
             "error_message": out.error_message,
+            "minted": minted,
         });
         serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
@@ -489,10 +527,20 @@ impl WireServer {
                 return Err(format!("unknown severity: {other}"));
             }
         };
+        let src_id = s
+            .resolve_node_id_or_name(&p.src)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("edge src node not found: {}", p.src))?;
+        let tgt_id = s
+            .resolve_node_id_or_name(&p.tgt)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("edge tgt node not found: {}", p.tgt))?;
+        let id = persona_wire_core::domain::graph::Ulid::new();
         let edge = Edge {
-            id: p.id.clone(),
-            src_node: p.src,
-            tgt_node: p.tgt,
+            id,
+            name: p.name.clone(),
+            src_node: src_id,
+            tgt_node: tgt_id,
             kind: p.kind,
             severity: sev,
             metadata: normalize_metadata(p.metadata),
@@ -500,7 +548,7 @@ impl WireServer {
             prev_id: None,
         };
         s.insert_edge(&edge).map_err(|e| e.to_string())?;
-        Ok(format!("created edge: {}", p.id))
+        Ok(serde_json::json!({ "id": id.to_string(), "name": p.name }).to_string())
     }
 
     /// Render a single registered NamedProjection by name (counterpart to wire_init).

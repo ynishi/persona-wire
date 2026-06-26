@@ -93,10 +93,11 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum NodeOp {
-    /// Create a node.
+    /// Create a node. The server mints the opaque ULID id and returns it.
     Create {
+        /// Human-readable label (no uniqueness constraint).
         #[arg(long)]
-        id: String,
+        name: String,
         #[arg(long = "type")]
         type_: String,
         /// Optional JSON metadata. Defaults to `{}`.
@@ -106,10 +107,11 @@ enum NodeOp {
         #[arg(long)]
         sot_ref: Option<String>,
     },
-    /// Get a node by id.
+    /// Get a node by ULID id or by name.
     Get {
-        #[arg(long)]
-        id: String,
+        /// Accepts either the 26-char ULID or the human-readable name.
+        #[arg(long = "id-or-name", alias = "id")]
+        id_or_name: String,
     },
     /// List nodes of a given type.
     List {
@@ -118,8 +120,8 @@ enum NodeOp {
     },
     /// Patch a node's metadata in place (merge or replace).
     Update {
-        #[arg(long)]
-        id: String,
+        #[arg(long = "id-or-name", alias = "id")]
+        id_or_name: String,
         /// JSON object patch. In `merge` mode (default), top-level keys
         /// overwrite existing metadata; `null` deletes the matching key
         /// (RFC 7396). In `replace` mode, the existing metadata is replaced
@@ -134,12 +136,15 @@ enum NodeOp {
 
 #[derive(Subcommand, Debug)]
 enum EdgeOp {
-    /// Create an edge.
+    /// Create an edge. The server mints the opaque ULID id.
     Create {
+        /// Optional human-readable label.
         #[arg(long)]
-        id: String,
+        name: Option<String>,
+        /// Source endpoint — ULID or node name.
         #[arg(long)]
         src: String,
+        /// Target endpoint — ULID or node name.
         #[arg(long)]
         tgt: String,
         #[arg(long)]
@@ -150,7 +155,7 @@ enum EdgeOp {
         #[arg(long, default_value = "{}")]
         metadata: String,
     },
-    /// List edges leaving `src`.
+    /// List edges leaving `src` (ULID or node name).
     From {
         #[arg(long)]
         src: String,
@@ -295,7 +300,7 @@ fn main() -> Result<()> {
 
         Command::Node { op } => match op {
             NodeOp::Create {
-                id,
+                name,
                 type_,
                 metadata,
                 sot_ref,
@@ -303,8 +308,10 @@ fn main() -> Result<()> {
                 let s = SqliteStorage::open(&db)?;
                 let meta: serde_json::Value =
                     serde_json::from_str(&metadata).context("parse --metadata as JSON")?;
+                let id = persona_wire_core::domain::graph::Ulid::new();
                 let node = Node {
-                    id: id.clone(),
+                    id,
+                    name: name.clone(),
                     r#type: type_,
                     sot_ref,
                     confidence: None,
@@ -316,14 +323,23 @@ fn main() -> Result<()> {
                     metadata: meta,
                 };
                 s.insert_node(&node)?;
-                println!("created node: {id}");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id.to_string(),
+                        "name": name,
+                    }))?
+                );
             }
-            NodeOp::Get { id } => {
+            NodeOp::Get { id_or_name } => {
                 let s = SqliteStorage::open(&db)?;
-                match s.get_node(&id)? {
+                let resolved = s
+                    .resolve_node_id_or_name(&id_or_name)?
+                    .ok_or_else(|| anyhow::anyhow!("not found: {id_or_name}"))?;
+                match s.get_node(&resolved)? {
                     Some(n) => println!("{}", serde_json::to_string_pretty(&n)?),
                     None => {
-                        eprintln!("not found: {id}");
+                        eprintln!("not found: {id_or_name}");
                         std::process::exit(1);
                     }
                 }
@@ -334,7 +350,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&nodes)?);
             }
             NodeOp::Update {
-                id,
+                id_or_name,
                 metadata_patch,
                 mode,
             } => {
@@ -347,7 +363,7 @@ fn main() -> Result<()> {
                     .context("parse --metadata-patch as JSON")?;
                 let out = wire_node_update(
                     WireNodeUpdateInput {
-                        id,
+                        id: id_or_name,
                         metadata_patch: patch,
                         mode,
                     },
@@ -364,7 +380,7 @@ fn main() -> Result<()> {
 
         Command::Edge { op } => match op {
             EdgeOp::Create {
-                id,
+                name,
                 src,
                 tgt,
                 kind,
@@ -375,10 +391,18 @@ fn main() -> Result<()> {
                 let meta: serde_json::Value =
                     serde_json::from_str(&metadata).context("parse --metadata as JSON")?;
                 let sev = severity.as_deref().map(parse_severity).transpose()?;
+                let src_id = s
+                    .resolve_node_id_or_name(&src)?
+                    .ok_or_else(|| anyhow::anyhow!("edge src node not found: {src}"))?;
+                let tgt_id = s
+                    .resolve_node_id_or_name(&tgt)?
+                    .ok_or_else(|| anyhow::anyhow!("edge tgt node not found: {tgt}"))?;
+                let id = persona_wire_core::domain::graph::Ulid::new();
                 let edge = Edge {
-                    id: id.clone(),
-                    src_node: src,
-                    tgt_node: tgt,
+                    id,
+                    name: name.clone(),
+                    src_node: src_id,
+                    tgt_node: tgt_id,
                     kind,
                     severity: sev,
                     metadata: meta,
@@ -386,11 +410,20 @@ fn main() -> Result<()> {
                     prev_id: None,
                 };
                 s.insert_edge(&edge)?;
-                println!("created edge: {id}");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id.to_string(),
+                        "name": name,
+                    }))?
+                );
             }
             EdgeOp::From { src } => {
                 let s = SqliteStorage::open(&db)?;
-                let edges = s.list_edges_from(&src)?;
+                let src_id = s
+                    .resolve_node_id_or_name(&src)?
+                    .ok_or_else(|| anyhow::anyhow!("node not found: {src}"))?;
+                let edges = s.list_edges_from(&src_id)?;
                 println!("{}", serde_json::to_string_pretty(&edges)?);
             }
         },
