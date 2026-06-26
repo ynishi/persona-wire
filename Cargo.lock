@@ -1250,12 +1250,14 @@ dependencies = [
  "persona-wire-adapter-sqlite-x",
  "persona-wire-core",
  "persona-wire-mcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]

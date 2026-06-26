@@ -18,8 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resolve_edge_id_or_name` helpers for the new identity model.
 - `WireQueryNode.name` field — slim-form query results now expose both
   the ULID `id` and the human-readable `name`.
-- `scripts/migrate_id_to_ulid.sql` — manual migration script for the
-  v0.6.x → v0.7.0 SQLite schema bump.
+- `migrate_id_to_ulid` binary (`crates/persona-wire/src/bin/`) —
+  v0.6.x → v0.7.0 SQLite data migration. Dry-run by default, requires
+  `--apply` to mutate; auto-backs up to `<db>.pre-ulid.bak` (override
+  with `--backup`), optional `--mapping-out <json>` dumps the old→new
+  id map. Idempotent at schema detection.
+- `scripts/migrate_id_to_ulid.sql` — pointer + validation-query stub
+  for the migration binary.
 
 ### Changed
 
