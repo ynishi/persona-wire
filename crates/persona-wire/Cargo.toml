@@ -10,9 +10,17 @@ keywords.workspace = true
 categories.workspace = true
 description = "persona-wire unified CLI — clap-based bin dispatching subcommands (init / node / edge / spec / projection / wire-init / wire-close / mcp). The `mcp` subcommand boots the stdio MCP server (persona-wire-mcp lib)."
 
+[lib]
+name = "persona_wire"
+path = "src/lib.rs"
+
 [[bin]]
 name = "persona-wire"
 path = "src/main.rs"
+
+[[bin]]
+name = "pw-migrate"
+path = "src/bin/pw-migrate.rs"
 
 [[bin]]
 name = "migrate_id_to_ulid"
