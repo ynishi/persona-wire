@@ -50,6 +50,25 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::error::{DomainError, WireResult};
+use crate::domain::graph::Ulid;
+
+// -- Surrogate ids -----------------------------------------------------------
+//
+// Identity model (v0.7+ extension): registry rows carry both the opaque
+// server-minted ULID `id` (sortable, immutable, used by `prev_id` chains and
+// rename-resistant references) and the human-readable `name`. Persona-Share
+// / Templating workflows that import rows from another graph mint a fresh
+// ULID per row so cross-graph collisions on `name` do not corrupt the
+// destination registry — the `name` field stays available for first-class
+// lookup and is the surface every existing CLI / MCP caller already speaks.
+//
+// `SpecificationId` / `ProjectionId` are type aliases over `ulid::Ulid`
+// (no newtype wrapper — same stance as `NodeId` / `EdgeId`). Distinguishing
+// `SpecificationId` from `ProjectionId` at the type level is intentionally
+// not enforced; parameter names and Registry boundaries carry that intent.
+
+pub type SpecificationId = Ulid;
+pub type ProjectionId = Ulid;
 
 // -- ProjectionName ----------------------------------------------------------
 

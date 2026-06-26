@@ -4,6 +4,7 @@
 //! JSON-serialised form of a `Specification`. Domain-neutral: callers register
 //! arbitrary Specifications (BP: Specification pattern).
 
+use crate::domain::entity::projection::SpecificationId;
 use crate::domain::error::{DomainError, WireError, WireResult};
 use crate::domain::specification::Specification;
 use crate::infrastructure::storage::SqliteStorage;
@@ -17,7 +18,9 @@ impl<'a> SpecRegistry<'a> {
         Self { storage }
     }
 
-    pub fn register(&self, name: &str, spec: &Specification) -> WireResult<()> {
+    /// Register (upsert) a Specification by name. Returns the row's ULID id
+    /// (newly minted on insert; preserved on overwrite).
+    pub fn register(&self, name: &str, spec: &Specification) -> WireResult<SpecificationId> {
         let expr = serde_json::to_string(spec)
             .map_err(|e| WireError::Domain(DomainError::InvalidSpec(e.to_string())))?;
         self.storage.upsert_specification(name, &expr)

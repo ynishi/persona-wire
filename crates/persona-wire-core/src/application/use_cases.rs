@@ -695,9 +695,24 @@ pub struct WireQueryOutput {
 pub fn wire_query(input: WireQueryInput, storage: &SqliteStorage) -> WireResult<WireQueryOutput> {
     let resolved: Specification = match (input.spec, input.spec_ref.as_deref()) {
         (Some(s), None) => s,
-        (None, Some(name)) => SpecRegistry::new(storage).get(name)?.ok_or_else(|| {
-            crate::domain::error::WireError::Domain(DomainError::NotFound(format!("spec: {name}")))
-        })?,
+        (None, Some(id_or_name)) => {
+            // spec_ref accepts ULID id OR registered name.
+            let name = match storage.resolve_specification_id_or_name(id_or_name)? {
+                Some(id) => storage.get_specification_name_by_id(&id)?.ok_or_else(|| {
+                    crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
+                        "spec: {id_or_name} (resolved id {id} has no row)"
+                    )))
+                })?,
+                None => {
+                    return Err(crate::domain::error::WireError::Domain(
+                        DomainError::NotFound(format!("spec: {id_or_name}")),
+                    ));
+                }
+            };
+            SpecRegistry::new(storage).get(&name)?.ok_or_else(|| {
+                crate::domain::error::WireError::Domain(DomainError::NotFound(format!("spec: {name}")))
+            })?
+        }
         (Some(_), Some(_)) => {
             return Err(crate::domain::error::WireError::Domain(
                 DomainError::InvalidSpec("spec and spec_ref are mutually exclusive".into()),
@@ -762,8 +777,24 @@ pub fn wire_render(
     storage: &SqliteStorage,
     registry: &PluginRegistry,
 ) -> WireResult<WireRenderOutput> {
+    // projection_ref accepts ULID id OR name (v0.7+ id_or_name resolver).
+    let projection_name = match storage.resolve_projection_id_or_name(&input.projection_ref)? {
+        Some(id) => storage
+            .get_projection_name_by_id(&id)?
+            .ok_or_else(|| {
+                crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
+                    "projection: {} (resolved id {} has no row)",
+                    input.projection_ref, id
+                )))
+            })?,
+        None => {
+            return Err(crate::domain::error::WireError::Domain(
+                DomainError::NotFound(format!("projection: {}", input.projection_ref)),
+            ));
+        }
+    };
     let proj = ProjectionRegistry::new(storage)
-        .get(&input.projection_ref)?
+        .get(&projection_name)?
         .ok_or_else(|| {
             crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
                 "projection: {}",
@@ -1119,13 +1150,17 @@ pub fn wire_edge_delete(
     })
 }
 
-/// Delete a Specification by name. Projections referencing it via spec_ref will
-/// start returning dangling-spec errors at render time (existing wire_render contract).
+/// Delete a Specification by ULID id or name. Projections referencing it via
+/// spec_ref will start returning dangling-spec errors at render time
+/// (existing wire_render contract).
 pub fn wire_spec_delete(
     input: WireDeleteInput,
     storage: &SqliteStorage,
 ) -> WireResult<WireDeleteOutput> {
-    let deleted = storage.delete_specification(&input.id_or_name)?;
+    let deleted = match storage.resolve_specification_id_or_name(&input.id_or_name)? {
+        Some(id) => storage.delete_specification(&id)?,
+        None => false,
+    };
     Ok(WireDeleteOutput {
         kind: "spec",
         id_or_name: input.id_or_name,
@@ -1133,12 +1168,15 @@ pub fn wire_spec_delete(
     })
 }
 
-/// Delete a NamedProjection by name.
+/// Delete a NamedProjection by ULID id or name.
 pub fn wire_projection_delete(
     input: WireDeleteInput,
     storage: &SqliteStorage,
 ) -> WireResult<WireDeleteOutput> {
-    let deleted = storage.delete_projection(&input.id_or_name)?;
+    let deleted = match storage.resolve_projection_id_or_name(&input.id_or_name)? {
+        Some(id) => storage.delete_projection(&id)?,
+        None => false,
+    };
     Ok(WireDeleteOutput {
         kind: "projection",
         id_or_name: input.id_or_name,
