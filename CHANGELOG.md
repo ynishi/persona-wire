@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.7.0] - 2026-06-27
+
+### Added
+
 - `pw-migrate` binary + `persona_wire::migrations` library framework
   (Diesel / sqlx style runner). Subcommands `list` / `status` /
   `up [--target ID]` / `apply <id>` over a `--db <path>` SQLite store.
