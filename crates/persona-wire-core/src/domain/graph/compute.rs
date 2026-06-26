@@ -37,10 +37,10 @@ pub fn traverse(
     let mut matched: Vec<Node> = Vec::new();
     let mut depth_reached: u32 = 0;
 
-    queue.push_back((start.clone(), 0));
+    queue.push_back((*start, 0));
 
     while let Some((id, depth)) = queue.pop_front() {
-        if !visited.insert(id.clone()) {
+        if !visited.insert(id) {
             continue;
         }
         if depth > depth_reached {

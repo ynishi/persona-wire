@@ -9,7 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Node.name` / `Edge.name` fields carry the human-readable label that
+  used to live in `Node.id` / `Edge.id`. `name` has no uniqueness
+  constraint; duplicates are allowed and surface as `WireError::AmbiguousName`
+  on `id_or_name` lookups.
+- `SqliteStorage::get_node_by_name`, `lookup_node_id_by_name`,
+  `lookup_edge_id_by_name`, `resolve_node_id_or_name`,
+  `resolve_edge_id_or_name` helpers for the new identity model.
+- `WireQueryNode.name` field — slim-form query results now expose both
+  the ULID `id` and the human-readable `name`.
+- `migrate_id_to_ulid` binary (`crates/persona-wire/src/bin/`) —
+  v0.6.x → v0.7.0 SQLite data migration. Dry-run by default, requires
+  `--apply` to mutate; auto-backs up to `<db>.pre-ulid.bak` (override
+  with `--backup`), optional `--mapping-out <json>` dumps the old→new
+  id map. Idempotent at schema detection.
+- `scripts/migrate_id_to_ulid.sql` — pointer + validation-query stub
+  for the migration binary.
+
 ### Changed
+
+- **BREAKING**: `NodeId` and `EdgeId` are now `ulid::Ulid` aliases (were
+  `String`). The server mints opaque ULIDs on row creation; the
+  human-readable label moves to the new `name` field.
+- **BREAKING**: `wire_node_create` / `wire_edge_create` / batch variants
+  accept `name` instead of `id`. The response now returns
+  `{"id": "<26-char ULID>", "name": "..."}`.
+- **BREAKING**: `wire_node_update` / `wire_node_delete` / `wire_edge_delete`
+  / `wire_edge_create.src` / `.tgt` / CLI `--id` flags accept either a
+  ULID or a `name` (resolved internally via `resolve_*_id_or_name`).
+  `AmbiguousName` is returned when a `name` resolves to multiple rows.
+- **BREAKING**: `SqliteStorage::delete_node`, `delete_edge`,
+  `update_node_metadata` now take `&NodeId` / `&EdgeId` instead of `&str`.
+- `list_nodes_by_type` / `list_edges_*` now `ORDER BY name, id` instead
+  of `ORDER BY id` so callers see a deterministic human-readable order.
+- SQLite schema gains `nodes.name` / `edges.name` columns and matching
+  `idx_nodes_name` / `idx_edges_name` indexes (compatible ALTER via the
+  manual migration script).
 
 ### Deprecated
 

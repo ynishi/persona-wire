@@ -78,22 +78,31 @@ or `metadata.maintenance_exempt: true` are recognised as **self-attached**
 and are excluded from the `wire_doctor` / `wire_close` orphan count, so an
 edge-less wiring entry will not be flagged as a graph-health issue).
 
+**Identity model (v0.7+)**: `wire_node_create` / `wire_edge_create` accept
+a human-readable `name` only; the server mints the opaque ULID `id` and
+returns it in the response (`{"id": "<26-char ULID>", "name": "..."}`).
+All subsequent operations (`wire_node_update` / `wire_node_delete` /
+`wire_edge_delete` / `wire_edge_create.src` / `.tgt`) accept either the
+ULID **or** the `name` and resolve internally. Two rows with the same
+`name` are allowed at the storage layer — but the resolver returns
+`AmbiguousName` and forces ULID disambiguation when that happens.
+
 ```jsonc
-// MCP: wire_node_create
-{ "id": "alpha",                "type": "persona",
+// MCP: wire_node_create  (server mints id, returns {id, name})
+{ "name": "alpha",                "type": "persona",
   "metadata": { "display": "alpha" } }
 
-{ "id": "alpha.active",         "type": "outline_node",
+{ "name": "alpha.active",         "type": "outline_node",
   "metadata": { "persona": "alpha", "axis": "active",
                 "source_uri": "mini-app://alpha_active_context" } }
 
-{ "id": "alpha.handoff",        "type": "outline_node",
+{ "name": "alpha.handoff",        "type": "outline_node",
   "metadata": { "persona": "alpha", "axis": "handoff",
                 "source_uri": "file:~/path/to/alpha/handoff/" } }
 
-// MCP: wire_edge_create
-{ "id": "e.alpha.active",  "src": "alpha", "tgt": "alpha.active",  "kind": "routes_to" }
-{ "id": "e.alpha.handoff", "src": "alpha", "tgt": "alpha.handoff", "kind": "routes_to" }
+// MCP: wire_edge_create  (src/tgt accept ULID or name)
+{ "name": "e.alpha.active",  "src": "alpha", "tgt": "alpha.active",  "kind": "routes_to" }
+{ "name": "e.alpha.handoff", "src": "alpha", "tgt": "alpha.handoff", "kind": "routes_to" }
 ```
 
 `source_uri` schemes supported today:
@@ -214,7 +223,7 @@ mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<di
 
 // 2. Reference it from a wiring entry. `?scope=user` is optional —
 //    the legacy URI form (no `?scope=`) falls back to global first.
-{ "id":   "shi.mailbox",
+{ "name": "shi.mailbox",
   "type": "outline_node",
   "metadata": {
     "persona":    "shi",
@@ -254,13 +263,16 @@ join to the NamedProjection template (handlebars `{{#each}}` +
 
 ## 2c. Tuning an existing wiring entry — `wire_node_update`
 
-Wiring entries are tuned in place via `wire_node_update`. The node
-`id` is preserved, so Specifications and edges referencing the entry
-stay intact — no delete + recreate dance is needed.
+Wiring entries are tuned in place via `wire_node_update`. The opaque
+ULID `id` is preserved, so Specifications and edges referencing the
+entry stay intact — no delete + recreate dance is needed. The `id`
+field accepts either the ULID or the human-readable `name`.
 
 ```jsonc
 // Default: metadata_patch mode (RFC 7396 shallow merge).
 // Only the listed keys are touched; the rest of `metadata` is kept.
+// `id` here is the `id_or_name` resolver input — pass the ULID or
+// the original `name` you used in wire_node_create.
 {
   "id": "alpha.mailbox",
   "metadata_patch": {
@@ -495,7 +507,7 @@ All three are the same shape: a Projection over Nodes whose metadata says
    ```jsonc
    // MCP: wire_node_create
    {
-     "id":   "alpha.handoff",
+     "name": "alpha.handoff",
      "type": "outline_node",
      "metadata": {
        "persona":         "alpha",

@@ -63,7 +63,7 @@ fn assert_static_projection_kind(
 /// async `wire_prompt_context` path; see the crate-level "Slot vocabulary"
 /// rationale in [`crate`] docs.
 fn build_broadcast_render_data(matched: &[Node], persona_id: Option<&str>) -> serde_json::Value {
-    let names: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
+    let names: Vec<&str> = matched.iter().map(|n| n.name.as_str()).collect();
     let nodes_json: Vec<serde_json::Value> = matched
         .iter()
         .map(|n| {
@@ -394,7 +394,7 @@ fn collect_slot(
     warnings: &mut Vec<String>,
 ) -> WireResult<Option<CollectedSlot>> {
     let node_id = format!("{}.{}", persona_id, slot);
-    let Some(node) = storage.get_node(&node_id)? else {
+    let Some(node) = storage.get_node_by_name(&node_id)? else {
         return Ok(None);
     };
     let Some(source_uri) = crate::application::wiring_mapper::extract_source_uri(&node) else {
@@ -676,6 +676,7 @@ pub struct WireQueryInput {
 #[derive(Debug)]
 pub struct WireQueryNode {
     pub id: String,
+    pub name: String,
     pub r#type: String,
     pub metadata: serde_json::Value,
 }
@@ -720,7 +721,8 @@ pub fn wire_query(input: WireQueryInput, storage: &SqliteStorage) -> WireResult<
     let matched = slice
         .into_iter()
         .map(|n| WireQueryNode {
-            id: n.id,
+            id: n.id.to_string(),
+            name: n.name,
             r#type: n.r#type,
             metadata: n.metadata,
         })
@@ -1008,7 +1010,10 @@ pub fn wire_node_update(
             type_name_of(&input.metadata_patch)
         )));
     }
-    let Some(existing) = storage.get_node(&input.id)? else {
+    let resolved = storage
+        .resolve_node_id_or_name(&input.id)?
+        .ok_or_else(|| WireError::Domain(DomainError::NotFound(format!("node: {}", input.id))))?;
+    let Some(existing) = storage.get_node(&resolved)? else {
         return Err(WireError::Domain(DomainError::NotFound(format!(
             "node: {}",
             input.id
@@ -1035,7 +1040,7 @@ pub fn wire_node_update(
         }
     };
 
-    let updated = storage.update_node_metadata(&input.id, &final_metadata)?;
+    let updated = storage.update_node_metadata(&resolved, &final_metadata)?;
     if !updated {
         // Defensive: get_node saw a row but UPDATE matched 0 — should not
         // happen under single-writer SQLite, but surface explicitly if it does.
@@ -1087,7 +1092,10 @@ pub fn wire_node_delete(
     input: WireDeleteInput,
     storage: &SqliteStorage,
 ) -> WireResult<WireDeleteOutput> {
-    let deleted = storage.delete_node(&input.id_or_name)?;
+    let deleted = match storage.resolve_node_id_or_name(&input.id_or_name)? {
+        None => false,
+        Some(id) => storage.delete_node(&id)?,
+    };
     Ok(WireDeleteOutput {
         kind: "node",
         id_or_name: input.id_or_name,
@@ -1100,7 +1108,10 @@ pub fn wire_edge_delete(
     input: WireDeleteInput,
     storage: &SqliteStorage,
 ) -> WireResult<WireDeleteOutput> {
-    let deleted = storage.delete_edge(&input.id_or_name)?;
+    let deleted = match storage.resolve_edge_id_or_name(&input.id_or_name)? {
+        None => false,
+        Some(id) => storage.delete_edge(&id)?,
+    };
     Ok(WireDeleteOutput {
         kind: "edge",
         id_or_name: input.id_or_name,
@@ -1352,7 +1363,7 @@ fn node_to_summary(node: Node) -> WireResult<WorkflowSummary> {
     let action = workflow_mapper::extract_action_value(&node);
     let enabled = workflow_mapper::extract_enabled(&node);
     Ok(WorkflowSummary {
-        id: node.id,
+        id: node.name,
         persona_id,
         trigger,
         action,
@@ -1411,7 +1422,14 @@ pub fn wire_workflow_fire(
     // Collect candidate workflows as Domain Entities. Gating below dispatches
     // on the typed `Trigger` / `Action` sum types instead of JSON probing.
     let candidates: Vec<Workflow> = if let Some(id) = input.id.as_ref() {
-        let Some(node) = storage.get_node(id)? else {
+        let resolved = storage.resolve_node_id_or_name(id)?;
+        let Some(node_id) = resolved else {
+            return Ok(WireWorkflowFireOutput {
+                fired: vec![],
+                skipped: vec![(id.clone(), "workflow not found".to_string())],
+            });
+        };
+        let Some(node) = storage.get_node(&node_id)? else {
             return Ok(WireWorkflowFireOutput {
                 fired: vec![],
                 skipped: vec![(id.clone(), "workflow not found".to_string())],
@@ -1502,7 +1520,7 @@ pub fn wire_workflow_fire(
 mod tests {
     use super::*;
     use crate::domain::entity::projection::{PluginDispatch, Projection};
-    use crate::domain::graph::{Edge, Node};
+    use crate::domain::graph::{ulid_from_seed, Edge, Node};
     use serde_json::json;
 
     fn setup() -> SqliteStorage {
@@ -1518,7 +1536,8 @@ mod tests {
 
     fn bare_node(id: &str, type_: &str) -> Node {
         Node {
-            id: id.into(),
+            id: ulid_from_seed(id),
+            name: id.into(),
             r#type: type_.into(),
             sot_ref: None,
             confidence: None,
@@ -1625,9 +1644,10 @@ mod tests {
             s.insert_node(&bare_node(id, "persona")).unwrap();
         }
         s.insert_edge(&Edge {
-            id: "e1".into(),
-            src_node: "a".into(),
-            tgt_node: "b".into(),
+            id: ulid_from_seed("e1"),
+            name: Some("e1".into()),
+            src_node: ulid_from_seed("a"),
+            tgt_node: ulid_from_seed("b"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -1791,9 +1811,10 @@ mod tests {
         s.insert_node(&bare_node("a", "persona")).unwrap();
         s.insert_node(&bare_node("b", "persona")).unwrap();
         s.insert_edge(&Edge {
-            id: "e1".into(),
-            src_node: "a".into(),
-            tgt_node: "b".into(),
+            id: ulid_from_seed("e1"),
+            name: Some("e1".into()),
+            src_node: ulid_from_seed("a"),
+            tgt_node: ulid_from_seed("b"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -2177,9 +2198,10 @@ mod tests {
         s.insert_node(&bare_node("b", "persona")).unwrap();
         s.insert_node(&bare_node("c", "persona")).unwrap();
         s.insert_edge(&Edge {
-            id: "e_ab".into(),
-            src_node: "a".into(),
-            tgt_node: "b".into(),
+            id: ulid_from_seed("e_ab"),
+            name: Some("e_ab".into()),
+            src_node: ulid_from_seed("a"),
+            tgt_node: ulid_from_seed("b"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -2188,9 +2210,10 @@ mod tests {
         })
         .unwrap();
         s.insert_edge(&Edge {
-            id: "e_ca".into(),
-            src_node: "c".into(),
-            tgt_node: "a".into(),
+            id: ulid_from_seed("e_ca"),
+            name: Some("e_ca".into()),
+            src_node: ulid_from_seed("c"),
+            tgt_node: ulid_from_seed("a"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -2200,9 +2223,10 @@ mod tests {
         .unwrap();
         // 無関係 edge
         s.insert_edge(&Edge {
-            id: "e_bc".into(),
-            src_node: "b".into(),
-            tgt_node: "c".into(),
+            id: ulid_from_seed("e_bc"),
+            name: Some("e_bc".into()),
+            src_node: ulid_from_seed("b"),
+            tgt_node: ulid_from_seed("c"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -2219,9 +2243,9 @@ mod tests {
         )
         .unwrap();
         // a を参照する edge は両方消える、 無関係 edge は残る
-        assert!(s.get_edge(&"e_ab".to_string()).unwrap().is_none());
-        assert!(s.get_edge(&"e_ca".to_string()).unwrap().is_none());
-        assert!(s.get_edge(&"e_bc".to_string()).unwrap().is_some());
+        assert!(s.get_edge(&ulid_from_seed("e_ab")).unwrap().is_none());
+        assert!(s.get_edge(&ulid_from_seed("e_ca")).unwrap().is_none());
+        assert!(s.get_edge(&ulid_from_seed("e_bc")).unwrap().is_some());
     }
 
     // ---- P3a Phase 2 (c) — projection_kind dispatch ----
@@ -2335,7 +2359,8 @@ mod tests {
         use crate::application::wiring_mapper;
         use crate::domain::entity::{PersonaId, Slot, Source};
         s.insert_node(&Node {
-            id: id.into(),
+            id: ulid_from_seed(id),
+            name: id.into(),
             r#type: wiring_mapper::WIRING_TYPE.into(),
             sot_ref: None,
             confidence: Some(1.0),
@@ -2374,7 +2399,8 @@ mod tests {
         assert_eq!(out.id, "shi.mailbox");
         assert_eq!(out.mode, WireNodeUpdateMode::Merge);
         let synthetic = Node {
-            id: out.id.clone(),
+            id: ulid_from_seed(&out.id),
+            name: out.id.clone(),
             r#type: wiring_mapper::WIRING_TYPE.into(),
             sot_ref: None,
             confidence: None,
@@ -2392,7 +2418,7 @@ mod tests {
         assert_eq!(wiring_mapper::extract_persona(&synthetic), Some("shi"));
         assert_eq!(wiring_mapper::extract_slot(&synthetic), Some("mailbox"));
         // 永続化検証
-        let stored = s.get_node(&"shi.mailbox".to_string()).unwrap().unwrap();
+        let stored = s.get_node_by_name("shi.mailbox").unwrap().unwrap();
         assert_eq!(
             wiring_mapper::extract_source_uri(&stored),
             Some("mini-app://mailbox?alias=for_shi&limit=10")
@@ -2415,7 +2441,8 @@ mod tests {
         .unwrap();
         // slot key (legacy `axis`) は消える、 persona と source_uri は残る
         let synthetic = Node {
-            id: out.id.clone(),
+            id: ulid_from_seed(&out.id),
+            name: out.id.clone(),
             r#type: wiring_mapper::WIRING_TYPE.into(),
             sot_ref: None,
             confidence: None,
@@ -2451,7 +2478,8 @@ mod tests {
         use crate::application::wiring_mapper;
         assert_eq!(out.metadata, json!({"only_field": 42}));
         let synthetic = Node {
-            id: out.id.clone(),
+            id: ulid_from_seed(&out.id),
+            name: out.id.clone(),
             r#type: wiring_mapper::WIRING_TYPE.into(),
             sot_ref: None,
             confidence: None,

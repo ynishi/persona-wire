@@ -32,7 +32,7 @@ use serde_json::{Map, Value};
 use crate::domain::entity::workflow::{Action, Trigger, Workflow, WorkflowId};
 use crate::domain::entity::{PersonaId, Slot};
 use crate::domain::error::{DomainError, WireError, WireResult};
-use crate::domain::graph::Node;
+use crate::domain::graph::{ulid_from_seed, Node};
 
 /// Storage `Node.r#type` literal for a Workflow. Single SoT — internal
 /// use-case code and tests reference this constant instead of re-typing the
@@ -178,7 +178,8 @@ pub fn workflow_to_node(w: &Workflow) -> Node {
     metadata.insert("action".to_owned(), action_to_json(w.action()));
     metadata.insert("enabled".to_owned(), Value::Bool(w.enabled()));
     Node {
-        id: w.id().as_str().to_owned(),
+        id: ulid_from_seed(w.id().as_str()),
+        name: w.id().as_str().to_owned(),
         r#type: WORKFLOW_TYPE.to_owned(),
         sot_ref: None,
         confidence: None,
@@ -202,7 +203,7 @@ pub fn node_to_workflow(node: &Node) -> WireResult<Workflow> {
             node.r#type
         )));
     }
-    let id = WorkflowId::new(node.id.clone())?;
+    let id = WorkflowId::new(node.name.clone())?;
     let meta = node
         .metadata
         .as_object()
@@ -317,7 +318,8 @@ mod tests {
     #[test]
     fn node_to_workflow_rejects_wrong_type() {
         let node = Node {
-            id: "n1".into(),
+            id: ulid_from_seed("n1"),
+            name: "n1".into(),
             r#type: "outline_node".into(),
             sot_ref: None,
             confidence: None,
@@ -347,9 +349,10 @@ mod tests {
 
     #[test]
     fn node_to_workflow_propagates_empty_workflow_id() {
-        // 空 Node.id が WorkflowId::new の VO invariant に当たって reject される (DTO → Entity 経路の VO propagation)。
+        // 空 Node.name が WorkflowId::new の VO invariant に当たって reject される (DTO → Entity 経路の VO propagation)。
         let node = Node {
-            id: String::new(),
+            id: ulid_from_seed(""),
+            name: String::new(),
             r#type: WORKFLOW_TYPE.into(),
             sot_ref: None,
             confidence: None,

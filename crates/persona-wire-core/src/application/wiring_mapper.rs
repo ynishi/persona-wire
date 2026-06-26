@@ -122,19 +122,19 @@ pub fn node_to_wiring(
     let persona = extract_persona(node).ok_or_else(|| {
         DomainError::InvalidMetadata(format!(
             "wiring node '{}' missing metadata.{META_PERSONA}",
-            node.id
+            node.name
         ))
     })?;
     let slot = extract_slot(node).ok_or_else(|| {
         DomainError::InvalidMetadata(format!(
             "wiring node '{}' missing metadata.{META_SLOT}",
-            node.id
+            node.name
         ))
     })?;
     let source = extract_source_uri(node).ok_or_else(|| {
         DomainError::InvalidMetadata(format!(
             "wiring node '{}' missing metadata.{META_SOURCE_URI}",
-            node.id
+            node.name
         ))
     })?;
     Ok(Wiring::new(
@@ -179,11 +179,13 @@ pub fn wiring_metadata_object(
 mod tests {
     use super::*;
     use crate::domain::entity::ProjectionName;
+    use crate::domain::graph::ulid_from_seed;
     use serde_json::json;
 
     fn raw_node(id: &str, metadata: Value) -> Node {
         Node {
-            id: id.into(),
+            id: ulid_from_seed(id),
+            name: id.into(),
             r#type: WIRING_TYPE.into(),
             sot_ref: None,
             confidence: None,

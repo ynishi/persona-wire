@@ -59,7 +59,7 @@ fn mcp_adapter_round_trips_through_inner_persona_wire_mcp() {
     outer.call_tool_text(
         "wire_node_create",
         json!({
-            "id": "inner",
+            "name": "inner",
             "type": "mcp_server",
             "metadata": {
                 "endpoint": endpoint,
@@ -100,7 +100,7 @@ fn mcp_adapter_round_trips_through_inner_persona_wire_mcp() {
     outer.call_tool_text(
         "wire_node_create",
         json!({
-            "id": persona,
+            "name": persona,
             "type": "persona",
             "metadata": {},
         }),
@@ -108,7 +108,7 @@ fn mcp_adapter_round_trips_through_inner_persona_wire_mcp() {
     outer.call_tool_text(
         "wire_node_create",
         json!({
-            "id": entry_id,
+            "name": entry_id,
             "type": "outline_node",
             "metadata": {
                 "persona": persona,
@@ -120,7 +120,7 @@ fn mcp_adapter_round_trips_through_inner_persona_wire_mcp() {
     outer.call_tool_text(
         "wire_edge_create",
         json!({
-            "id": format!("e.{persona}.{slot}"),
+            "name": format!("e.{persona}.{slot}"),
             "src": persona,
             "tgt": entry_id,
             "kind": "routes_to",

@@ -14,8 +14,14 @@ description = "persona-wire unified CLI — clap-based bin dispatching subcomman
 name = "persona-wire"
 path = "src/main.rs"
 
+[[bin]]
+name = "migrate_id_to_ulid"
+path = "src/bin/migrate_id_to_ulid.rs"
+
 [dependencies]
 persona-wire-core.workspace = true
+rusqlite.workspace = true
+ulid.workspace = true
 persona-wire-adapter-mini-app.workspace = true
 persona-wire-adapter-obsidian.workspace = true
 persona-wire-adapter-persona-pack.workspace = true

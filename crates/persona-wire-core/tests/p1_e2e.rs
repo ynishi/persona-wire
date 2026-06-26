@@ -12,14 +12,15 @@ use persona_wire_core::application::use_cases::{
 };
 use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
 use persona_wire_core::domain::entity::TargetForm;
-use persona_wire_core::domain::graph::{Edge, Node, Severity};
+use persona_wire_core::domain::graph::{ulid_from_seed, Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;
 use serde_json::json;
 
 fn bare_node(id: &str, type_: &str, metadata: serde_json::Value) -> Node {
     Node {
-        id: id.into(),
+        id: ulid_from_seed(id),
+        name: id.into(),
         r#type: type_.into(),
         sot_ref: None,
         confidence: None,
@@ -61,9 +62,10 @@ fn full_pipeline_init_seed_register_render_close() {
 
     storage
         .insert_edge(&Edge {
-            id: "e_shi_mia".into(),
-            src_node: "alpha".into(),
-            tgt_node: "beta".into(),
+            id: ulid_from_seed("e_shi_mia"),
+            name: Some("e_shi_mia".into()),
+            src_node: ulid_from_seed("alpha"),
+            tgt_node: ulid_from_seed("beta"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -73,9 +75,10 @@ fn full_pipeline_init_seed_register_render_close() {
         .unwrap();
     storage
         .insert_edge(&Edge {
-            id: "e_shi_misaki".into(),
-            src_node: "alpha".into(),
-            tgt_node: "gamma".into(),
+            id: ulid_from_seed("e_shi_misaki"),
+            name: Some("e_shi_misaki".into()),
+            src_node: ulid_from_seed("alpha"),
+            tgt_node: ulid_from_seed("gamma"),
             kind: "routes_to".into(),
             severity: None,
             metadata: json!({}),
@@ -85,9 +88,10 @@ fn full_pipeline_init_seed_register_render_close() {
         .unwrap();
     storage
         .insert_edge(&Edge {
-            id: "e_mia_review".into(),
-            src_node: "beta".into(),
-            tgt_node: "note1".into(),
+            id: ulid_from_seed("e_mia_review"),
+            name: Some("e_mia_review".into()),
+            src_node: ulid_from_seed("beta"),
+            tgt_node: ulid_from_seed("note1"),
             kind: "triggers_review_of".into(),
             severity: Some(Severity::Hard),
             metadata: json!({}),

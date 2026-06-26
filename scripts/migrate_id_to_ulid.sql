@@ -1,0 +1,47 @@
+-- persona-wire v0.6.x → v0.7.0 schema migration: stringly `id` → ULID + name
+-- ==========================================================================
+--
+-- ⚠ DO NOT RUN THIS FILE DIRECTLY ⚠
+--
+-- This is a documentation stub. The real migration lives in the Rust binary
+-- `migrate_id_to_ulid` (see `crates/persona-wire/src/bin/migrate_id_to_ulid.rs`):
+--
+--   # 1. Dry-run first — no mutation, prints id-mapping plan.
+--   cargo run -p persona-wire --bin migrate_id_to_ulid -- --db <path>
+--
+--   # 2. Apply (mandatory backup; mapping dump optional).
+--   cargo run -p persona-wire --bin migrate_id_to_ulid -- --db <path> --apply \
+--       --backup <backup-path>           \
+--       --mapping-out <id-mapping.json>
+--
+-- The Rust binary mints proper monotonic ULIDs (`ulid::Ulid::new()`), drives
+-- the chained-FK UPDATE inside a single transaction with `PRAGMA
+-- foreign_key_check`, and only commits when post-migration sanity passes.
+-- A pure-SQL implementation was attempted but rejected because SQLite has
+-- no native ULID minting and the hex→Crockford approximation produces
+-- invalid 26-char tokens for some inputs.
+--
+-- ---------------------------------------------------------------------------
+-- Validation queries (run after the Rust binary commits; all should be 0).
+-- ---------------------------------------------------------------------------
+
+-- Every PK is a 26-char Crockford-base32 string?
+-- SELECT COUNT(*) FROM nodes WHERE length(id) != 26;
+-- SELECT COUNT(*) FROM edges WHERE length(id) != 26;
+
+-- FK pointers consistent?
+-- SELECT * FROM edges WHERE src_node NOT IN (SELECT id FROM nodes);
+-- SELECT * FROM edges WHERE tgt_node NOT IN (SELECT id FROM nodes);
+
+-- Version chain still wires to a live row?
+-- SELECT * FROM versions WHERE target_kind = 'node'
+--   AND target_id NOT IN (SELECT id FROM nodes);
+-- SELECT * FROM versions WHERE target_kind = 'edge'
+--   AND target_id NOT IN (SELECT id FROM edges);
+
+-- Duplicate `name` review (allowed by design — but `id_or_name` lookups
+-- return WireError::AmbiguousName for these rows, so audit before relying
+-- on name-only resolution).
+-- SELECT name, COUNT(*) FROM nodes GROUP BY name HAVING COUNT(*) > 1;
+-- SELECT name, COUNT(*) FROM edges WHERE name IS NOT NULL
+--   GROUP BY name HAVING COUNT(*) > 1;

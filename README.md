@@ -101,6 +101,31 @@ cargo run -p persona-wire -- init --db /tmp/wire.db
 cargo run -p persona-wire -- mcp
 ```
 
+## Migrating v0.6.x → v0.7.0 (ULID identity model)
+
+`v0.7.0` swaps the stringly `id` columns on `nodes` / `edges` for opaque
+ULIDs, and moves the human-readable label to the new `name` column.
+A dedicated binary handles the chained schema + data rewrite for
+existing stores:
+
+```sh
+# 1. Dry-run first (default). Inspects the schema, builds the id mapping
+#    in memory, and reports what would happen — NO mutation.
+cargo run -p persona-wire --bin migrate_id_to_ulid -- --db <path>
+
+# 2. Apply for real. Backup is mandatory; default destination is
+#    `<db>.pre-ulid.bak` (sibling of the source). Pass `--backup <path>`
+#    to override, `--mapping-out <json>` to persist the old→new id map.
+cargo run -p persona-wire --bin migrate_id_to_ulid -- --db <path> --apply \
+    --mapping-out /tmp/persona-wire-id-mapping.json
+```
+
+The binary opens a single `BEGIN IMMEDIATE` transaction with foreign keys
+temporarily disabled, rewrites every FK + version pointer, flips the
+PKs, validates via `PRAGMA foreign_key_check`, and only commits on a
+clean post-migration sanity pass. Re-running on an already-migrated DB
+is a no-op (skipped at schema detection).
+
 ## License
 
 Dual: MIT OR Apache-2.0.

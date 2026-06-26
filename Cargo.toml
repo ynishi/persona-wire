@@ -47,6 +47,9 @@ url = "2"
 # Plugin trait (dyn-compatible async fn — Adapter / Projection)
 async-trait = "0.1"
 
+# ULID for opaque node/edge ids
+ulid = { version = "1", features = ["serde"] }
+
 # Obsidian vault frontmatter parse (YAML / TOML / JSON multiformat)
 gray_matter = "0.2"
 
