@@ -55,6 +55,7 @@
 //! Wiring / Workflow live behind it as configuration data the Repository
 //! pattern already handles.
 
+pub mod bundle;
 pub mod context_wiring;
 pub mod persona_id;
 pub mod projection;
@@ -63,6 +64,10 @@ pub mod source;
 pub mod wiring;
 pub mod workflow;
 
+pub use bundle::{
+    Bundle, BundleId, BundleInstallReport, BundleName, BundleRef, BundleVersion, ConflictMode,
+    ErrorItem, InstalledItem, SkippedItem,
+};
 pub use persona_id::PersonaId;
 pub use projection::{
     PluginDispatch, Projection, ProjectionName, ProjectionTemplate, SpecName, SpecRef, TargetForm,

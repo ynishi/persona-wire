@@ -5,6 +5,8 @@
 //! - [`projection_registry`] — NamedProjection registry (fixed / named view)
 //! - [`use_cases`]           — wire_init / wire_close / wire_doctor / etc. flows
 
+pub mod bundle_install;
+pub mod bundle_registry;
 pub mod doctor;
 pub mod merger;
 pub mod plugin_registry;

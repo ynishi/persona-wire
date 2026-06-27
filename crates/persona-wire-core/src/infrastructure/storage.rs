@@ -96,6 +96,14 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
+    /// Borrow the underlying `rusqlite::Connection` for tests that need
+    /// to verify SQL-level state (row counts, raw column reads) that the
+    /// public API does not expose.
+    #[cfg(test)]
+    pub(crate) fn conn_for_test(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn open(path: &str) -> WireResult<Self> {
         let conn = Connection::open(path).map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(Self { conn })
@@ -565,6 +573,181 @@ impl SqliteStorage {
             .map_err(|e| WireError::Storage(e.to_string()))
     }
 
+    // ---- Bundles ----
+
+    /// Upsert a Bundle by name. Returns the row's ULID `id` (newly minted
+    /// on insert; preserved on update of an existing name). `created_at`
+    /// is set only on insert; `updated_at` always to `now_secs`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_bundle(
+        &self,
+        name: &str,
+        version: &str,
+        description: Option<&str>,
+        body: &str,
+        now_secs: i64,
+    ) -> WireResult<crate::domain::entity::bundle::BundleId> {
+        let existing = self.lookup_bundle_id_by_name(name)?;
+        let id = existing.unwrap_or_else(Ulid::new);
+        self.conn
+            .execute(
+                "INSERT INTO bundles (id, name, version, description, body, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
+                 ON CONFLICT(name) DO UPDATE SET \
+                    version = excluded.version, \
+                    description = excluded.description, \
+                    body = excluded.body, \
+                    updated_at = excluded.updated_at",
+                params![id.to_string(), name, version, description, body, now_secs],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(id)
+    }
+
+    /// Lookup a Bundle's `id` from its `name`. Returns `Ok(None)` for no
+    /// match; `name` is UNIQUE so multi-row resolution cannot occur.
+    pub fn lookup_bundle_id_by_name(
+        &self,
+        name: &str,
+    ) -> WireResult<Option<crate::domain::entity::bundle::BundleId>> {
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM bundles WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        row.map(|s| Ulid::from_string(&s).map_err(|e| WireError::Storage(e.to_string())))
+            .transpose()
+    }
+
+    /// Resolve a string that is either a 26-char ULID or a `name` to a
+    /// concrete `BundleId`.
+    pub fn resolve_bundle_id_or_name(
+        &self,
+        id_or_name: &str,
+    ) -> WireResult<Option<crate::domain::entity::bundle::BundleId>> {
+        if let Ok(ulid) = Ulid::from_string(id_or_name) {
+            // Validate the id actually exists; otherwise treat as not-found.
+            let exists: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM bundles WHERE id = ?1",
+                    params![ulid.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| WireError::Storage(e.to_string()))?;
+            return Ok(exists.map(|_| ulid));
+        }
+        self.lookup_bundle_id_by_name(id_or_name)
+    }
+
+    /// Read a full Bundle row by `name`. Returns `Ok(None)` for no match.
+    pub fn get_bundle_by_name(
+        &self,
+        name: &str,
+    ) -> WireResult<Option<crate::domain::entity::bundle::Bundle>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, version, description, body, created_at, updated_at \
+                 FROM bundles WHERE name = ?1",
+                params![name],
+                row_to_bundle,
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Read a full Bundle row by `id`. Returns `Ok(None)` for no match.
+    pub fn get_bundle_by_id(
+        &self,
+        id: crate::domain::entity::bundle::BundleId,
+    ) -> WireResult<Option<crate::domain::entity::bundle::Bundle>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, version, description, body, created_at, updated_at \
+                 FROM bundles WHERE id = ?1",
+                params![id.to_string()],
+                row_to_bundle,
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// List bundles in name-ascending order. Returns lightweight summary
+    /// rows (id / name / version / description) — the full TOML body is
+    /// fetched only via `get_bundle_by_*` to keep list payloads bounded.
+    pub fn list_bundles(
+        &self,
+    ) -> WireResult<Vec<crate::domain::entity::bundle::Bundle>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, version, description, body, created_at, updated_at \
+                 FROM bundles ORDER BY name",
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map([], row_to_bundle)
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Delete a Bundle by `name`. Returns `true` if a row was removed,
+    /// `false` if no row matched. Cascades on `bundle_installs` are not
+    /// declared at the schema level — install history outlives the bundle
+    /// row so a future History UI can still surface "this bundle was once
+    /// installed" entries after deletion.
+    pub fn delete_bundle_by_name(&self, name: &str) -> WireResult<bool> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM bundles WHERE name = ?1", params![name])
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    /// Delete a Bundle by `id`. Returns `true` if a row was removed.
+    pub fn delete_bundle_by_id(
+        &self,
+        id: crate::domain::entity::bundle::BundleId,
+    ) -> WireResult<bool> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM bundles WHERE id = ?1", params![id.to_string()])
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    /// Append one install log entry to `bundle_installs`. Called from the
+    /// install use case after dispatch completes (success or partial).
+    pub fn append_bundle_install(
+        &self,
+        install_id: crate::domain::entity::bundle::BundleId,
+        bundle_id: crate::domain::entity::bundle::BundleId,
+        mode: &str,
+        installed_at: i64,
+        report_json: &str,
+    ) -> WireResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO bundle_installs (install_id, bundle_id, mode, installed_at, report) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    install_id.to_string(),
+                    bundle_id.to_string(),
+                    mode,
+                    installed_at,
+                    report_json,
+                ],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     // ---- Projections ----
 
     /// Upsert a NamedProjection row. `template_engine` / `projection_kind` /
@@ -888,6 +1071,30 @@ fn row_to_edge(row: &Row) -> rusqlite::Result<Edge> {
     })
 }
 
+fn row_to_bundle(row: &Row<'_>) -> rusqlite::Result<crate::domain::entity::bundle::Bundle> {
+    use crate::domain::entity::bundle::{Bundle, BundleName, BundleVersion};
+    let id_str: String = row.get(0)?;
+    let name_str: String = row.get(1)?;
+    let version_str: String = row.get(2)?;
+    let description: Option<String> = row.get(3)?;
+    let body: String = row.get(4)?;
+    let created_at: i64 = row.get(5)?;
+    let updated_at: i64 = row.get(6)?;
+    let id = text_to_ulid(&id_str)?;
+    // Domain VOs were already validated on insert, so non-empty is an
+    // invariant. Re-validate defensively at the read boundary so a corrupt
+    // row surfaces as a typed error rather than a downstream panic.
+    let name = BundleName::new(name_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(1, SqlType::Text, Box::new(std::io::Error::other(e.to_string())))
+    })?;
+    let version = BundleVersion::new(version_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, SqlType::Text, Box::new(std::io::Error::other(e.to_string())))
+    })?;
+    Bundle::new(id, name, version, description, body, created_at, updated_at).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(4, SqlType::Text, Box::new(std::io::Error::other(e.to_string())))
+    })
+}
+
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 
@@ -974,6 +1181,28 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     updated_at  INTEGER NOT NULL,
     metadata    TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS bundles (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    version     TEXT NOT NULL,
+    description TEXT,
+    body        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundles_name ON bundles(name);
+
+CREATE TABLE IF NOT EXISTS bundle_installs (
+    install_id   TEXT PRIMARY KEY,
+    bundle_id    TEXT NOT NULL REFERENCES bundles(id),
+    mode         TEXT NOT NULL CHECK (mode IN ('increment', 'skip', 'error')),
+    installed_at INTEGER NOT NULL DEFAULT 0,
+    report       TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_installs_bundle ON bundle_installs(bundle_id);
 "#;
 
 #[cfg(test)]
@@ -1019,6 +1248,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "bundle_installs",
+                "bundles",
                 "edges",
                 "nodes",
                 "projections",
