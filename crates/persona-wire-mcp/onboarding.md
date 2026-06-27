@@ -653,7 +653,127 @@ register the Specification(s), register the NamedProjection(s), optionally
 add a persona-pack overlay. Nothing in `persona-wire-core` needs to be
 recompiled to support a new persona; it is entirely data.
 
-## 8. Reference
+## 8. Bundle — scaffolding installer
+
+Once one persona has gone through §2–§5 by hand, the next persona is
+mostly the same shape: a Node, a Specification, a NamedProjection, an
+optional Wiring + Workflow. The Bundle layer packages that shape as a
+TOML manifest registered once and installed any number of times.
+
+### 8.1 Manifest shape
+
+```toml
+[bundle]
+name = "quickstart"
+version = "0.1.0"
+description = "Minimal persona + spec + projection scaffold."
+
+# All section arrays are optional. Empty bundle (= header only)
+# parses successfully and dispatches as a no-op.
+
+[[nodes]]
+name = "shi"
+node_type = "persona"
+metadata = { owner = "ytk", role = "companion" }
+
+[[edges]]
+from_name = "shi"     # resolves against same-bundle nodes first, then graph
+to_name   = "dolly"
+edge_type = "routes_to"
+
+[[specs]]
+name = "active_personas"
+spec = { TypeIs = "persona" }                       # externally-tagged enum
+# spec = { MetadataEq = { path = "owner", value = "ytk" } }
+# spec = { And = [ { TypeIs = "persona" }, { Not = { TypeIs = "channel" } } ] }
+
+[[projections]]
+name = "personas_overview"
+spec_ref = "active_personas"                        # resolves bundle-first, then registry
+template = "## Personas\n{{#each nodes}}- {{name}}\n{{/each}}"
+target_form = "prompt"                              # prompt | markdown | json | ascii
+
+[[wirings]]
+persona_id = "shi"
+slot = "mailbox"
+source_uri = "mini-app://mailbox?alias=for_shi"
+projection_ref = "personas_overview"                # optional
+
+[[workflows]]
+id = "shi-wake"
+persona_id = "shi"
+trigger = { kind = "on_demand" }                    # or { kind = "on_event", event = "..." }
+action = { kind = "no_op" }                         # or { kind = "emit_projection", projection_names = ["..."] }
+```
+
+The `spec` body uses the Specification serde shape verbatim
+(externally-tagged enum — first key is the variant name). The `trigger`
+and `action` bodies pass through to `wire_workflow_register`, so every
+Workflow invariant the entity layer already enforces still applies.
+
+### 8.2 Register, install, inspect
+
+The same five operations are available through the CLI and the MCP tool
+surface (`wire_bundle_register` / `wire_bundle_list` /
+`wire_bundle_get` / `wire_bundle_install` / `wire_bundle_delete`).
+
+```sh
+# CLI flow
+persona-wire bundle register --file bundles/quickstart.toml
+persona-wire bundle list
+persona-wire bundle install --ref quickstart            # mode=increment (default)
+persona-wire bundle install --ref quickstart --mode skip
+persona-wire bundle get --ref quickstart                # returns full TOML body
+persona-wire bundle delete --ref quickstart             # install history retained
+```
+
+### 8.3 Conflict resolution
+
+Name collisions are resolved per `--mode`:
+
+- `increment` (default) — non-destructive auto-suffix. An entity named
+  `shi` collides with the existing `shi` row → installs as `shi-1`. A
+  second re-install becomes `shi-2`. Internal references inside the
+  same manifest (`projections.spec_ref`, `edges.from_name` /
+  `to_name`) are rewritten to the post-rename names so re-installing
+  never produces a half-broken graph.
+- `skip` — leave the existing row alone, record the collision in the
+  install report's `skipped[]`. Idempotent for fixed-name bundles.
+- `error` — abort the whole install on the first collision. Nothing is
+  written. Strict mode for scaffold-into-empty environments.
+
+Force / overwrite is intentionally **not** in v1 — install history
+(`bundle_installs` table) is already populated each install so a future
+History UI can carry it.
+
+### 8.4 Install report
+
+`wire_bundle_install` returns a structured report (also pretty-printed
+by the CLI):
+
+```json
+{
+  "install_id": "01JC...",
+  "bundle_id": "01J9...",
+  "mode": "increment",
+  "installed": [
+    { "kind": "spec",       "original_name": "active_personas",   "final_name": "active_personas",   "id": "..." },
+    { "kind": "projection", "original_name": "personas_overview", "final_name": "personas_overview", "id": "..." },
+    { "kind": "node",       "original_name": "shi",               "final_name": "shi",               "id": "..." }
+  ],
+  "skipped": [],
+  "errors":  []
+}
+```
+
+Per-entity failures (bad spec body, unknown `target_form`, missing
+referenced node, etc.) land in `errors[]` without aborting the
+remaining sections — except in `error` mode, where the first failure
+short-circuits.
+
+A sample bundle is bundled at `bundles/quickstart.toml`.
+
+## 9. Reference
 
 - Crate-level Rustdoc (architecture, layer split, persistence schema):
   `cargo doc --workspace --open -p persona-wire-core`
