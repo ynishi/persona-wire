@@ -290,6 +290,38 @@ pub struct WireWorkflowListParams {
     pub enabled_only: Option<bool>,
 }
 
+// ---- Bundle params --------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireBundleRegisterParams {
+    /// TOML body of the bundle. Must include a `[bundle]` table with
+    /// `name = "<unique>"` and `version = "<semver>"`. Section arrays
+    /// (`[[specs]]` / `[[projections]]` / `[[nodes]]` / `[[edges]]` /
+    /// `[[wirings]]` / `[[workflows]]`) are optional.
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireBundleRefParams {
+    /// Bundle reference — accepts either a 26-char ULID `id` or the
+    /// `name` value of a registered bundle. ULID is tried first; name
+    /// fallback resolves through `bundles.name UNIQUE`.
+    pub r#ref: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireBundleInstallParams {
+    /// Bundle reference — ULID or `name`.
+    pub r#ref: String,
+    /// Conflict resolution mode for entity name collisions.
+    /// `"increment"` (default, non-destructive auto-suffix) /
+    /// `"skip"` (leave existing rows alone) / `"error"` (abort whole
+    /// install on first collision). `"force"` (= overwrite) is not
+    /// implemented in v1 — see Bundle v1 design docs §7.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WireWorkflowFireParams {
     /// Fire a single workflow by id. Mutually exclusive with `event`.
@@ -1059,6 +1091,161 @@ impl WireServer {
         }))
         .map_err(|e| e.to_string())
     }
+
+    // ---- Bundle tools -----------------------------------------------------
+
+    /// Register a Bundle by TOML literal. Returns `{id, name, version}`.
+    #[tool(
+        name = "wire_bundle_register",
+        description = "Register a Bundle scaffolding template. `body` is a TOML literal containing a [bundle] table (name + version + optional description) and any subset of [[specs]] / [[projections]] / [[nodes]] / [[edges]] / [[wirings]] / [[workflows]] sections. The TOML body is stored verbatim; install-time parsing surfaces per-entity errors. Same-name register overwrites; install conflict resolution lives in `wire_bundle_install`."
+    )]
+    async fn wire_bundle_register(
+        &self,
+        Parameters(p): Parameters<WireBundleRegisterParams>,
+    ) -> Result<String, String> {
+        use persona_wire_core::application::bundle_registry::BundleRegistry;
+        use persona_wire_core::domain::entity::bundle::{BundleName, BundleVersion};
+        let (name, version, description) = parse_bundle_header(&p.body)?;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let bn = BundleName::new(name.clone()).map_err(|e| e.to_string())?;
+        let bv = BundleVersion::new(version.clone()).map_err(|e| e.to_string())?;
+        let id = BundleRegistry::new(&s)
+            .register(&bn, &bv, description.as_deref(), &p.body)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "id": id.to_string(),
+            "name": name,
+            "version": version,
+        })
+        .to_string())
+    }
+
+    /// List registered Bundles in name-ascending order.
+    #[tool(
+        name = "wire_bundle_list",
+        description = "List registered Bundles in name-ascending order. Each row carries id / name / version / description (full TOML body is omitted; fetch via `wire_bundle_get`)."
+    )]
+    async fn wire_bundle_list(&self) -> Result<String, String> {
+        use persona_wire_core::application::bundle_registry::BundleRegistry;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let bundles = BundleRegistry::new(&s).list().map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> = bundles
+            .into_iter()
+            .map(|b| {
+                serde_json::json!({
+                    "id": b.id.to_string(),
+                    "name": b.name.as_str(),
+                    "version": b.version.as_str(),
+                    "description": b.description,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({ "bundles": rows }))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Get a Bundle by name or id, including the full TOML body.
+    #[tool(
+        name = "wire_bundle_get",
+        description = "Fetch a registered Bundle by name or ULID id. Returns id / name / version / description / body (raw TOML) / created_at / updated_at. Errors with NotFound if absent."
+    )]
+    async fn wire_bundle_get(
+        &self,
+        Parameters(p): Parameters<WireBundleRefParams>,
+    ) -> Result<String, String> {
+        use persona_wire_core::application::bundle_registry::BundleRegistry;
+        use persona_wire_core::domain::entity::bundle::BundleRef;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let r = BundleRef::parse(&p.r#ref).map_err(|e| e.to_string())?;
+        let b = BundleRegistry::new(&s)
+            .resolve(&r)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("bundle not found: {}", p.r#ref))?;
+        Ok(serde_json::json!({
+            "id": b.id.to_string(),
+            "name": b.name.as_str(),
+            "version": b.version.as_str(),
+            "description": b.description,
+            "body": b.body,
+            "created_at": b.created_at,
+            "updated_at": b.updated_at,
+        })
+        .to_string())
+    }
+
+    /// Install a Bundle. Returns the structured report.
+    #[tool(
+        name = "wire_bundle_install",
+        description = "Install a registered Bundle. `mode` ∈ {increment (default, auto-suffix collisions), skip (leave existing rows alone), error (abort whole install on first collision)}. Returns BundleInstallReport with per-entity installed / skipped / errors rows."
+    )]
+    async fn wire_bundle_install(
+        &self,
+        Parameters(p): Parameters<WireBundleInstallParams>,
+    ) -> Result<String, String> {
+        use persona_wire_core::application::bundle_install::install_bundle;
+        use persona_wire_core::application::bundle_registry::BundleRegistry;
+        use persona_wire_core::domain::entity::bundle::{BundleRef, ConflictMode};
+        let mode = match p.mode.as_deref() {
+            None => ConflictMode::default(),
+            Some(s) => ConflictMode::parse(s).map_err(|e| e.to_string())?,
+        };
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let r = BundleRef::parse(&p.r#ref).map_err(|e| e.to_string())?;
+        let bundle = BundleRegistry::new(&s)
+            .resolve(&r)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("bundle not found: {}", p.r#ref))?;
+        let report = install_bundle(&bundle, mode, &s).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+    }
+
+    /// Delete a Bundle by name or id. Install history is preserved.
+    #[tool(
+        name = "wire_bundle_delete",
+        description = "Delete a Bundle row by name or id. Install history (`bundle_installs`) is intentionally preserved across deletion. Returns {deleted: bool}."
+    )]
+    async fn wire_bundle_delete(
+        &self,
+        Parameters(p): Parameters<WireBundleRefParams>,
+    ) -> Result<String, String> {
+        use persona_wire_core::application::bundle_registry::BundleRegistry;
+        use persona_wire_core::domain::entity::bundle::BundleRef;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let reg = BundleRegistry::new(&s);
+        let deleted = match BundleRef::parse(&p.r#ref).map_err(|e| e.to_string())? {
+            BundleRef::Id(id) => reg.delete_by_id(id).map_err(|e| e.to_string())?,
+            BundleRef::Name(name) => reg.delete(&name).map_err(|e| e.to_string())?,
+        };
+        Ok(serde_json::json!({ "deleted": deleted }).to_string())
+    }
+}
+
+/// Pull `[bundle].name` / `version` / optional `description` out of a TOML
+/// body without committing the full manifest schema. Used by
+/// `wire_bundle_register` so a malformed install-time section (e.g.
+/// `[[specs]].spec` shape) does not block the register call.
+fn parse_bundle_header(body: &str) -> Result<(String, String, Option<String>), String> {
+    let value: toml::Value =
+        toml::from_str(body).map_err(|e| format!("bundle TOML parse: {}", e))?;
+    let bundle = value
+        .get("bundle")
+        .and_then(|v| v.as_table())
+        .ok_or_else(|| "missing [bundle] table".to_string())?;
+    let name = bundle
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing [bundle].name".to_string())?
+        .to_string();
+    let version = bundle
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing [bundle].version".to_string())?
+        .to_string();
+    let description = bundle
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Ok((name, version, description))
 }
 
 // ---------------------------------------------------------------------------

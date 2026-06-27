@@ -1,0 +1,31 @@
+# persona-wire Bundle: quickstart
+#
+# Minimal scaffold that stands up a single persona Node, a Specification
+# selecting all persona-typed nodes, and a Projection that renders them
+# as a Prompt-form context. Drop this through:
+#
+#   persona-wire bundle register --file bundles/quickstart.toml
+#   persona-wire bundle install --ref quickstart
+#
+# Re-installing under the default `--mode=increment` is non-destructive:
+# entity names auto-suffix (`shi-1` / `personas_overview-1` / ...).
+
+[bundle]
+name = "quickstart"
+version = "0.1.0"
+description = "Minimal persona + spec + projection scaffold."
+
+[[nodes]]
+name = "shi"
+node_type = "persona"
+metadata = { owner = "ytk", role = "companion" }
+
+[[specs]]
+name = "active_personas"
+spec = { TypeIs = "persona" }
+
+[[projections]]
+name = "personas_overview"
+spec_ref = "active_personas"
+template = "## Personas\n{{#each nodes}}- {{name}}\n{{/each}}"
+target_form = "prompt"

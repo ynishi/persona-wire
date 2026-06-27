@@ -89,6 +89,45 @@ enum Command {
 
     /// Boot the stdio MCP server (delegates to persona-wire-mcp::serve_stdio).
     Mcp,
+
+    /// Bundle scaffolding installer — register / list / get / install / delete
+    /// a TOML bundle of Spec / Projection / Wiring / Workflow / Node / Edge.
+    Bundle {
+        #[command(subcommand)]
+        op: BundleOp,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BundleOp {
+    /// Register a bundle from a TOML file. The [bundle] table inside the
+    /// TOML is the source-of-truth for `name` / `version` / `description`.
+    Register {
+        /// Path to the bundle TOML file.
+        #[arg(long)]
+        file: String,
+    },
+    /// List registered bundles (name-ascending, summary rows).
+    List,
+    /// Get a registered bundle (full TOML body) by name or ULID.
+    Get {
+        #[arg(long = "ref", alias = "ref_")]
+        r#ref: String,
+    },
+    /// Install a registered bundle.
+    Install {
+        #[arg(long = "ref", alias = "ref_")]
+        r#ref: String,
+        /// Conflict mode: increment (default, auto-suffix) / skip / error.
+        #[arg(long, default_value = "increment")]
+        mode: String,
+    },
+    /// Delete a registered bundle by name or ULID. Install history is
+    /// preserved.
+    Delete {
+        #[arg(long = "ref", alias = "ref_")]
+        r#ref: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -601,8 +640,98 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
             rt.block_on(persona_wire_mcp::serve_stdio(&db))?;
         }
+
+        Command::Bundle { op } => bundle_op(op, &db)?,
     }
 
+    Ok(())
+}
+
+fn bundle_op(op: BundleOp, db: &str) -> Result<()> {
+    use persona_wire_core::application::bundle_install::install_bundle;
+    use persona_wire_core::application::bundle_registry::BundleRegistry;
+    use persona_wire_core::domain::entity::bundle::{
+        BundleName, BundleRef, BundleVersion, ConflictMode,
+    };
+    let s = SqliteStorage::open(db)?;
+    let reg = BundleRegistry::new(&s);
+    match op {
+        BundleOp::Register { file } => {
+            let body = std::fs::read_to_string(&file)
+                .with_context(|| format!("read bundle file: {file}"))?;
+            let value: toml::Value =
+                toml::from_str(&body).context("parse bundle TOML")?;
+            let bundle_tbl = value
+                .get("bundle")
+                .and_then(|v| v.as_table())
+                .ok_or_else(|| anyhow::anyhow!("missing [bundle] table"))?;
+            let name = bundle_tbl
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing [bundle].name"))?;
+            let version = bundle_tbl
+                .get("version")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing [bundle].version"))?;
+            let description = bundle_tbl
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let bn = BundleName::new(name.to_string())?;
+            let bv = BundleVersion::new(version.to_string())?;
+            let id = reg.register(&bn, &bv, description.as_deref(), &body)?;
+            println!("registered bundle: {} (id={})", name, id);
+        }
+        BundleOp::List => {
+            for b in reg.list()? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    b.id,
+                    b.name,
+                    b.version,
+                    b.description.unwrap_or_default()
+                );
+            }
+        }
+        BundleOp::Get { r#ref } => {
+            let r = BundleRef::parse(&r#ref)?;
+            match reg.resolve(&r)? {
+                Some(b) => {
+                    let json = serde_json::json!({
+                        "id": b.id.to_string(),
+                        "name": b.name.as_str(),
+                        "version": b.version.as_str(),
+                        "description": b.description,
+                        "body": b.body,
+                        "created_at": b.created_at,
+                        "updated_at": b.updated_at,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                None => {
+                    eprintln!("not found: {ref_}", ref_ = r#ref);
+                    std::process::exit(1);
+                }
+            }
+        }
+        BundleOp::Install { r#ref, mode } => {
+            let m = ConflictMode::parse(&mode)?;
+            let r = BundleRef::parse(&r#ref)?;
+            let bundle = reg
+                .resolve(&r)?
+                .ok_or_else(|| anyhow::anyhow!("bundle not found: {}", r#ref))?;
+            let report = install_bundle(&bundle, m, &s)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        BundleOp::Delete { r#ref } => {
+            let r = BundleRef::parse(&r#ref)?;
+            let deleted = match r {
+                BundleRef::Id(id) => reg.delete_by_id(id)?,
+                BundleRef::Name(name) => reg.delete(&name)?,
+            };
+            println!("{}", serde_json::json!({ "deleted": deleted }));
+        }
+    }
     Ok(())
 }
 

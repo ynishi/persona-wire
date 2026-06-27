@@ -68,6 +68,10 @@ pub struct BundleManifest {
     pub nodes: Vec<NodeEntry>,
     #[serde(default)]
     pub edges: Vec<EdgeEntry>,
+    #[serde(default)]
+    pub wirings: Vec<WiringEntry>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +110,46 @@ pub struct EdgeEntry {
     pub edge_type: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
+}
+
+/// Wiring section entry — one slot binding for one persona.
+///
+/// Persisted as a `Node` of type `outline_node` whose name is
+/// `format!("{persona_id}.{slot}")` and whose metadata carries
+/// `persona` / `axis` (= slot) / `source_uri`. Conflict resolution
+/// operates on the synthesized node name; the auto-increment suffix
+/// goes on the slot half so the persona half stays readable
+/// (`shi.mailbox` → `shi.mailbox-1`).
+#[derive(Debug, Deserialize)]
+pub struct WiringEntry {
+    pub persona_id: String,
+    pub slot: String,
+    pub source_uri: String,
+    /// Optional reference to a `ProjectionName` registered elsewhere
+    /// (same bundle or pre-existing). Carried into metadata when set;
+    /// stored as `metadata.projection_ref`.
+    #[serde(default)]
+    pub projection_ref: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+/// Workflow section entry — mirrors the shape consumed by
+/// `wire_workflow_register` so the bundle installer is a thin
+/// composition over the existing use case.
+#[derive(Debug, Deserialize)]
+pub struct WorkflowEntry {
+    pub id: String,
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// Trigger payload — externally-tagged enum (see
+    /// `wire_workflow_register` docs). Pass through TOML as `toml::Value`
+    /// and round-trip into `serde_json::Value` at dispatch time.
+    pub trigger: toml::Value,
+    /// Action payload — externally-tagged enum.
+    pub action: toml::Value,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 // -- Install entry point ----------------------------------------------------
@@ -315,6 +359,154 @@ pub fn install_bundle(
         }
     }
 
+    // ---- wirings ----
+    // Wirings are persisted as `outline_node` Nodes whose name is
+    // `format!("{persona}.{slot}")`. Conflict resolution operates on the
+    // composite name; auto-increment appends `-N` to the whole synthesized
+    // name (`shi.mailbox-1`), the persona / slot field stay verbatim in
+    // metadata so the entity carrier keeps its identity even after rename.
+    for entry in &manifest.wirings {
+        let composed = format!("{}.{}", entry.persona_id, entry.slot);
+        match resolve_name(&composed, mode, |n| {
+            Ok(storage.lookup_node_id_by_name(n)?.is_some())
+        })? {
+            Resolution::Use(final_name) => {
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    "persona".to_string(),
+                    serde_json::Value::String(entry.persona_id.clone()),
+                );
+                meta.insert(
+                    "axis".to_string(),
+                    serde_json::Value::String(entry.slot.clone()),
+                );
+                meta.insert(
+                    "source_uri".to_string(),
+                    serde_json::Value::String(entry.source_uri.clone()),
+                );
+                if let Some(p) = &entry.projection_ref {
+                    meta.insert(
+                        "projection_ref".to_string(),
+                        serde_json::Value::String(p.clone()),
+                    );
+                }
+                if let serde_json::Value::Object(extra) = &entry.metadata {
+                    for (k, v) in extra {
+                        meta.insert(k.clone(), v.clone());
+                    }
+                }
+                let node = build_node_with_metadata(
+                    &final_name,
+                    "outline_node",
+                    serde_json::Value::Object(meta),
+                );
+                match storage.insert_node(&node) {
+                    Ok(()) => report.installed.push(InstalledItem {
+                        kind: "wiring".into(),
+                        original_name: composed.clone(),
+                        final_name,
+                        id: node.id.to_string(),
+                    }),
+                    Err(e) => report.errors.push(ErrorItem {
+                        kind: "wiring".into(),
+                        name: composed.clone(),
+                        error: e.to_string(),
+                    }),
+                }
+            }
+            Resolution::Skip => report.skipped.push(SkippedItem {
+                kind: "wiring".into(),
+                name: composed,
+                reason: "name exists (skip mode)".into(),
+            }),
+            Resolution::Abort => {
+                report.errors.push(ErrorItem {
+                    kind: "wiring".into(),
+                    name: composed,
+                    error: "name exists (error mode)".into(),
+                });
+                finalize(&report, install_id, bundle.id, storage)?;
+                return Ok(report);
+            }
+        }
+    }
+
+    // ---- workflows ----
+    // Workflows are dispatched through the existing
+    // [`crate::application::use_cases::wire_workflow_register`] flow so all
+    // trigger / action invariants are enforced by the Workflow entity,
+    // not duplicated here. `id` doubles as the name for conflict
+    // resolution (workflow nodes are stored with the id as their Node
+    // name).
+    for entry in &manifest.workflows {
+        let trigger_json = match toml_to_json(&entry.trigger) {
+            Ok(v) => v,
+            Err(e) => {
+                report.errors.push(ErrorItem {
+                    kind: "workflow".into(),
+                    name: entry.id.clone(),
+                    error: format!("trigger: {}", e),
+                });
+                continue;
+            }
+        };
+        let action_json = match toml_to_json(&entry.action) {
+            Ok(v) => v,
+            Err(e) => {
+                report.errors.push(ErrorItem {
+                    kind: "workflow".into(),
+                    name: entry.id.clone(),
+                    error: format!("action: {}", e),
+                });
+                continue;
+            }
+        };
+
+        match resolve_name(&entry.id, mode, |n| {
+            Ok(storage.lookup_node_id_by_name(n)?.is_some())
+        })? {
+            Resolution::Use(final_id) => {
+                use crate::application::use_cases::{
+                    wire_workflow_register, WireWorkflowRegisterInput,
+                };
+                let input = WireWorkflowRegisterInput {
+                    id: final_id.clone(),
+                    persona_id: entry.persona_id.clone(),
+                    trigger: trigger_json,
+                    action: action_json,
+                    enabled: entry.enabled,
+                };
+                match wire_workflow_register(input, storage) {
+                    Ok(out) => report.installed.push(InstalledItem {
+                        kind: "workflow".into(),
+                        original_name: entry.id.clone(),
+                        final_name: final_id,
+                        id: out.id,
+                    }),
+                    Err(e) => report.errors.push(ErrorItem {
+                        kind: "workflow".into(),
+                        name: entry.id.clone(),
+                        error: e.to_string(),
+                    }),
+                }
+            }
+            Resolution::Skip => report.skipped.push(SkippedItem {
+                kind: "workflow".into(),
+                name: entry.id.clone(),
+                reason: "name exists (skip mode)".into(),
+            }),
+            Resolution::Abort => {
+                report.errors.push(ErrorItem {
+                    kind: "workflow".into(),
+                    name: entry.id.clone(),
+                    error: "name exists (error mode)".into(),
+                });
+                finalize(&report, install_id, bundle.id, storage)?;
+                return Ok(report);
+            }
+        }
+    }
+
     finalize(&report, install_id, bundle.id, storage)?;
     Ok(report)
 }
@@ -390,6 +582,22 @@ fn build_projection(
 }
 
 fn build_node(name: &str, node_type: &str, metadata: &serde_json::Value) -> crate::domain::graph::Node {
+    build_node_with_metadata(
+        name,
+        node_type,
+        if metadata.is_null() {
+            serde_json::json!({})
+        } else {
+            metadata.clone()
+        },
+    )
+}
+
+fn build_node_with_metadata(
+    name: &str,
+    node_type: &str,
+    metadata: serde_json::Value,
+) -> crate::domain::graph::Node {
     use crate::domain::graph::Node;
     Node {
         id: Ulid::new(),
@@ -402,12 +610,16 @@ fn build_node(name: &str, node_type: &str, metadata: &serde_json::Value) -> crat
         review_due: None,
         version: 1,
         prev_id: None,
-        metadata: if metadata.is_null() {
-            serde_json::json!({})
-        } else {
-            metadata.clone()
-        },
+        metadata,
     }
+}
+
+/// Convert a `toml::Value` payload into the `serde_json::Value` shape the
+/// existing register use cases consume. Uses `serde_json::to_value` on the
+/// `toml::Value`'s Serialize impl so TOML inline tables round-trip into
+/// JSON objects, arrays into arrays, scalars 1:1.
+fn toml_to_json(v: &toml::Value) -> WireResult<serde_json::Value> {
+    serde_json::to_value(v).map_err(|e| WireError::Other(format!("toml→json: {}", e)))
 }
 
 fn build_edge(
@@ -653,6 +865,81 @@ spec = { TypeIs = "persona" }
         let err = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("bundle TOML parse"), "got: {}", msg);
+    }
+
+    #[test]
+    fn install_wirings_writes_outline_nodes() {
+        let s = setup();
+        let body = r#"
+[[wirings]]
+persona_id = "shi"
+slot = "mailbox"
+source_uri = "mini-app://mailbox?alias=for_shi"
+
+[[wirings]]
+persona_id = "shi"
+slot = "news"
+source_uri = "mini-app://news"
+projection_ref = "news_overview"
+"#;
+        let bundle = register_bundle(&s, "b", body);
+        let r = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        assert_eq!(r.installed.len(), 2, "report: {:?}", r);
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.installed[0].kind, "wiring");
+        assert_eq!(r.installed[0].final_name, "shi.mailbox");
+        assert_eq!(r.installed[1].final_name, "shi.news");
+
+        // re-install → auto-increment composite names
+        let r2 = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        let final_names: Vec<_> = r2
+            .installed
+            .iter()
+            .map(|i| i.final_name.clone())
+            .collect();
+        assert!(final_names.contains(&"shi.mailbox-1".to_string()));
+        assert!(final_names.contains(&"shi.news-1".to_string()));
+    }
+
+    #[test]
+    fn install_workflows_via_existing_register_use_case() {
+        let s = setup();
+        let body = r#"
+[[workflows]]
+id = "shi-wake"
+persona_id = "shi"
+trigger = { kind = "on_demand" }
+action = { kind = "no_op" }
+"#;
+        let bundle = register_bundle(&s, "b", body);
+        let r = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        assert_eq!(r.installed.len(), 1, "report: {:?}", r);
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(r.installed[0].kind, "workflow");
+        assert_eq!(r.installed[0].final_name, "shi-wake");
+
+        // re-install → workflow id collision triggers auto-increment via
+        // node name (workflow_def Node name == workflow id).
+        let r2 = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        assert_eq!(r2.installed.len(), 1, "report: {:?}", r2);
+        assert_eq!(r2.installed[0].final_name, "shi-wake-1");
+    }
+
+    #[test]
+    fn install_workflow_bad_trigger_records_error() {
+        let s = setup();
+        let body = r#"
+[[workflows]]
+id = "broken"
+trigger = { kind = "unknown_kind" }
+action = { kind = "no_op" }
+"#;
+        let bundle = register_bundle(&s, "b", body);
+        let r = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        assert!(r.installed.is_empty(), "report: {:?}", r);
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(r.errors[0].kind, "workflow");
+        assert_eq!(r.errors[0].name, "broken");
     }
 
     #[test]

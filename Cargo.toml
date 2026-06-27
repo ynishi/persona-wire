@@ -53,6 +53,9 @@ ulid = { version = "1", features = ["serde"] }
 # Obsidian vault frontmatter parse (YAML / TOML / JSON multiformat)
 gray_matter = "0.2"
 
+# TOML serde (Bundle manifest body parse)
+toml = "0.8"
+
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.7.0" }
 persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.7.0" }

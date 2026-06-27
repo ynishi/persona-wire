@@ -38,6 +38,7 @@ persona-wire-mcp = { path = "../persona-wire-mcp", version = "0.7.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
