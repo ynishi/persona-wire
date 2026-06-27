@@ -102,10 +102,7 @@ fn bundle_register_install_roundtrip() {
     assert_eq!(proj.spec_ref().as_str(), "active_personas");
 
     // Node persists with the declared name + type.
-    let node_id = s
-        .lookup_node_id_by_name("shi")
-        .unwrap()
-        .expect("node row");
+    let node_id = s.lookup_node_id_by_name("shi").unwrap().expect("node row");
     let node = s.get_node(&node_id).unwrap().expect("get_node");
     assert_eq!(node.r#type, "persona");
     assert_eq!(

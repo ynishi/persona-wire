@@ -7,9 +7,9 @@ use std::path::PathBuf;
 
 use crate::domain::autoversion::{VersionRecord, VersionTargetKind};
 use crate::domain::error::{DomainError, WireError, WireResult};
-use crate::domain::graph::{Edge, EdgeId, Node, NodeId, Severity, Ulid};
 #[cfg(test)]
 use crate::domain::graph::ulid_from_seed;
+use crate::domain::graph::{Edge, EdgeId, Node, NodeId, Severity, Ulid};
 use rusqlite::{params, types::Type as SqlType, Connection, OptionalExtension, Row};
 
 /// Decode a ULID stored as 26-char Crockford base32 TEXT. Used in `row_to_*`
@@ -307,8 +307,8 @@ impl SqliteStorage {
         match rows.len() {
             0 => Ok(None),
             1 => {
-                let id = Ulid::from_string(&rows[0])
-                    .map_err(|e| WireError::Storage(e.to_string()))?;
+                let id =
+                    Ulid::from_string(&rows[0]).map_err(|e| WireError::Storage(e.to_string()))?;
                 Ok(Some(id))
             }
             n => Err(WireError::AmbiguousName {
@@ -330,7 +330,11 @@ impl SqliteStorage {
     /// fields (`type` / `sot_ref` / lifecycle timestamps) intentionally stay
     /// immutable on this path; full-row replacement is out of scope for the
     /// metadata-patch UC (= wiring-entry `source_uri` tuning).
-    pub fn update_node_metadata(&self, id: &NodeId, metadata: &serde_json::Value) -> WireResult<bool> {
+    pub fn update_node_metadata(
+        &self,
+        id: &NodeId,
+        metadata: &serde_json::Value,
+    ) -> WireResult<bool> {
         let normalized = normalize_metadata_storage(metadata)?;
         let metadata_str =
             serde_json::to_string(&normalized).map_err(|e| WireError::Storage(e.to_string()))?;
@@ -410,8 +414,8 @@ impl SqliteStorage {
         match rows.len() {
             0 => Ok(None),
             1 => {
-                let id = Ulid::from_string(&rows[0])
-                    .map_err(|e| WireError::Storage(e.to_string()))?;
+                let id =
+                    Ulid::from_string(&rows[0]).map_err(|e| WireError::Storage(e.to_string()))?;
                 Ok(Some(id))
             }
             n => Err(WireError::AmbiguousName {
@@ -682,9 +686,7 @@ impl SqliteStorage {
     /// List bundles in name-ascending order. Returns lightweight summary
     /// rows (id / name / version / description) — the full TOML body is
     /// fetched only via `get_bundle_by_*` to keep list payloads bounded.
-    pub fn list_bundles(
-        &self,
-    ) -> WireResult<Vec<crate::domain::entity::bundle::Bundle>> {
+    pub fn list_bundles(&self) -> WireResult<Vec<crate::domain::entity::bundle::Bundle>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -934,7 +936,10 @@ impl SqliteStorage {
     pub fn delete_edge(&self, id: &EdgeId) -> WireResult<bool> {
         let n = self
             .conn
-            .execute("DELETE FROM edges WHERE id = ?1", rusqlite::params![id.to_string()])
+            .execute(
+                "DELETE FROM edges WHERE id = ?1",
+                rusqlite::params![id.to_string()],
+            )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(n > 0)
     }
@@ -1087,13 +1092,25 @@ fn row_to_bundle(row: &Row<'_>) -> rusqlite::Result<crate::domain::entity::bundl
     // invariant. Re-validate defensively at the read boundary so a corrupt
     // row surfaces as a typed error rather than a downstream panic.
     let name = BundleName::new(name_str).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(1, SqlType::Text, Box::new(std::io::Error::other(e.to_string())))
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            SqlType::Text,
+            Box::new(std::io::Error::other(e.to_string())),
+        )
     })?;
     let version = BundleVersion::new(version_str).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(2, SqlType::Text, Box::new(std::io::Error::other(e.to_string())))
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            SqlType::Text,
+            Box::new(std::io::Error::other(e.to_string())),
+        )
     })?;
     Bundle::new(id, name, version, description, body, created_at, updated_at).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(4, SqlType::Text, Box::new(std::io::Error::other(e.to_string())))
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            SqlType::Text,
+            Box::new(std::io::Error::other(e.to_string())),
+        )
     })
 }
 
@@ -1348,7 +1365,10 @@ mod tests {
         n.metadata =
             serde_json::Value::String(r#"{"display":"shi_like","first_person":"しー"}"#.into());
         s.insert_node(&n).unwrap();
-        let got = s.get_node(&ulid_from_seed("shi_like")).unwrap().expect("exists");
+        let got = s
+            .get_node(&ulid_from_seed("shi_like"))
+            .unwrap()
+            .expect("exists");
         assert_eq!(
             got.metadata,
             json!({"display": "shi_like", "first_person": "しー"}),
@@ -1410,7 +1430,9 @@ mod tests {
         let s = setup();
         s.insert_node(&bare_node("p1", "persona")).unwrap();
         let patched = serde_json::Value::String(r#"{"display":"p1"}"#.into());
-        let updated = s.update_node_metadata(&ulid_from_seed("p1"), &patched).unwrap();
+        let updated = s
+            .update_node_metadata(&ulid_from_seed("p1"), &patched)
+            .unwrap();
         assert!(updated);
         let got = s.get_node(&ulid_from_seed("p1")).unwrap().expect("exists");
         assert_eq!(got.metadata, json!({"display": "p1"}));
@@ -1573,8 +1595,16 @@ mod tests {
             };
             s.insert_version_record(&rec).unwrap();
         }
-        assert_eq!(s.count_versions(VersionTargetKind::Node, &ulid_from_seed("n1").to_string()).unwrap(), 3);
-        assert_eq!(s.count_versions(VersionTargetKind::Edge, &ulid_from_seed("n1").to_string()).unwrap(), 0);
+        assert_eq!(
+            s.count_versions(VersionTargetKind::Node, &ulid_from_seed("n1").to_string())
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            s.count_versions(VersionTargetKind::Edge, &ulid_from_seed("n1").to_string())
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

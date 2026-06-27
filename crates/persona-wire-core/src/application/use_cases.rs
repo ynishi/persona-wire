@@ -710,7 +710,9 @@ pub fn wire_query(input: WireQueryInput, storage: &SqliteStorage) -> WireResult<
                 }
             };
             SpecRegistry::new(storage).get(&name)?.ok_or_else(|| {
-                crate::domain::error::WireError::Domain(DomainError::NotFound(format!("spec: {name}")))
+                crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
+                    "spec: {name}"
+                )))
             })?
         }
         (Some(_), Some(_)) => {
@@ -779,14 +781,12 @@ pub fn wire_render(
 ) -> WireResult<WireRenderOutput> {
     // projection_ref accepts ULID id OR name (v0.7+ id_or_name resolver).
     let projection_name = match storage.resolve_projection_id_or_name(&input.projection_ref)? {
-        Some(id) => storage
-            .get_projection_name_by_id(&id)?
-            .ok_or_else(|| {
-                crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
-                    "projection: {} (resolved id {} has no row)",
-                    input.projection_ref, id
-                )))
-            })?,
+        Some(id) => storage.get_projection_name_by_id(&id)?.ok_or_else(|| {
+            crate::domain::error::WireError::Domain(DomainError::NotFound(format!(
+                "projection: {} (resolved id {} has no row)",
+                input.projection_ref, id
+            )))
+        })?,
         None => {
             return Err(crate::domain::error::WireError::Domain(
                 DomainError::NotFound(format!("projection: {}", input.projection_ref)),

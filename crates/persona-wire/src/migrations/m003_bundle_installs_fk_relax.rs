@@ -84,9 +84,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
 /// `table_exists` first).
 fn column_is_nullable(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(1)?, r.get::<_, i64>(3)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(3)?)))?;
     for row in rows {
         let (name, notnull) = row?;
         if name == column {
@@ -162,7 +160,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(bundle_id.is_none(), "bundle_id should be NULL after parent delete");
+        assert!(
+            bundle_id.is_none(),
+            "bundle_id should be NULL after parent delete"
+        );
     }
 
     #[test]

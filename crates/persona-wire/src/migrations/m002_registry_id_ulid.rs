@@ -52,7 +52,10 @@ impl Migration for Mig {
             }
             conn.execute("DROP TABLE specifications", [])
                 .context("DROP old specifications")?;
-            conn.execute("ALTER TABLE specifications_new RENAME TO specifications", [])?;
+            conn.execute(
+                "ALTER TABLE specifications_new RENAME TO specifications",
+                [],
+            )?;
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_specifications_name ON specifications(name)",
                 [],
@@ -107,7 +110,9 @@ impl Migration for Mig {
             |r| r.get(0),
         )?;
         if bad_s != 0 || bad_p != 0 {
-            anyhow::bail!("002_registry_id_ulid sanity failed: bad_specs={bad_s} bad_projs={bad_p}");
+            anyhow::bail!(
+                "002_registry_id_ulid sanity failed: bad_specs={bad_s} bad_projs={bad_p}"
+            );
         }
         Ok(())
     }

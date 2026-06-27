@@ -33,15 +33,21 @@ impl Migration for Mig {
         }
 
         if !nodes_done {
-            conn.execute("ALTER TABLE nodes ADD COLUMN name TEXT NOT NULL DEFAULT ''", [])
-                .context("ALTER nodes ADD name")?;
+            conn.execute(
+                "ALTER TABLE nodes ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .context("ALTER nodes ADD name")?;
         }
         if !edges_done {
             conn.execute("ALTER TABLE edges ADD COLUMN name TEXT", [])
                 .context("ALTER edges ADD name")?;
         }
 
-        conn.execute("UPDATE nodes SET name = id WHERE name IS NULL OR name = ''", [])?;
+        conn.execute(
+            "UPDATE nodes SET name = id WHERE name IS NULL OR name = ''",
+            [],
+        )?;
         conn.execute("UPDATE edges SET name = id WHERE name IS NULL", [])?;
 
         let node_map = build_id_map(conn, "nodes")?;
@@ -54,13 +60,15 @@ impl Migration for Mig {
              CREATE TEMP TABLE _edge_id_map(old_id TEXT PRIMARY KEY, new_id TEXT NOT NULL);",
         )?;
         {
-            let mut stmt = conn.prepare("INSERT INTO _node_id_map(old_id, new_id) VALUES (?1, ?2)")?;
+            let mut stmt =
+                conn.prepare("INSERT INTO _node_id_map(old_id, new_id) VALUES (?1, ?2)")?;
             for (old, new) in &node_map {
                 stmt.execute(params![old, new.to_string()])?;
             }
         }
         {
-            let mut stmt = conn.prepare("INSERT INTO _edge_id_map(old_id, new_id) VALUES (?1, ?2)")?;
+            let mut stmt =
+                conn.prepare("INSERT INTO _edge_id_map(old_id, new_id) VALUES (?1, ?2)")?;
             for (old, new) in &edge_map {
                 stmt.execute(params![old, new.to_string()])?;
             }

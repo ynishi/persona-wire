@@ -34,7 +34,9 @@ use persona_wire::migrations::{Runner, Status, ALL};
 #[derive(Debug)]
 enum Cmd {
     List,
-    Status { db: PathBuf },
+    Status {
+        db: PathBuf,
+    },
     Up {
         db: PathBuf,
         apply: bool,
@@ -53,7 +55,9 @@ enum Cmd {
 
 fn parse_args() -> Result<Cmd> {
     let mut it = std::env::args().skip(1);
-    let sub = it.next().ok_or_else(|| anyhow!("missing subcommand (try --help)"))?;
+    let sub = it
+        .next()
+        .ok_or_else(|| anyhow!("missing subcommand (try --help)"))?;
     let rest: Vec<String> = it.collect();
 
     #[derive(Default)]
@@ -66,51 +70,61 @@ fn parse_args() -> Result<Cmd> {
         positional: Option<String>,
     }
 
-    let parse_opts =
-        |rest: &[String]| -> Result<ParsedOpts> {
-            let mut o = ParsedOpts::default();
-            let mut i = 0;
-            while i < rest.len() {
-                let a = &rest[i];
-                match a.as_str() {
-                    "--db" => {
-                        i += 1;
-                        o.db = Some(PathBuf::from(rest.get(i).ok_or_else(|| anyhow!("--db requires path"))?));
-                    }
-                    "--apply" => o.apply = true,
-                    "--dry-run" => o.apply = false,
-                    "--backup" => {
-                        i += 1;
-                        o.backup = Some(PathBuf::from(rest.get(i).ok_or_else(|| anyhow!("--backup requires path"))?));
-                    }
-                    "--target" => {
-                        i += 1;
-                        o.target = Some(rest.get(i).ok_or_else(|| anyhow!("--target requires id"))?.clone());
-                    }
-                    "--force" => o.force = true,
-                    "-h" | "--help" => {
-                        print_usage();
-                        std::process::exit(0);
-                    }
-                    other if other.starts_with("--") => bail!("unknown flag: {other}"),
-                    other => {
-                        if o.positional.is_some() {
-                            bail!("unexpected positional arg: {other}");
-                        }
-                        o.positional = Some(other.to_string());
-                    }
+    let parse_opts = |rest: &[String]| -> Result<ParsedOpts> {
+        let mut o = ParsedOpts::default();
+        let mut i = 0;
+        while i < rest.len() {
+            let a = &rest[i];
+            match a.as_str() {
+                "--db" => {
+                    i += 1;
+                    o.db = Some(PathBuf::from(
+                        rest.get(i).ok_or_else(|| anyhow!("--db requires path"))?,
+                    ));
                 }
-                i += 1;
+                "--apply" => o.apply = true,
+                "--dry-run" => o.apply = false,
+                "--backup" => {
+                    i += 1;
+                    o.backup = Some(PathBuf::from(
+                        rest.get(i)
+                            .ok_or_else(|| anyhow!("--backup requires path"))?,
+                    ));
+                }
+                "--target" => {
+                    i += 1;
+                    o.target = Some(
+                        rest.get(i)
+                            .ok_or_else(|| anyhow!("--target requires id"))?
+                            .clone(),
+                    );
+                }
+                "--force" => o.force = true,
+                "-h" | "--help" => {
+                    print_usage();
+                    std::process::exit(0);
+                }
+                other if other.starts_with("--") => bail!("unknown flag: {other}"),
+                other => {
+                    if o.positional.is_some() {
+                        bail!("unexpected positional arg: {other}");
+                    }
+                    o.positional = Some(other.to_string());
+                }
             }
-            Ok(o)
-        };
+            i += 1;
+        }
+        Ok(o)
+    };
 
     match sub.as_str() {
         "list" => Ok(Cmd::List),
         "status" => {
             let o = parse_opts(&rest)?;
             Ok(Cmd::Status {
-                db: o.db.ok_or_else(|| anyhow!("status: --db <path> required"))?,
+                db: o
+                    .db
+                    .ok_or_else(|| anyhow!("status: --db <path> required"))?,
             })
         }
         "up" => {
@@ -129,7 +143,9 @@ fn parse_args() -> Result<Cmd> {
                 db: o.db.ok_or_else(|| anyhow!("apply: --db <path> required"))?,
                 apply: o.apply,
                 backup: o.backup,
-                id: o.positional.ok_or_else(|| anyhow!("apply: <migration-id> required"))?,
+                id: o
+                    .positional
+                    .ok_or_else(|| anyhow!("apply: <migration-id> required"))?,
                 force: o.force,
             })
         }
@@ -159,8 +175,20 @@ fn main() -> Result<()> {
     match cmd {
         Cmd::List => list(),
         Cmd::Status { db } => status(&db),
-        Cmd::Up { db, apply, backup, target, force } => up(&db, apply, backup, target.as_deref(), force),
-        Cmd::Apply { db, apply, backup, id, force } => apply_one(&db, apply, backup, &id, force),
+        Cmd::Up {
+            db,
+            apply,
+            backup,
+            target,
+            force,
+        } => up(&db, apply, backup, target.as_deref(), force),
+        Cmd::Apply {
+            db,
+            apply,
+            backup,
+            id,
+            force,
+        } => apply_one(&db, apply, backup, &id, force),
     }
 }
 
@@ -186,7 +214,10 @@ fn print_status(s: &Status) {
         println!("  (none)");
     } else {
         for r in &s.applied {
-            println!("  [✓] {}  applied_at={}  ({})", r.version, r.applied_at, r.description);
+            println!(
+                "  [✓] {}  applied_at={}  ({})",
+                r.version, r.applied_at, r.description
+            );
         }
     }
     println!("\n== pending ==");
@@ -214,7 +245,10 @@ fn up(
         return Ok(());
     }
     if !apply {
-        println!("\n[dry-run] {} migration(s) would be applied. Re-run with --apply to commit.", status.pending.len());
+        println!(
+            "\n[dry-run] {} migration(s) would be applied. Re-run with --apply to commit.",
+            status.pending.len()
+        );
         return Ok(());
     }
     backup_db(db, backup.as_deref(), force)?;

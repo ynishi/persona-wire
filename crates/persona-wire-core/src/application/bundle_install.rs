@@ -172,8 +172,12 @@ pub fn install_bundle(
     mode: ConflictMode,
     storage: &SqliteStorage,
 ) -> WireResult<BundleInstallReport> {
-    let manifest: BundleManifest = toml::from_str(&bundle.body)
-        .map_err(|e| WireError::Domain(DomainError::InvalidSpec(format!("bundle TOML parse: {}", e))))?;
+    let manifest: BundleManifest = toml::from_str(&bundle.body).map_err(|e| {
+        WireError::Domain(DomainError::InvalidSpec(format!(
+            "bundle TOML parse: {}",
+            e
+        )))
+    })?;
 
     let install_id = Ulid::new();
     let mut report = BundleInstallReport {
@@ -212,9 +216,7 @@ pub fn install_bundle(
                 continue;
             }
         };
-        match resolve_name(&entry.name, mode, |n| {
-            Ok(spec_reg.get(n)?.is_some())
-        })? {
+        match resolve_name(&entry.name, mode, |n| Ok(spec_reg.get(n)?.is_some()))? {
             Resolution::Use(final_name) => match spec_reg.register(&final_name, &spec) {
                 Ok(id) => {
                     if final_name != entry.name {
@@ -255,11 +257,14 @@ pub fn install_bundle(
     for entry in &manifest.projections {
         // Rewrite spec_ref via spec_rename map if it was renamed.
         let resolved_spec_ref = lookup_rename(&spec_rename, &entry.spec_ref);
-        match resolve_name(&entry.name, mode, |n| {
-            Ok(proj_reg.get(n)?.is_some())
-        })? {
+        match resolve_name(&entry.name, mode, |n| Ok(proj_reg.get(n)?.is_some()))? {
             Resolution::Use(final_name) => {
-                match build_projection(&final_name, &resolved_spec_ref, &entry.template, &entry.target_form) {
+                match build_projection(
+                    &final_name,
+                    &resolved_spec_ref,
+                    &entry.template,
+                    &entry.target_form,
+                ) {
                     Ok(proj) => match proj_reg.register(&proj) {
                         Ok(id) => report.installed.push(InstalledItem {
                             kind: "projection".into(),
@@ -347,7 +352,13 @@ pub fn install_bundle(
     for entry in &manifest.edges {
         let src_name = lookup_rename(&node_rename, &entry.from_name);
         let tgt_name = lookup_rename(&node_rename, &entry.to_name);
-        match build_edge(storage, &src_name, &tgt_name, &entry.edge_type, &entry.metadata) {
+        match build_edge(
+            storage,
+            &src_name,
+            &tgt_name,
+            &entry.edge_type,
+            &entry.metadata,
+        ) {
             Ok(edge) => match storage.insert_edge(&edge) {
                 Ok(()) => report.installed.push(InstalledItem {
                     kind: "edge".into(),
@@ -597,7 +608,11 @@ fn build_projection(
     ))
 }
 
-fn build_node(name: &str, node_type: &str, metadata: &serde_json::Value) -> crate::domain::graph::Node {
+fn build_node(
+    name: &str,
+    node_type: &str,
+    metadata: &serde_json::Value,
+) -> crate::domain::graph::Node {
     build_node_with_metadata(
         name,
         node_type,
@@ -681,7 +696,13 @@ fn finalize(
         .unwrap_or(0);
     let report_json = serde_json::to_string(report)
         .map_err(|e| WireError::Other(format!("report serialize: {}", e)))?;
-    storage.append_bundle_install(install_id, bundle_id, &report.mode.to_string(), now, &report_json)
+    storage.append_bundle_install(
+        install_id,
+        bundle_id,
+        &report.mode.to_string(),
+        now,
+        &report_json,
+    )
 }
 
 // ---- tests ----------------------------------------------------------------
@@ -908,11 +929,7 @@ projection_ref = "news_overview"
 
         // re-install → auto-increment composite names
         let r2 = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
-        let final_names: Vec<_> = r2
-            .installed
-            .iter()
-            .map(|i| i.final_name.clone())
-            .collect();
+        let final_names: Vec<_> = r2.installed.iter().map(|i| i.final_name.clone()).collect();
         assert!(final_names.contains(&"shi.mailbox-1".to_string()));
         assert!(final_names.contains(&"shi.news-1".to_string()));
     }
@@ -946,7 +963,9 @@ maintenance_exempt = true
             .expect("wiring node row");
         let node = s.get_node(&node_id).unwrap().expect("get_node");
         assert_eq!(
-            node.metadata.get("maintenance_exempt").and_then(|v| v.as_bool()),
+            node.metadata
+                .get("maintenance_exempt")
+                .and_then(|v| v.as_bool()),
             Some(true),
             "maintenance_exempt should round-trip into the node metadata, got: {:?}",
             node.metadata
@@ -1040,6 +1059,10 @@ target_form = "yaml"
         assert_eq!(r.installed.len(), 1); // spec succeeded
         assert_eq!(r.errors.len(), 1);
         assert_eq!(r.errors[0].kind, "projection");
-        assert!(r.errors[0].error.contains("yaml"), "got: {}", r.errors[0].error);
+        assert!(
+            r.errors[0].error.contains("yaml"),
+            "got: {}",
+            r.errors[0].error
+        );
     }
 }

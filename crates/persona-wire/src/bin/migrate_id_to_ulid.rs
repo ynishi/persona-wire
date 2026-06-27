@@ -33,12 +33,23 @@ fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--db" => db = Some(PathBuf::from(it.next().ok_or_else(|| anyhow!("--db requires path"))?)),
+            "--db" => {
+                db = Some(PathBuf::from(
+                    it.next().ok_or_else(|| anyhow!("--db requires path"))?,
+                ))
+            }
             "--apply" => apply = true,
             "--dry-run" => apply = false,
-            "--backup" => backup = Some(PathBuf::from(it.next().ok_or_else(|| anyhow!("--backup requires path"))?)),
+            "--backup" => {
+                backup = Some(PathBuf::from(
+                    it.next().ok_or_else(|| anyhow!("--backup requires path"))?,
+                ))
+            }
             "--mapping-out" => {
-                mapping_out = Some(PathBuf::from(it.next().ok_or_else(|| anyhow!("--mapping-out requires path"))?))
+                mapping_out = Some(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| anyhow!("--mapping-out requires path"))?,
+                ))
             }
             "--force" => force = true,
             "-h" | "--help" => {
@@ -52,17 +63,21 @@ fn parse_args() -> Result<Args> {
     }
 
     let db = db.ok_or_else(|| anyhow!("--db <path> is required"))?;
-    Ok(Args { db, apply, backup, mapping_out, force })
+    Ok(Args {
+        db,
+        apply,
+        backup,
+        mapping_out,
+        force,
+    })
 }
 
 fn main() -> Result<()> {
-    eprintln!(
-        "warning: `migrate_id_to_ulid` is deprecated as of v0.7.0; use `pw-migrate up`.\n"
-    );
+    eprintln!("warning: `migrate_id_to_ulid` is deprecated as of v0.7.0; use `pw-migrate up`.\n");
     let args = parse_args()?;
 
-    let conn = Connection::open(&args.db)
-        .with_context(|| format!("open DB: {}", args.db.display()))?;
+    let conn =
+        Connection::open(&args.db).with_context(|| format!("open DB: {}", args.db.display()))?;
     let runner = Runner::new(&conn);
     let status = runner.status()?;
 
@@ -80,7 +95,10 @@ fn main() -> Result<()> {
     }
 
     if !args.apply {
-        println!("\n[dry-run] {} migration(s) would be applied. Re-run with --apply.", status.pending.len());
+        println!(
+            "\n[dry-run] {} migration(s) would be applied. Re-run with --apply.",
+            status.pending.len()
+        );
         if let Some(p) = args.mapping_out.as_ref() {
             // Backward-compat: dump a placeholder mapping file. The v0.7
             // framework no longer exposes per-row mapping at the CLI
@@ -149,6 +167,9 @@ fn resolve_backup(args: &Args) -> Result<PathBuf> {
 // Suppress "unused" lint for items that the v0.7 framework no longer needs
 // here. Kept import paths anchored so future deprecation-tools find them.
 #[allow(dead_code)]
-fn _hold_runtime_refs() -> (HashMap<String, String>, &'static [&'static dyn persona_wire::migrations::Migration]) {
+fn _hold_runtime_refs() -> (
+    HashMap<String, String>,
+    &'static [&'static dyn persona_wire::migrations::Migration],
+) {
     (HashMap::new(), ALL)
 }

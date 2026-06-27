@@ -53,7 +53,9 @@ impl BundleName {
     pub fn new(value: impl Into<String>) -> WireResult<Self> {
         let s = value.into();
         if s.is_empty() {
-            return Err(DomainError::ConstraintViolation("bundle name must not be empty".into()).into());
+            return Err(
+                DomainError::ConstraintViolation("bundle name must not be empty".into()).into(),
+            );
         }
         Ok(Self(s))
     }
@@ -95,7 +97,10 @@ impl BundleVersion {
     pub fn new(value: impl Into<String>) -> WireResult<Self> {
         let s = value.into();
         if s.is_empty() {
-            return Err(DomainError::ConstraintViolation("bundle version must not be empty".into()).into());
+            return Err(DomainError::ConstraintViolation(
+                "bundle version must not be empty".into(),
+            )
+            .into());
         }
         Ok(Self(s))
     }
@@ -155,7 +160,9 @@ impl Bundle {
     ) -> WireResult<Self> {
         let body = body.into();
         if body.is_empty() {
-            return Err(DomainError::ConstraintViolation("bundle body must not be empty".into()).into());
+            return Err(
+                DomainError::ConstraintViolation("bundle body must not be empty".into()).into(),
+            );
         }
         Ok(Self {
             id,
@@ -186,18 +193,13 @@ impl Bundle {
 ///
 /// Force / override is v2 carry — requires History view + install log
 /// (`bundle_installs` table is already provisioned).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ConflictMode {
+    #[default]
     Increment,
     Skip,
     Error,
-}
-
-impl Default for ConflictMode {
-    fn default() -> Self {
-        Self::Increment
-    }
 }
 
 impl fmt::Display for ConflictMode {
@@ -315,7 +317,10 @@ mod tests {
 
     #[test]
     fn conflict_mode_parse_roundtrip() {
-        assert_eq!(ConflictMode::parse("increment").unwrap(), ConflictMode::Increment);
+        assert_eq!(
+            ConflictMode::parse("increment").unwrap(),
+            ConflictMode::Increment
+        );
         assert_eq!(ConflictMode::parse("SKIP").unwrap(), ConflictMode::Skip);
         assert_eq!(ConflictMode::parse("Error").unwrap(), ConflictMode::Error);
         assert!(ConflictMode::parse("force").is_err());

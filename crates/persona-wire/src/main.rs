@@ -659,8 +659,7 @@ fn bundle_op(op: BundleOp, db: &str) -> Result<()> {
         BundleOp::Register { file } => {
             let body = std::fs::read_to_string(&file)
                 .with_context(|| format!("read bundle file: {file}"))?;
-            let value: toml::Value =
-                toml::from_str(&body).context("parse bundle TOML")?;
+            let value: toml::Value = toml::from_str(&body).context("parse bundle TOML")?;
             let bundle_tbl = value
                 .get("bundle")
                 .and_then(|v| v.as_table())

@@ -207,7 +207,10 @@ impl std::fmt::Debug for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Status")
             .field("applied", &self.applied)
-            .field("pending_ids", &self.pending.iter().map(|m| m.id()).collect::<Vec<_>>())
+            .field(
+                "pending_ids",
+                &self.pending.iter().map(|m| m.id()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -324,11 +327,19 @@ mod tests {
 
         // Post-state sanity.
         let bad_nodes: i64 = conn
-            .query_row("SELECT COUNT(*) FROM nodes WHERE length(id) != 26", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE length(id) != 26",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(bad_nodes, 0);
         let bad_specs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM specifications WHERE length(id) != 26", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM specifications WHERE length(id) != 26",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(bad_specs, 0);
     }
