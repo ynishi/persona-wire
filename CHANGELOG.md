@@ -19,6 +19,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.8.0] - 2026-06-27
+
+### Added
+
+- **Bundle scaffolding installer** — a Bundle layer that packages
+  Spec / Projection / Wiring / Workflow (+ optional Node / Edge) into
+  a single TOML manifest and installs them through the existing
+  registries in one shot. Same PoEAA Registry stance as
+  Spec / Projection: domain entity (`Bundle` aggregate with
+  `BundleName` / `BundleVersion` Value Objects, `BundleId` ULID alias,
+  `ConflictMode` enum, `BundleRef` parse), `BundleRegistry` CRUD,
+  `bundle_install` use case (TOML parse → name resolution → section
+  dispatch → install report → install log append).
+- **`bundles` + `bundle_installs` SQLite tables** — `bundles` carries
+  the verbatim TOML body keyed by ULID id + UNIQUE name + version;
+  `bundle_installs` provisions per-install audit rows for the future
+  History / Force / Undo carry. Both materialized by
+  `SqliteStorage::migrate()` for new stores.
+- **6 install section dispatchers** (`bundle_install`): `[[specs]]` →
+  `SpecRegistry`, `[[projections]]` → `ProjectionRegistry`,
+  `[[nodes]]` → `SqliteStorage::insert_node`, `[[edges]]` →
+  `SqliteStorage::insert_edge` with name-based src/tgt resolution,
+  `[[wirings]]` → `outline_node` Node keyed by
+  `format!("{persona}.{slot}")` + canonical metadata
+  (`persona` / `axis` / `source_uri` / optional `projection_ref`),
+  `[[workflows]]` → existing `wire_workflow_register` use case (trigger
+  / action invariants stay owned by the Workflow entity).
+- **Conflict resolution modes** — `Increment` (default,
+  non-destructive auto-suffix `-1` / `-2` ...; internal references
+  inside the same manifest are rewritten through a per-section rename
+  map so re-install never produces a half-broken graph),
+  `Skip` (idempotent for fixed-name bundles), `Error` (abort whole
+  install on first collision). Force / overwrite is intentionally
+  deferred to v2 — install history is already populated to support
+  it.
+- **5 MCP tools** (`persona-wire-mcp`):
+  `wire_bundle_register` (TOML body in, header parsed at register time
+  so a malformed install-time section does not block registration) /
+  `wire_bundle_list` (name-ascending summary) / `wire_bundle_get`
+  (ULID or name, returns verbatim body + timestamps) /
+  `wire_bundle_install` (`mode` defaults to `increment`) /
+  `wire_bundle_delete` (install history preserved).
+- **CLI subcommand** `persona-wire bundle <register|list|get|install
+  |delete>` — same five operations exposed through `clap`. Sample
+  workflow: `persona-wire bundle register --file
+  bundles/quickstart.toml` → `persona-wire bundle install --ref
+  quickstart`.
+- **Sample bundle `bundles/quickstart.toml`** — minimal persona + spec
+  + projection scaffold demonstrating the documented TOML shape;
+  re-installing under the default `increment` mode is non-destructive.
+- **Onboarding §8 "Bundle — scaffolding installer"** (canonical
+  `docs/onboarding.md` + bundled MCP resource copy
+  `crates/persona-wire-mcp/onboarding.md` served at
+  `wire-guide://onboarding`) — TOML manifest shape, CLI ↔ MCP surface
+  map, conflict-resolution semantics, install report structure.
+- **3 Bundle E2E integration tests** (`crates/persona-wire-core/tests/
+  bundle_e2e.rs`) — register / install / verify-via-registries
+  round-trip, increment re-install + rename-map rewrite check,
+  skip-mode idempotency. A fourth regression test
+  (`bundle_delete_after_install_succeeds_and_preserves_install_log`)
+  covers the `wire_bundle_delete` post-fix path; see Fixed below.
+
+### Changed
+
+- **Workspace dep `toml = "0.8"` consolidated** into
+  `[workspace.dependencies]`. `persona-wire-core` / `persona-wire-mcp`
+  / `persona-wire` now declare `toml.workspace = true`, satisfying the
+  `rust-architecture-baseline.md §Dependency` rule.
+- **`SqliteStorage::conn_for_test`** widened from
+  `#[cfg(test)] pub(crate)` to `#[doc(hidden)] pub` so out-of-crate
+  integration tests under `tests/` can verify raw SQL state. The
+  doc-hidden marker keeps the surface off the published rustdoc;
+  production callers still go through the typed registry / repository
+  APIs.
+
+### Fixed
+
+- **`wire_bundle_delete` FOREIGN KEY constraint failed** — pre-fix
+  schema declared `bundle_installs.bundle_id TEXT NOT NULL REFERENCES
+  bundles(id)` (= default RESTRICT on delete), so deleting a bundle
+  whose install log had any rows failed with `FOREIGN KEY constraint
+  failed` — contradicting the design's "install history is
+  intentionally preserved across bundle deletion" stance.
+  - Storage SCHEMA: `bundle_installs.bundle_id` is now nullable + `ON
+    DELETE SET NULL`. New stores get the corrected shape directly.
+  - Migration `m003_bundle_installs_fk_relax` — classic SQLite ALTER
+    recipe (CREATE _new with the corrected FK shape → INSERT SELECT
+    preserving rows → DROP old → RENAME → re-create the bundle_id
+    index). Idempotent on three axes (table-absent, already-relaxed,
+    `schema_migrations` re-run); 3 unit tests cover all three branches
+    plus delete-then-SET-NULL post-state.
+  - Surface caught by real-MCP smoke (`/jikki` Phase 2), not by the
+    initial Bundle E2E test set. The new regression test
+    (`bundle_delete_after_install_succeeds_and_preserves_install_log`)
+    closes that gap end-to-end through the public registry surface.
+
 ## [0.7.0] - 2026-06-27
 
 ### Added
@@ -447,7 +543,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Internal token / persona-literal leak removal**: test fixtures, docs, and README were sanitised of persona-specific identifiers, internal issue IDs, and project labels. Each commit in the 7-commit chain leading to this release was verified by `publish-checker` + `secret-pre-commit-checker` + `content-hygiene-pre-commit-checker` (4-gate sweep).
 
-[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ynishi/persona-wire/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/ynishi/persona-wire/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/ynishi/persona-wire/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/ynishi/persona-wire/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ynishi/persona-wire/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ynishi/persona-wire/compare/v0.4.0...v0.5.0
