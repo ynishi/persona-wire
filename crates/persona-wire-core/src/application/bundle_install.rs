@@ -130,6 +130,16 @@ pub struct WiringEntry {
     /// stored as `metadata.projection_ref`.
     #[serde(default)]
     pub projection_ref: Option<String>,
+    /// Optional opt-in for `metadata.maintenance_exempt = true`. The
+    /// `wire_doctor` graph axis treats nodes carrying this flag as
+    /// self-attached and excludes them from the orphan count (matches
+    /// the `wiring_mapper` read-side convention). v0.8.0 dropped the
+    /// field at the TOML deserialize boundary because it was missing
+    /// from the struct — the v0.8.1 fix surfaces it as a first-class
+    /// entry-level knob so a bundle can declare exemption without
+    /// hand-writing the `metadata` table.
+    #[serde(default)]
+    pub maintenance_exempt: Option<bool>,
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
@@ -388,6 +398,12 @@ pub fn install_bundle(
                     meta.insert(
                         "projection_ref".to_string(),
                         serde_json::Value::String(p.clone()),
+                    );
+                }
+                if let Some(flag) = entry.maintenance_exempt {
+                    meta.insert(
+                        "maintenance_exempt".to_string(),
+                        serde_json::Value::Bool(flag),
                     );
                 }
                 if let serde_json::Value::Object(extra) = &entry.metadata {
@@ -899,6 +915,69 @@ projection_ref = "news_overview"
             .collect();
         assert!(final_names.contains(&"shi.mailbox-1".to_string()));
         assert!(final_names.contains(&"shi.news-1".to_string()));
+    }
+
+    #[test]
+    fn install_wiring_persists_maintenance_exempt_flag() {
+        // Regression test for issue e8b444a6 — v0.8.0 dropped the
+        // top-level `maintenance_exempt = true` value at TOML
+        // deserialize boundary because the WiringEntry struct did not
+        // declare the field. Misaki caught it during the
+        // mia.anchor_files configuration round-trip
+        // (`wire_context_get` showed `maintenance_exempt: false` after
+        // a bundle install that explicitly set it true).
+        let s = setup();
+        let body = r#"
+[[wirings]]
+persona_id = "mia"
+slot = "anchor_files"
+source_uri = "mini-app://anchor_file?alias=for_mia_anchors"
+projection_ref = "mia.section.anchor_files"
+maintenance_exempt = true
+"#;
+        let bundle = register_bundle(&s, "mia.anchor_files.v1", body);
+        let r = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        assert_eq!(r.installed.len(), 1, "report: {:?}", r);
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+
+        let node_id = s
+            .lookup_node_id_by_name("mia.anchor_files")
+            .unwrap()
+            .expect("wiring node row");
+        let node = s.get_node(&node_id).unwrap().expect("get_node");
+        assert_eq!(
+            node.metadata.get("maintenance_exempt").and_then(|v| v.as_bool()),
+            Some(true),
+            "maintenance_exempt should round-trip into the node metadata, got: {:?}",
+            node.metadata
+        );
+    }
+
+    #[test]
+    fn install_wiring_omits_maintenance_exempt_when_absent() {
+        // Coverage for the default branch — wirings that do not opt in
+        // must not synthesize a metadata.maintenance_exempt key, so
+        // existing graph callers that gate on `Value::Bool` presence
+        // keep their behaviour.
+        let s = setup();
+        let body = r#"
+[[wirings]]
+persona_id = "shi"
+slot = "mailbox"
+source_uri = "mini-app://mailbox?alias=for_shi"
+"#;
+        let bundle = register_bundle(&s, "shi.mailbox.v1", body);
+        install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        let node_id = s
+            .lookup_node_id_by_name("shi.mailbox")
+            .unwrap()
+            .expect("wiring node row");
+        let node = s.get_node(&node_id).unwrap().expect("get_node");
+        assert!(
+            node.metadata.get("maintenance_exempt").is_none(),
+            "absent flag should not synthesize metadata key, got: {:?}",
+            node.metadata
+        );
     }
 
     #[test]
