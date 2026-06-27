@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.8.1] - 2026-06-27
+
+### Fixed
+
+- **Bundle `[[wirings]]` section dropped `maintenance_exempt = true`**
+  (issue `e8b444a6`) — `WiringEntry` did not declare the field, so
+  serde silently discarded the top-level value at TOML deserialize
+  time and the installed wiring node persisted as
+  `metadata.maintenance_exempt = false` (the `wiring_mapper` read-side
+  default). The `wire_doctor` graph axis then surfaced these nodes as
+  orphans even though the bundle author had asked them to be treated
+  as self-attached. Surface caught by the 2026-06-27 mia.anchor_files
+  configuration round-trip (post-v0.8.0 self-detect).
+  - `WiringEntry` gains a first-class `maintenance_exempt:
+    Option<bool>` field. When the caller opts in, the dispatch loop
+    inserts `metadata.maintenance_exempt = true`; absent / `Some(false)
+    `+ omitted leave the metadata key untouched, preserving behaviour
+    for existing graph callers that gate on `Value::Bool` presence.
+  - Free-form `metadata = { … }` table input still wins on key
+    collision through the existing `for (k, v) in extra { meta.insert
+    (...) }` loop, so the field-level opt-in is additive on top.
+  - 2 regression unit tests (`install_wiring_persists_maintenance_exempt
+    _flag` for the round-trip + `install_wiring_omits_maintenance_exempt
+    _when_absent` for the default branch). Bundle suite 24 → 26 tests.
+
 ## [0.8.0] - 2026-06-27
 
 ### Added
@@ -543,7 +568,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Internal token / persona-literal leak removal**: test fixtures, docs, and README were sanitised of persona-specific identifiers, internal issue IDs, and project labels. Each commit in the 7-commit chain leading to this release was verified by `publish-checker` + `secret-pre-commit-checker` + `content-hygiene-pre-commit-checker` (4-gate sweep).
 
-[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ynishi/persona-wire/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/ynishi/persona-wire/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ynishi/persona-wire/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ynishi/persona-wire/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ynishi/persona-wire/compare/v0.5.2...v0.6.0
