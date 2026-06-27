@@ -127,7 +127,7 @@ impl MiniAppAdapter {
             open_mini_app_store(&spec.table, spec.scope.as_deref(), spec.root.as_deref()).await?;
         let effective_limit = spec.limit.or(Some(1000));
         let rows = store
-            .list(effective_limit, None, None)
+            .list(effective_limit, None, None, None)
             .await
             .map_err(|e| WireError::Storage(format!("mini-app adapter: list: {e}")))?;
 
@@ -213,6 +213,7 @@ impl MiniAppAdapter {
             Some(spec.params.clone()),
             Some(&spec.table),
             spec.limit,
+            None,
             None,
             None,
         )
@@ -441,6 +442,8 @@ async fn fetch_per_table_alias_as_global(
         default_limit: per_table_rec.default_limit,
         description: per_table_rec.description,
         params_schema: per_table_rec.params_schema,
+        fields: None,
+        order_by: None,
         scope: None,
     })
 }

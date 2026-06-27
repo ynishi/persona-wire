@@ -40,6 +40,8 @@ async fn seed_global_alias_user(user_dir: &Path, name: &str, table: &str, filter
         None,
         None,
         None,
+        None,
+        None,
     );
     storage
         .alias_create(AliasScope::User, rec)
@@ -56,6 +58,8 @@ async fn seed_global_alias_project(project_dir: &Path, name: &str, table: &str, 
         SourceSpec::Single(table.to_string()),
         None,
         filter_json,
+        None,
+        None,
         None,
         None,
         None,
