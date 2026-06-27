@@ -164,6 +164,66 @@ fn bundle_reinstall_increments_names_without_duplicating_originals() {
 }
 
 #[test]
+fn bundle_delete_after_install_succeeds_and_preserves_install_log() {
+    // Regression test for /jikki Phase 2 smoke finding: pre-fix
+    // `bundle_installs.bundle_id` was `NOT NULL REFERENCES bundles(id)`
+    // (default RESTRICT), so deleting a bundle whose install log had
+    // any rows failed with FOREIGN KEY constraint failed — even though
+    // the registry and onboarding doc claim install history is
+    // preserved across deletion.
+    //
+    // After the storage SCHEMA fix (bundle_id nullable + ON DELETE SET
+    // NULL), `wire_bundle_delete` must succeed AND the historical
+    // install_id rows must survive.
+    let s = setup();
+    let reg = BundleRegistry::new(&s);
+    reg.register(
+        &BundleName::new("delete-me").unwrap(),
+        &BundleVersion::new("0.1.0").unwrap(),
+        None,
+        QUICKSTART_BODY,
+    )
+    .unwrap();
+    let bundle = reg
+        .resolve(&BundleRef::parse("delete-me").unwrap())
+        .unwrap()
+        .unwrap();
+    let bundle_id = bundle.id;
+    // Install once so bundle_installs has a row tied to this bundle.
+    let report = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+    assert!(report.errors.is_empty());
+
+    // Delete the parent row — pre-fix this returned FOREIGN KEY
+    // constraint failed.
+    let deleted = reg
+        .delete(&BundleName::new("delete-me").unwrap())
+        .expect("delete after install");
+    assert!(deleted);
+    assert!(reg
+        .get(&BundleName::new("delete-me").unwrap())
+        .unwrap()
+        .is_none());
+
+    // The install log row survived; bundle_id is now NULL because of
+    // ON DELETE SET NULL.
+    let (count, bundle_id_after): (i64, Option<String>) = s
+        .conn_for_test()
+        .query_row(
+            "SELECT COUNT(*), MAX(bundle_id) FROM bundle_installs WHERE install_id = ?1",
+            rusqlite::params![report.install_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "install log row should survive bundle delete");
+    assert!(
+        bundle_id_after.is_none(),
+        "bundle_id should be SET NULL after parent delete, got {:?} (was bundle_id={:?})",
+        bundle_id_after,
+        bundle_id
+    );
+}
+
+#[test]
 fn bundle_skip_mode_is_idempotent_for_fixed_names() {
     let s = setup();
     let reg = BundleRegistry::new(&s);

@@ -98,9 +98,11 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     /// Borrow the underlying `rusqlite::Connection` for tests that need
     /// to verify SQL-level state (row counts, raw column reads) that the
-    /// public API does not expose.
-    #[cfg(test)]
-    pub(crate) fn conn_for_test(&self) -> &Connection {
+    /// public API does not expose. Out-of-crate integration tests under
+    /// `tests/` see this method too — production callers should reach
+    /// for the typed repository / registry surfaces instead.
+    #[doc(hidden)]
+    pub fn conn_for_test(&self) -> &Connection {
         &self.conn
     }
 
@@ -1194,9 +1196,15 @@ CREATE TABLE IF NOT EXISTS bundles (
 
 CREATE INDEX IF NOT EXISTS idx_bundles_name ON bundles(name);
 
+-- bundle_id is nullable + ON DELETE SET NULL so a Bundle row can be
+-- deleted while its historical install log rows survive ("install history
+-- is intentionally preserved across bundle deletion" — see Bundle v1
+-- design §4.2 / docs/onboarding.md §8.3). Existing DBs created before
+-- 0.7.x where the column was NOT NULL REFERENCES bundles(id) are
+-- migrated by migrations::m003_bundle_installs_fk_relax.
 CREATE TABLE IF NOT EXISTS bundle_installs (
     install_id   TEXT PRIMARY KEY,
-    bundle_id    TEXT NOT NULL REFERENCES bundles(id),
+    bundle_id    TEXT REFERENCES bundles(id) ON DELETE SET NULL,
     mode         TEXT NOT NULL CHECK (mode IN ('increment', 'skip', 'error')),
     installed_at INTEGER NOT NULL DEFAULT 0,
     report       TEXT NOT NULL DEFAULT '{}'

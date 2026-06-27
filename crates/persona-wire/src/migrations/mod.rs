@@ -15,6 +15,7 @@ pub use ulid::Ulid;
 
 pub mod m001_node_id_ulid;
 pub mod m002_registry_id_ulid;
+pub mod m003_bundle_installs_fk_relax;
 
 /// One immutable, monotonic schema change. `id` must be unique across the
 /// whole [`ALL`] list and never change once shipped — it is the persistent
@@ -39,6 +40,7 @@ pub trait Migration: Sync {
 pub static ALL: &[&'static dyn Migration] = &[
     &m001_node_id_ulid::MIGRATION,
     &m002_registry_id_ulid::MIGRATION,
+    &m003_bundle_installs_fk_relax::MIGRATION,
 ];
 
 /// Driver around a `Connection` that knows how to read / write the
@@ -307,13 +309,13 @@ mod tests {
 
         let s = runner.status().unwrap();
         assert_eq!(s.applied.len(), 0);
-        assert_eq!(s.pending.len(), 2);
+        assert_eq!(s.pending.len(), 3);
 
         let now = runner.up(None).unwrap();
-        assert_eq!(now.len(), 2);
+        assert_eq!(now.len(), 3);
 
         let s2 = runner.status().unwrap();
-        assert_eq!(s2.applied.len(), 2);
+        assert_eq!(s2.applied.len(), 3);
         assert!(s2.pending.is_empty());
 
         // Re-run is a no-op.
@@ -340,7 +342,7 @@ mod tests {
         runner.apply("001_node_id_ulid").unwrap();
         let s = runner.status().unwrap();
         assert_eq!(s.applied.len(), 1);
-        assert_eq!(s.pending.len(), 1);
+        assert_eq!(s.pending.len(), 2);
 
         // Second time errors.
         assert!(runner.apply("001_node_id_ulid").is_err());
@@ -358,7 +360,8 @@ mod tests {
         assert_eq!(now.len(), 1);
         assert_eq!(now[0].version, "001_node_id_ulid");
         let s = runner.status().unwrap();
-        assert_eq!(s.pending.len(), 1);
+        assert_eq!(s.pending.len(), 2);
         assert_eq!(s.pending[0].id(), "002_registry_id_ulid");
+        assert_eq!(s.pending[1].id(), "003_bundle_installs_fk_relax");
     }
 }
