@@ -43,10 +43,14 @@ wiring entries; a **NamedProjection** binds the Specification to a
 handlebars template and a target form. `wire_render` fetches the source
 fresh through the Layer 6 Adapter and renders the template.
 `wire_prompt_context` walks every Slot for the persona, optionally
-filtered by `projection_names`, and concatenates the rendered blocks into
-a single PromptContext string. Optional per-persona overlays live in
-persona-pack under `[extra.persona_wire.projections.<axis>]` (literal
-key) and are folded into the base template through a `MergeStrategy`.
+filtered by `projection_names` (include subset) and / or
+`projection_exclude_names` (exclude subset), and concatenates the
+rendered blocks into a single PromptContext string. The two filter
+arguments compose as AND NOT (`include \ exclude`): exclude wins on
+intersection, unknown names are silently ignored. Optional per-persona
+overlays live in persona-pack under
+`[extra.persona_wire.projections.<axis>]` (literal key) and are folded
+into the base template through a `MergeStrategy`.
 
 ## 1. Install + run
 
@@ -437,8 +441,20 @@ callers that read only the flat fields continue to work unchanged.
 // MCP: wire_prompt_context — renders every registered axis for the persona
 { "persona_id": "alpha" }
 
-// MCP: wire_prompt_context — explicit subset
+// MCP: wire_prompt_context — explicit subset (include)
 { "persona_id": "alpha", "projection_names": ["active"] }
+
+// MCP: wire_prompt_context — exclude a few noisy slots from the full set
+// (v0.9.0+) Useful when you want "everything except mail / tick_log / etc."
+// without enumerating the full remainder on the include side.
+{ "persona_id": "alpha", "projection_exclude_names": ["tick_log"] }
+
+// MCP: wire_prompt_context — include ∧ ¬exclude (AND NOT, v0.9.0+)
+// Both arguments compose: exclude wins on intersection, unknown names
+// are silently ignored.
+{ "persona_id": "alpha",
+  "projection_names":         ["active", "handoff", "mailbox"],
+  "projection_exclude_names": ["mailbox"] }
 ```
 
 Successful output looks like:
@@ -477,6 +493,15 @@ A handy subset call for narrower steps:
 mcp__persona-wire__wire_prompt_context({
   persona_id: "<id>",
   projection_names: ["handoff"]
+})
+```
+
+Or, when you want everything except a few noisy slots (v0.9.0+):
+
+```
+mcp__persona-wire__wire_prompt_context({
+  persona_id:               "<id>",
+  projection_exclude_names: ["tick_log", "mailbox"]
 })
 ```
 
@@ -644,7 +669,10 @@ collapses to three steps:
 
 `projection_names: ["axis"]` lets the caller subset the inject (handoff
 only at close, full set at wake), so the same wiring serves both ends
-of the session without skill-side branching.
+of the session without skill-side branching. `projection_exclude_names`
+(v0.9.0+) covers the opposite case — render every wired axis except
+the noisy ones (e.g. `["tick_log", "friend_map"]` at work-mode wake,
+without enumerating the full remainder on the include side).
 
 ## 7. Add another persona
 
