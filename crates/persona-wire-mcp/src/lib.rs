@@ -243,6 +243,11 @@ pub struct WirePromptContextParams {
     /// `[extra.persona_wire.sections]`.
     #[serde(default)]
     pub projection_names: Option<Vec<String>>,
+    /// Optional subset of slot names to exclude (e.g. `["mail", "news"]`).
+    /// Combines with `projection_names` as AND NOT: `include \ exclude`.
+    /// `None` (omitted) = no exclusion. Unknown names are ignored.
+    #[serde(default)]
+    pub projection_exclude_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -811,7 +816,7 @@ impl WireServer {
     /// rendered blocks into a single PromptContext.
     #[tool(
         name = "wire_prompt_context",
-        description = "Run every registered NamedProjection through the Layer 6 Adapter (mini-app:// / file:// schemes supported) to fresh-fetch each wiring entry's source_uri, render via handlebars, and return the concatenated PromptContext literal in one call. Used as the `/wake` auto-load entry — wire holds wiring metadata only, data lives in the SoT (mini-app / file / outline)."
+        description = "Run every registered NamedProjection through the Layer 6 Adapter (mini-app:// / file:// schemes supported) to fresh-fetch each wiring entry's source_uri, render via handlebars, and return the concatenated PromptContext literal in one call. Used as the `/wake` auto-load entry — wire holds wiring metadata only, data lives in the SoT (mini-app / file / outline). Optional `projection_names` (include subset) and `projection_exclude_names` (exclude subset) compose as AND NOT (`include \\ exclude`); exclude wins on intersection, unknown names are ignored."
     )]
     async fn wire_prompt_context_tool(
         &self,
@@ -822,6 +827,7 @@ impl WireServer {
             WirePromptContextInput {
                 persona_id: p.persona_id,
                 projection_names: p.projection_names,
+                projection_exclude_names: p.projection_exclude_names,
             },
             storage,
             &self.registry,
@@ -1052,6 +1058,7 @@ impl WireServer {
                             WirePromptContextInput {
                                 persona_id,
                                 projection_names: Some(names),
+                                projection_exclude_names: None,
                             },
                             self.storage.clone(),
                             &self.registry,

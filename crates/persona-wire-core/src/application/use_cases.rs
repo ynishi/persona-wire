@@ -228,6 +228,19 @@ pub struct WirePromptContextInput {
     pub persona_id: String,
     /// `Some(["active", "ng"])` で該当 slot のみ render、 `None` で全 slot。
     pub projection_names: Option<Vec<String>>,
+    /// `Some(["mail", "news"])` で該当 slot を除外、 `None` で除外なし。
+    /// `projection_names` と組み合わせ可 — semantics は AND NOT:
+    ///
+    /// | projection_names | projection_exclude_names | 結果集合                            |
+    /// |------------------|--------------------------|-------------------------------------|
+    /// | None             | None                     | 全 projection (現挙動互換)          |
+    /// | Some([...])      | None                     | include 集合のみ (現挙動互換)       |
+    /// | None             | Some([...])              | 全 projection \ exclude             |
+    /// | Some([...])      | Some([...])              | include \ exclude (AND NOT)         |
+    ///
+    /// 交差時は exclude が優先 (= 明示除外が勝つ)、 未登録 name は無視
+    /// (warning なし、 後方互換性優先)、 結果空集合は空 context 返却。
+    pub projection_exclude_names: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -285,7 +298,12 @@ pub async fn wire_prompt_context(
             crate::domain::error::WireError::Storage("storage mutex poisoned".to_string())
         })?;
         let proj_reg = ProjectionRegistry::new(&s);
-        let slots = enumerate_slot_names(&s, &input.persona_id, input.projection_names.as_deref())?;
+        let slots = enumerate_slot_names(
+            &s,
+            &input.persona_id,
+            input.projection_names.as_deref(),
+            input.projection_exclude_names.as_deref(),
+        )?;
         let mut out: Vec<CollectedSlot> = Vec::new();
         for slot in &slots {
             if let Some(c) = collect_slot(
@@ -349,27 +367,45 @@ async fn resolve_persona_overlays(
 /// spec query で全件取得し、 `wiring_mapper::extract_slot` 経由で slot 名を
 /// 抽出する (storage 互換 key `metadata.axis` の直リードは禁止、
 /// crate-level "Slot vocabulary" rationale 参照)。
+///
+/// `exclude` で除外 slot 名集合を指定すると、 `explicit` / 全件 enumerate の
+/// 結果から exclude 集合を引いた残りを返す (`WirePromptContextInput`
+/// docstring の AND NOT semantics 参照)。 交差時は exclude 優先 (= 明示除外が
+/// 勝つ)、 未登録 name は無視。
 fn enumerate_slot_names(
     storage: &SqliteStorage,
     persona_id: &str,
     explicit: Option<&[String]>,
+    exclude: Option<&[String]>,
 ) -> WireResult<Vec<String>> {
     use crate::application::wiring_mapper;
-    if let Some(names) = explicit {
-        return Ok(names.to_vec());
+    let base: Vec<String> = if let Some(names) = explicit {
+        names.to_vec()
+    } else {
+        let spec = Specification::And(vec![
+            Specification::TypeIs(wiring_mapper::WIRING_TYPE.to_string()),
+            Specification::MetadataEq {
+                path: wiring_mapper::META_PERSONA.to_string(),
+                value: serde_json::json!(persona_id),
+            },
+        ]);
+        let nodes = collect_matching_nodes(storage, &spec)?;
+        nodes
+            .iter()
+            .filter_map(|n| wiring_mapper::extract_slot(n).map(str::to_owned))
+            .collect()
+    };
+    if let Some(skip) = exclude {
+        if !skip.is_empty() {
+            let skip_set: std::collections::BTreeSet<&str> =
+                skip.iter().map(String::as_str).collect();
+            return Ok(base
+                .into_iter()
+                .filter(|s| !skip_set.contains(s.as_str()))
+                .collect());
+        }
     }
-    let spec = Specification::And(vec![
-        Specification::TypeIs(wiring_mapper::WIRING_TYPE.to_string()),
-        Specification::MetadataEq {
-            path: wiring_mapper::META_PERSONA.to_string(),
-            value: serde_json::json!(persona_id),
-        },
-    ]);
-    let nodes = collect_matching_nodes(storage, &spec)?;
-    Ok(nodes
-        .iter()
-        .filter_map(|n| wiring_mapper::extract_slot(n).map(str::to_owned))
-        .collect())
+    Ok(base)
 }
 
 /// Phase 1 per-slot collect — 1 slot 分の wiring entry resolve + base projection
@@ -2810,5 +2846,112 @@ mod tests {
         // Only the valid wiring survives; drift is doctored, not surfaced.
         assert_eq!(out.wirings.len(), 1);
         assert_eq!(out.wirings[0].slot, "mail");
+    }
+
+    // ---- enumerate_slot_names: projection_names / projection_exclude_names filter ----
+    //
+    // 4 case (両 None / include only / exclude only / both) + 3 edge (交差優先 /
+    // 未登録 name / 空集合)。 `WirePromptContextInput` docstring の AND NOT
+    // semantics に対応する。
+
+    fn seed_three_slots(s: &SqliteStorage) {
+        seed_wiring(s, "alpha", "news", "mini-app://news?alias=for_alpha", false);
+        seed_wiring(s, "alpha", "mail", "mini-app://mail?alias=for_alpha", false);
+        seed_wiring(s, "alpha", "todo", "mini-app://todo?alias=for_alpha", false);
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn enumerate_slots_both_none_returns_all() {
+        let s = setup();
+        seed_three_slots(&s);
+        let got = enumerate_slot_names(&s, "alpha", None, None).unwrap();
+        assert_eq!(
+            sorted(got),
+            vec!["mail".to_string(), "news".into(), "todo".into()]
+        );
+    }
+
+    #[test]
+    fn enumerate_slots_include_only_returns_explicit_set() {
+        let s = setup();
+        seed_three_slots(&s);
+        let include = vec!["news".to_string(), "mail".into()];
+        let got = enumerate_slot_names(&s, "alpha", Some(&include), None).unwrap();
+        // explicit はそのままの順序 (= 現挙動互換、 ソート前提にしない)。
+        assert_eq!(got, vec!["news".to_string(), "mail".into()]);
+    }
+
+    #[test]
+    fn enumerate_slots_exclude_only_subtracts_from_all() {
+        let s = setup();
+        seed_three_slots(&s);
+        let exclude = vec!["mail".to_string()];
+        let got = enumerate_slot_names(&s, "alpha", None, Some(&exclude)).unwrap();
+        assert_eq!(sorted(got), vec!["news".to_string(), "todo".into()]);
+    }
+
+    #[test]
+    fn enumerate_slots_both_include_and_exclude_and_not() {
+        let s = setup();
+        seed_three_slots(&s);
+        let include = vec!["news".to_string(), "mail".into(), "todo".into()];
+        let exclude = vec!["mail".to_string()];
+        let got = enumerate_slot_names(&s, "alpha", Some(&include), Some(&exclude)).unwrap();
+        // include の順序を保ったまま exclude を引く。
+        assert_eq!(got, vec!["news".to_string(), "todo".into()]);
+    }
+
+    #[test]
+    fn enumerate_slots_intersection_exclude_wins() {
+        // include / exclude が交差した name (= "mail") は exclude が優先 (除外)。
+        let s = setup();
+        seed_three_slots(&s);
+        let include = vec!["news".to_string(), "mail".into()];
+        let exclude = vec!["mail".to_string()];
+        let got = enumerate_slot_names(&s, "alpha", Some(&include), Some(&exclude)).unwrap();
+        assert_eq!(got, vec!["news".to_string()]);
+    }
+
+    #[test]
+    fn enumerate_slots_unknown_exclude_name_is_ignored() {
+        // exclude に未登録 name を含めても warning なく無視 (後方互換性優先)。
+        let s = setup();
+        seed_three_slots(&s);
+        let exclude = vec!["nonexistent".to_string()];
+        let got = enumerate_slot_names(&s, "alpha", None, Some(&exclude)).unwrap();
+        assert_eq!(
+            sorted(got),
+            vec!["mail".to_string(), "news".into(), "todo".into()]
+        );
+    }
+
+    #[test]
+    fn enumerate_slots_empty_result_returns_empty_vec() {
+        // include 集合 ⊆ exclude 集合 のとき結果は空集合。 None 両指定 (= 全件)
+        // とは区別され、 caller の明示意図を尊重する。
+        let s = setup();
+        seed_three_slots(&s);
+        let include = vec!["news".to_string(), "mail".into()];
+        let exclude = vec!["news".to_string(), "mail".into()];
+        let got = enumerate_slot_names(&s, "alpha", Some(&include), Some(&exclude)).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn enumerate_slots_exclude_empty_vec_is_noop() {
+        // exclude=Some(&[]) は exclude=None と同等 (= 全件返却)。
+        let s = setup();
+        seed_three_slots(&s);
+        let empty: Vec<String> = vec![];
+        let got = enumerate_slot_names(&s, "alpha", None, Some(&empty)).unwrap();
+        assert_eq!(
+            sorted(got),
+            vec!["mail".to_string(), "news".into(), "todo".into()]
+        );
     }
 }
