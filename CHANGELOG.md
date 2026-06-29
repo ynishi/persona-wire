@@ -19,6 +19,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.9.0] - 2026-06-29
+
+### Added
+
+- **`wire_prompt_context` accepts `projection_exclude_names` for AND NOT
+  slot filtering** (issue `a3b4ef24` Phase 1). The new argument composes
+  with the existing `projection_names` as `include \ exclude`, so callers
+  that want "render everything except a few slots" no longer need to
+  enumerate the full remainder on the include side.
+  - `WirePromptContextInput` gains
+    `projection_exclude_names: Option<Vec<String>>` with rustdoc
+    documenting the 4-case semantics table (both-None / include-only /
+    exclude-only / both = AND NOT).
+  - `enumerate_slot_names` extends its signature with an `exclude`
+    argument. Exclude wins on intersection, unknown names are silently
+    ignored for forward compatibility, and an empty `Vec` is a noop
+    equivalent to `None`.
+  - MCP `WirePromptContextParams` passes the argument through to
+    `wire_prompt_context`; the tool description documents the AND NOT
+    semantics so clients see the option at the dispatch site.
+  - 8 spec cases cover both-None / include-only / exclude-only / both
+    paths plus intersection-exclude-wins / unknown-name-ignored /
+    empty-result / empty-exclude-noop edges. Existing callers
+    (`projection_names`-only or both `None`) keep their prior behavior;
+    the new argument defaults to `None`.
+
 ## [0.8.1] - 2026-06-27
 
 ### Fixed
