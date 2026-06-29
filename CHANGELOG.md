@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.9.1] - 2026-06-29
+
+### Fixed
+
+- **Onboarding resource missed `projection_exclude_names` documentation**
+  (commit `f78d9ae`). The v0.9.0 release added
+  `projection_exclude_names` but `docs/onboarding.md` and its
+  `include_str!`-bundled copy at
+  `crates/persona-wire-mcp/onboarding.md` (served as MCP resource
+  `wire-guide://onboarding`) still described only the include-side
+  `projection_names`. First-time integrators discovering the wire
+  surface through the resource had no documented path to the new
+  filter.
+  - §0 mental model now notes that `projection_names` and
+    `projection_exclude_names` compose as AND NOT (`include \ exclude`),
+    with exclude winning on intersection and unknown names ignored.
+  - §5 smoke-test gains two JSONC samples (exclude-only and
+    include ∧ ¬exclude) alongside the existing include-only and
+    render-everything examples.
+  - §6 Skill body gains the exclude-only signature snippet for the
+    "render everything except a few noisy slots" use case.
+  - §6c Migration extends the `projection_names: ["axis"]` subset note
+    with the symmetric exclude usage (e.g. `["tick_log", "friend_map"]`
+    at work-mode wake).
+
 ## [0.9.0] - 2026-06-29
 
 ### Added
