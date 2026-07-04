@@ -19,6 +19,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.10.0] - 2026-07-04
+
+### Added
+
+- **Read tools for `wire_spec_*` and `wire_projection_*` MCP surface**
+  (sibling of the `wire_wiring_create` / onboarding-guide drift work).
+  `wire_spec_get` / `wire_spec_list` / `wire_projection_get` /
+  `wire_projection_list` mirror the existing `wire_bundle_get` /
+  `wire_bundle_list` pattern so that Specifications and NamedProjections
+  gain symmetric read surfaces alongside their existing register / delete
+  operations. Previously, inspecting registry contents (for example
+  during onboarding troubleshoot or persona wire audit) required SQLite
+  direct reads because the MCP surface only exposed register + delete.
+  - `wire_spec_get(id_or_name)` / `wire_projection_get(id_or_name)` use
+    the same name-or-ULID resolution as `wire_bundle_get`, returning
+    full row shape (id / name / body / created_at / updated_at).
+  - `wire_spec_list` / `wire_projection_list` share a new
+    `WireListPageParams { limit, offset }` with default limit 100 / max
+    1000 in `created_at`-descending order.
+  - `SpecRegistry` / `ProjectionRegistry` gain `get_by_ref` /
+    `get_by_name` / `get_by_id` / `list_all` methods returning full
+    `SpecRow` / `ProjectionRow` shape backed by the storage layer.
+
+### Changed
+
+- **`specifications` and `named_projections` tables gain an
+  `updated_at` column** via additive `add_column_if_missing` migration
+  (idempotent, mirrors the existing `bundles` table shape).
+  `upsert_specification` / `upsert_projection` now take `now_secs: i64`
+  to persist `created_at` / `updated_at` alongside existing rows.
+  Legacy rows registered before this migration keep
+  `created_at = updated_at = 0` until the next re-register.
+
 ## [0.9.1] - 2026-06-29
 
 ### Fixed
