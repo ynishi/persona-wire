@@ -128,6 +128,11 @@ impl SqliteStorage {
         self.add_column_if_missing("projections", "template_engine", "TEXT")?;
         self.add_column_if_missing("projections", "projection_kind", "TEXT")?;
         self.add_column_if_missing("projections", "projection_config", "TEXT")?;
+        // Idempotent ALTER for pre-existing DBs created before `updated_at`
+        // tracking was added to `specifications` / `projections` (mirrors the
+        // `bundles` table, which already carries both timestamps).
+        self.add_column_if_missing("specifications", "updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("projections", "updated_at", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(())
     }
 
@@ -501,19 +506,24 @@ impl SqliteStorage {
 
     /// Upsert a Specification by name. Returns the row's ULID `id` (newly
     /// minted on insert; preserved on update of an existing name).
+    /// `created_at` is set only on insert; `updated_at` always to `now_secs`
+    /// (mirrors `upsert_bundle`).
     pub fn upsert_specification(
         &self,
         name: &str,
         expr_json: &str,
+        now_secs: i64,
     ) -> WireResult<crate::domain::entity::projection::SpecificationId> {
         let existing = self.lookup_specification_id_by_name(name)?;
         let id = existing.unwrap_or_else(Ulid::new);
         self.conn
             .execute(
-                "INSERT INTO specifications (id, name, expr_json, created_at) \
-                 VALUES (?1, ?2, ?3, 0) \
-                 ON CONFLICT(name) DO UPDATE SET expr_json = excluded.expr_json",
-                params![id.to_string(), name, expr_json],
+                "INSERT INTO specifications (id, name, expr_json, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?4) \
+                 ON CONFLICT(name) DO UPDATE SET \
+                    expr_json = excluded.expr_json, \
+                    updated_at = excluded.updated_at",
+                params![id.to_string(), name, expr_json, now_secs],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(id)
@@ -530,6 +540,60 @@ impl SqliteStorage {
                 |row| row.get::<_, String>(0),
             )
             .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Read a full Specification row (`id` / `name` / `expr_json` /
+    /// `created_at` / `updated_at`) by `name`. Powers `wire_spec_get`.
+    pub fn get_specification_full_by_name(
+        &self,
+        name: &str,
+    ) -> WireResult<Option<SpecificationFullRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, expr_json, created_at, updated_at \
+                 FROM specifications WHERE name = ?1",
+                params![name],
+                row_to_specification_full,
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Read a full Specification row by `id`. Powers `wire_spec_get`.
+    pub fn get_specification_full_by_id(
+        &self,
+        id: crate::domain::entity::projection::SpecificationId,
+    ) -> WireResult<Option<SpecificationFullRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, expr_json, created_at, updated_at \
+                 FROM specifications WHERE id = ?1",
+                params![id.to_string()],
+                row_to_specification_full,
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// List full Specification rows in `created_at`-descending order.
+    /// Powers `wire_spec_list`.
+    pub fn list_specifications_full(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> WireResult<Vec<SpecificationFullRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, expr_json, created_at, updated_at \
+                 FROM specifications ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![limit, offset], row_to_specification_full)
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| WireError::Storage(e.to_string()))
     }
 
@@ -759,6 +823,8 @@ impl SqliteStorage {
     /// use-case layer should fall back to `PluginRegistry` defaults at
     /// dispatch time.
     /// Upsert a NamedProjection by name. Returns the row's ULID `id`.
+    /// `created_at` is set only on insert; `updated_at` always to `now_secs`
+    /// (mirrors `upsert_bundle` / `upsert_specification`).
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_projection(
         &self,
@@ -769,20 +835,22 @@ impl SqliteStorage {
         template_engine: Option<&str>,
         projection_kind: Option<&str>,
         projection_config: Option<&str>,
+        now_secs: i64,
     ) -> WireResult<crate::domain::entity::projection::ProjectionId> {
         let existing = self.lookup_projection_id_by_name(name)?;
         let id = existing.unwrap_or_else(Ulid::new);
         self.conn
             .execute(
-                "INSERT INTO projections (id, name, spec_ref, template, target_form, created_at, template_engine, projection_kind, projection_config) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8) \
+                "INSERT INTO projections (id, name, spec_ref, template, target_form, created_at, template_engine, projection_kind, projection_config, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?9, ?6, ?7, ?8, ?9) \
                  ON CONFLICT(name) DO UPDATE SET \
                     spec_ref = excluded.spec_ref, \
                     template = excluded.template, \
                     target_form = excluded.target_form, \
                     template_engine = excluded.template_engine, \
                     projection_kind = excluded.projection_kind, \
-                    projection_config = excluded.projection_config",
+                    projection_config = excluded.projection_config, \
+                    updated_at = excluded.updated_at",
                 params![
                     id.to_string(),
                     name,
@@ -791,7 +859,8 @@ impl SqliteStorage {
                     target_form,
                     template_engine,
                     projection_kind,
-                    projection_config
+                    projection_config,
+                    now_secs,
                 ],
             )
             .map_err(|e| WireError::Storage(e.to_string()))?;
@@ -902,6 +971,61 @@ impl SqliteStorage {
             .map_err(|e| WireError::Storage(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Read a full NamedProjection row (`id` / `name` / `spec_ref` /
+    /// `template` / `target_form` / `created_at` / `updated_at`) by `name`.
+    /// Powers `wire_projection_get`.
+    #[allow(clippy::type_complexity)]
+    pub fn get_projection_full_by_name(&self, name: &str) -> WireResult<Option<ProjectionFullRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, spec_ref, template, target_form, created_at, updated_at \
+                 FROM projections WHERE name = ?1",
+                params![name],
+                row_to_projection_full,
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// Read a full NamedProjection row by `id`. Powers `wire_projection_get`.
+    #[allow(clippy::type_complexity)]
+    pub fn get_projection_full_by_id(
+        &self,
+        id: crate::domain::entity::projection::ProjectionId,
+    ) -> WireResult<Option<ProjectionFullRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, spec_ref, template, target_form, created_at, updated_at \
+                 FROM projections WHERE id = ?1",
+                params![id.to_string()],
+                row_to_projection_full,
+            )
+            .optional()
+            .map_err(|e| WireError::Storage(e.to_string()))
+    }
+
+    /// List full NamedProjection rows in `created_at`-descending order.
+    /// Powers `wire_projection_list`.
+    #[allow(clippy::type_complexity)]
+    pub fn list_projections_full(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> WireResult<Vec<ProjectionFullRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, spec_ref, template, target_form, created_at, updated_at \
+                 FROM projections ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![limit, offset], row_to_projection_full)
             .map_err(|e| WireError::Storage(e.to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| WireError::Storage(e.to_string()))
@@ -1114,6 +1238,52 @@ fn row_to_bundle(row: &Row<'_>) -> rusqlite::Result<crate::domain::entity::bundl
     })
 }
 
+/// Row tuple returned by `get_specification_full_*` / `list_specifications_full`:
+/// `(id, name, expr_json, created_at, updated_at)`.
+pub type SpecificationFullRow = (
+    crate::domain::entity::projection::SpecificationId,
+    String,
+    String,
+    i64,
+    i64,
+);
+
+fn row_to_specification_full(row: &Row<'_>) -> rusqlite::Result<SpecificationFullRow> {
+    let id_str: String = row.get(0)?;
+    Ok((
+        text_to_ulid(&id_str)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+/// Row tuple returned by `get_projection_full_*` / `list_projections_full`:
+/// `(id, name, spec_ref, template, target_form, created_at, updated_at)`.
+pub type ProjectionFullRow = (
+    crate::domain::entity::projection::ProjectionId,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+);
+
+fn row_to_projection_full(row: &Row<'_>) -> rusqlite::Result<ProjectionFullRow> {
+    let id_str: String = row.get(0)?;
+    Ok((
+        text_to_ulid(&id_str)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 
@@ -1172,7 +1342,10 @@ CREATE TABLE IF NOT EXISTS specifications (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
     expr_json   TEXT NOT NULL,
-    created_at  INTEGER NOT NULL DEFAULT 0
+    created_at  INTEGER NOT NULL DEFAULT 0,
+    -- read-tool carry — mirrors `bundles.updated_at`, backfilled via
+    -- `add_column_if_missing` in `migrate()` for pre-existing DBs.
+    updated_at  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_specifications_name ON specifications(name);
@@ -1187,7 +1360,10 @@ CREATE TABLE IF NOT EXISTS projections (
     -- P3a Phase 2 (a) — Plugin dispatch hints. NULL → server defaults ("handlebars" / "static" / null).
     template_engine   TEXT,
     projection_kind   TEXT,
-    projection_config TEXT
+    projection_config TEXT,
+    -- read-tool carry — mirrors `bundles.updated_at`, backfilled via
+    -- `add_column_if_missing` in `migrate()` for pre-existing DBs.
+    updated_at        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_projections_name ON projections(name);
@@ -1625,7 +1801,7 @@ mod tests {
     #[test]
     fn specification_upsert_roundtrip_and_overwrite() {
         let s = setup();
-        s.upsert_specification("active_personas", r#"{"TypeIs":"persona"}"#)
+        s.upsert_specification("active_personas", r#"{"TypeIs":"persona"}"#, 100)
             .unwrap();
         assert_eq!(
             s.get_specification("active_personas").unwrap().as_deref(),
@@ -1633,19 +1809,68 @@ mod tests {
         );
 
         // Overwrite under same name
-        s.upsert_specification("active_personas", r#"{"TypeIs":"channel"}"#)
+        s.upsert_specification("active_personas", r#"{"TypeIs":"channel"}"#, 200)
             .unwrap();
         assert_eq!(
             s.get_specification("active_personas").unwrap().as_deref(),
             Some(r#"{"TypeIs":"channel"}"#)
         );
 
-        s.upsert_specification("workflow_defs", r#"{"TypeIs":"workflow_def"}"#)
+        s.upsert_specification("workflow_defs", r#"{"TypeIs":"workflow_def"}"#, 300)
             .unwrap();
         let all = s.list_specifications().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].0, "active_personas");
         assert_eq!(all[1].0, "workflow_defs");
+    }
+
+    #[test]
+    fn specification_full_row_tracks_created_and_updated_at() {
+        let s = setup();
+        let id = s
+            .upsert_specification("active_personas", r#"{"TypeIs":"persona"}"#, 100)
+            .unwrap();
+        let (row_id, name, json, created_at, updated_at) = s
+            .get_specification_full_by_name("active_personas")
+            .unwrap()
+            .expect("row exists");
+        assert_eq!(row_id, id);
+        assert_eq!(name, "active_personas");
+        assert_eq!(json, r#"{"TypeIs":"persona"}"#);
+        assert_eq!(created_at, 100);
+        assert_eq!(updated_at, 100);
+
+        // Overwrite: created_at frozen, updated_at advances.
+        s.upsert_specification("active_personas", r#"{"TypeIs":"channel"}"#, 200)
+            .unwrap();
+        let (_, _, json, created_at, updated_at) = s
+            .get_specification_full_by_id(id)
+            .unwrap()
+            .expect("row exists");
+        assert_eq!(json, r#"{"TypeIs":"channel"}"#);
+        assert_eq!(created_at, 100, "created_at must not change on update");
+        assert_eq!(updated_at, 200);
+
+        assert!(s
+            .get_specification_full_by_name("missing")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn specification_list_full_orders_by_created_at_desc_and_paginates() {
+        let s = setup();
+        s.upsert_specification("a", "{}", 100).unwrap();
+        s.upsert_specification("b", "{}", 300).unwrap();
+        s.upsert_specification("c", "{}", 200).unwrap();
+
+        let all = s.list_specifications_full(1000, 0).unwrap();
+        let names: Vec<_> = all.iter().map(|r| r.1.clone()).collect();
+        assert_eq!(names, vec!["b", "c", "a"], "created_at DESC order");
+
+        let page = s.list_specifications_full(1, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].1, "c", "offset=1 skips the newest row");
     }
 
     #[test]
@@ -1659,6 +1884,7 @@ mod tests {
             None,
             None,
             None,
+            100,
         )
         .unwrap();
         let got = s.get_projection("_persona_toc").unwrap().expect("exists");
@@ -1676,8 +1902,75 @@ mod tests {
 
         // Bad target_form is rejected
         assert!(s
-            .upsert_projection("bad", "any", "tpl", "yaml", None, None, None)
+            .upsert_projection("bad", "any", "tpl", "yaml", None, None, None, 100)
             .is_err());
+    }
+
+    #[test]
+    fn projection_full_row_tracks_created_and_updated_at() {
+        let s = setup();
+        let id = s
+            .upsert_projection(
+                "_persona_toc",
+                "active_personas",
+                "Personas: {{count}}",
+                "prompt",
+                None,
+                None,
+                None,
+                100,
+            )
+            .unwrap();
+        let (row_id, name, spec_ref, template, target_form, created_at, updated_at) = s
+            .get_projection_full_by_name("_persona_toc")
+            .unwrap()
+            .expect("row exists");
+        assert_eq!(row_id, id);
+        assert_eq!(name, "_persona_toc");
+        assert_eq!(spec_ref, "active_personas");
+        assert_eq!(template, "Personas: {{count}}");
+        assert_eq!(target_form, "prompt");
+        assert_eq!(created_at, 100);
+        assert_eq!(updated_at, 100);
+
+        s.upsert_projection(
+            "_persona_toc",
+            "active_personas",
+            "Personas v2: {{count}}",
+            "markdown",
+            None,
+            None,
+            None,
+            200,
+        )
+        .unwrap();
+        let (_, _, _, template, target_form, created_at, updated_at) = s
+            .get_projection_full_by_id(id)
+            .unwrap()
+            .expect("row exists");
+        assert_eq!(template, "Personas v2: {{count}}");
+        assert_eq!(target_form, "markdown");
+        assert_eq!(created_at, 100, "created_at must not change on update");
+        assert_eq!(updated_at, 200);
+
+        assert!(s.get_projection_full_by_name("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn projection_list_full_orders_by_created_at_desc_and_paginates() {
+        let s = setup();
+        for (name, ts) in [("a", 100), ("b", 300), ("c", 200)] {
+            s.upsert_projection(name, "active_personas", "t", "prompt", None, None, None, ts)
+                .unwrap();
+        }
+
+        let all = s.list_projections_full(1000, 0).unwrap();
+        let names: Vec<_> = all.iter().map(|r| r.1.clone()).collect();
+        assert_eq!(names, vec!["b", "c", "a"], "created_at DESC order");
+
+        let page = s.list_projections_full(1, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].1, "c", "offset=1 skips the newest row");
     }
 
     #[test]
@@ -1694,6 +1987,7 @@ mod tests {
             Some("jinja"),
             Some("llm"),
             Some(r#"{"endpoint":"http://localhost:8080"}"#),
+            100,
         )
         .unwrap();
         let got = s.get_projection("with_hints").unwrap().expect("exists");

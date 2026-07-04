@@ -217,8 +217,19 @@ pub struct WireProjectionRegisterParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WireDeleteParams {
     /// Node id (for wire_node_delete / wire_edge_delete) or registered name
-    /// (for wire_spec_delete / wire_projection_delete).
+    /// (for wire_spec_delete / wire_projection_delete). Also reused by
+    /// wire_spec_get / wire_projection_get (same id-or-name resolution).
     pub id_or_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireListPageParams {
+    /// Max rows to return. Defaults to 100, capped at 1000.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip. Defaults to 0.
+    #[serde(default)]
+    pub offset: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -697,6 +708,120 @@ impl WireServer {
             .register(&entity)
             .map_err(|e| e.to_string())?;
         Ok(serde_json::json!({ "id": id.to_string(), "name": p.name }).to_string())
+    }
+
+    /// List registered Specifications in created_at-descending order.
+    #[tool(
+        name = "wire_spec_list",
+        description = "List registered Specifications in created_at-descending order. Default limit 100 / max 1000. Each row carries id / name / json (raw Specification body) / created_at / updated_at."
+    )]
+    async fn wire_spec_list(
+        &self,
+        Parameters(p): Parameters<WireListPageParams>,
+    ) -> Result<String, String> {
+        let limit = p.limit.unwrap_or(100).min(1000) as i64;
+        let offset = p.offset.unwrap_or(0) as i64;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let rows = SpecRegistry::new(&s)
+            .list_full(limit, offset)
+            .map_err(|e| e.to_string())?;
+        let out: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id.to_string(),
+                    "name": r.name,
+                    "json": r.json,
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({ "specs": out }))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Get a Specification by name or id, including the raw JSON body.
+    #[tool(
+        name = "wire_spec_get",
+        description = "Fetch a registered Specification by name or ULID id. Returns id / name / json (raw Specification body) / created_at / updated_at. Errors with NotFound if absent."
+    )]
+    async fn wire_spec_get(
+        &self,
+        Parameters(p): Parameters<WireDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let row = SpecRegistry::new(&s)
+            .get_full_by_ref(&p.id_or_name)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("spec not found: {}", p.id_or_name))?;
+        Ok(serde_json::json!({
+            "id": row.id.to_string(),
+            "name": row.name,
+            "json": row.json,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        })
+        .to_string())
+    }
+
+    /// List registered NamedProjections in created_at-descending order.
+    #[tool(
+        name = "wire_projection_list",
+        description = "List registered NamedProjections in created_at-descending order. Default limit 100 / max 1000. Each row carries id / name / spec_ref / target_form / template / created_at / updated_at."
+    )]
+    async fn wire_projection_list(
+        &self,
+        Parameters(p): Parameters<WireListPageParams>,
+    ) -> Result<String, String> {
+        let limit = p.limit.unwrap_or(100).min(1000) as i64;
+        let offset = p.offset.unwrap_or(0) as i64;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let rows = ProjectionRegistry::new(&s)
+            .list_full(limit, offset)
+            .map_err(|e| e.to_string())?;
+        let out: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id.to_string(),
+                    "name": r.name,
+                    "spec_ref": r.spec_ref,
+                    "target_form": r.target_form.as_str(),
+                    "template": r.template,
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({ "projections": out }))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Get a NamedProjection by name or id.
+    #[tool(
+        name = "wire_projection_get",
+        description = "Fetch a registered NamedProjection by name or ULID id. Returns id / name / spec_ref / target_form / template / created_at / updated_at. Errors with NotFound if absent."
+    )]
+    async fn wire_projection_get(
+        &self,
+        Parameters(p): Parameters<WireDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let row = ProjectionRegistry::new(&s)
+            .get_full_by_ref(&p.id_or_name)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("projection not found: {}", p.id_or_name))?;
+        Ok(serde_json::json!({
+            "id": row.id.to_string(),
+            "name": row.name,
+            "spec_ref": row.spec_ref,
+            "target_form": row.target_form.as_str(),
+            "template": row.template,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        })
+        .to_string())
     }
 
     /// Patch a node's metadata in place (merge or replace). Use for tuning
