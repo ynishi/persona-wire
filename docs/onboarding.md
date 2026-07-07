@@ -143,9 +143,141 @@ always single-row.
   `[[wiki-link]]` references when `?links=edge` is set (default `off`).
   Returns `{ vault_path, note_path, frontmatter, body, wiki_links? }`.
   Example: `obsidian:////Users/me/vault/daily.md?frontmatter=on&links=edge`.
+- `rss://<host>/<path>[?scheme=http][?limit=N]` — fetches an RSS 2.0 /
+  RSS 1.0 / Atom / JSON Feed document (format auto-detected by
+  `feed_rs`) and returns
+  `{ feed: { title, url }, items: [{ title, link, published, summary }] }`.
+  `?scheme=http` downgrades to plain HTTP; default `https`. `?limit=N`
+  caps the item count (default 20). No credentials required.
+- `github://<owner>/<repo>[?kind=issues|pulls|releases][&state=open|closed|all][&limit=N]` —
+  fetches issues / pull requests / releases via the GitHub REST API.
+  Default `kind=issues`; the issues endpoint returns PRs too, so the
+  adapter filters out entries with a `pull_request` key. Optional
+  bearer auth via §2d — public repos work unauthenticated (60 req/h
+  rate limit), authenticated requests get 5000 req/h.
+- `todoist://tasks[?project_id=..][?filter=..][&limit=N]` /
+  `todoist://projects[?limit=N]` — fetches active tasks or projects
+  via the Todoist unified API v1 (the retired REST v2 endpoints are
+  not used). `filter` accepts a natural-language query
+  (e.g. `today | overdue`) and is exclusive with `project_id`. Bearer
+  auth is **mandatory**; missing tokens fail loud with the setup
+  instructions from §2d. `limit` is capped at the API maximum of 200.
+- `notion://search[?query=..][&object=page|data_source][&limit=N]` /
+  `notion://database/<database_id>[?limit=N]` /
+  `notion://data-source/<data_source_id>[?limit=N]` /
+  `notion://page/<page_id>[?limit=N]` — fetches search results, data
+  source query results, or the top-level children of a page via the
+  Notion API v1 pinned at `Notion-Version: 2026-03-11`. The
+  `database` kind resolves through `GET /databases/{id}` and requires
+  exactly one data source (zero or multiple fail loud with the
+  available data-source IDs listed). Page titles are extracted by
+  scanning `properties` for the entry whose type is `"title"` (the
+  property name is user-defined and never assumed). Bearer auth is
+  mandatory and the integration must be shared with the target
+  page / database via *Add connections* in Notion. `limit` is capped
+  at 100.
+- `slack://channels[?types=..][&limit=N][&exclude_archived=true|false]` /
+  `slack://history/<channel_id>[?limit=N][&oldest=<ts>][&latest=<ts>]` /
+  `slack://user/<user_id>` — fetches conversation lists, channel
+  history, or user info via the Slack Web API. Bearer auth (a bot
+  token, `xoxb-...`) is mandatory and sent via the Authorization
+  header only (per Slack's no-tokens-in-querystrings rule for apps
+  created 2020-11 or later). API errors (`ok: false` with a 200
+  status) are lifted into fail loud `WireError::Storage` with the
+  error code embedded (and `needed` / `provided` for `missing_scope`).
+  Message `ts` is kept as a string to avoid float precision loss;
+  thread parents are detected via `thread_ts == ts`. Self-hosted
+  internal apps stay on the pre-2025 Tier 3 for `conversations.history`
+  (50+ req/min) per Slack's 2025-06 clarification. `limit` is capped
+  at 999.
 
 Bulk-insert through `wire_nodes_create_batch` / `wire_edges_create_batch`
 when you have many axes at once.
+
+## 2d. Adapter credentials — token setup
+
+Adapters that hit remote APIs (`github://` / `todoist://` / `notion://` /
+`slack://`) resolve their bearer token through `persona-wire-credentials`
+on **every fetch** — no daemon restart is required after a token
+change, and there is no boot-time keychain prompt.
+
+### Resolution order (per fetch)
+
+For each `<service>` (`github` / `todoist` / `notion` / `slack`) the
+provider chain is checked in this order and the first `Some(token)` wins:
+
+1. Environment variable `PERSONA_WIRE_TOKEN_<SERVICE>` (uppercase; e.g.
+   `PERSONA_WIRE_TOKEN_GITHUB`)
+2. Conventional environment variable alias:
+   - `github` → `GITHUB_TOKEN`
+   - `todoist` → `TODOIST_API_TOKEN`
+   - `notion` → `NOTION_TOKEN`
+   - `slack` → `SLACK_BOT_TOKEN`
+3. OS keyring (`macOS Keychain` / `Windows Credential Manager` /
+   Linux Secret Service), service = `persona-wire`, account = the
+   service name
+
+Empty env vars are treated as absent (they fall through to the next
+provider). Backend errors from the OS keyring **fail loud** — the
+adapter does not silently fall through to the next provider on failure
+(the exception is `NoEntry`, which is a normal miss).
+
+`github://` falls back to unauthenticated requests when no token is
+found (public repos work). The other three fail loud with the setup
+instructions if no token is available.
+
+### CLI — `persona-wire token`
+
+```sh
+# Register a token (reads from stdin — pipe it in or paste at the prompt).
+# Token values are never printed back.
+echo "<paste-token-here>" | persona-wire token set github
+
+# Show which provider supplies each service (env / keyring / none).
+# Never prints token values.
+persona-wire token status
+#   github:   env         (PERSONA_WIRE_TOKEN_GITHUB or GITHUB_TOKEN is set)
+#   todoist:  keyring
+#   notion:   none
+#   slack:    none
+
+# Remove a token from the keyring (idempotent — a missing entry is a no-op).
+persona-wire token rm slack
+```
+
+`token set` accepts stdin only; the token is never taken as a command-line
+argument, so it does not appear in shell history or `ps`. `token` is a
+CLI-only surface — it is intentionally not exposed as an MCP tool, so a
+tool-call argument cannot leak a token into a session log.
+
+### Where to obtain a token
+
+| service | token type | source |
+|---------|------------|--------|
+| GitHub  | Fine-grained PAT | Settings → Developer settings → Personal access tokens → Fine-grained tokens. `Contents: read` + `Issues: read` + `Pull requests: read` covers `github://`. |
+| Todoist | Personal API token | Settings → Integrations → Developer (top of the page). |
+| Notion  | Internal integration token | https://notion.so/profile/integrations → New integration (`ntn_...`). Then **Add connections** on each page / database the integration needs to read. |
+| Slack   | Bot token (`xoxb-...`) | Create an app at https://api.slack.com/apps → OAuth & Permissions → install to your workspace. Minimum scopes for read-only use: `channels:read` + `channels:history` + `users:read`. |
+
+### Wiring a credentialed source into a Node
+
+Once the token is registered, adding the wiring entry is identical to
+the local schemes above — just pass a scheme URI in `source_uri`:
+
+```jsonc
+// MCP: wire_node_create
+{ "name": "alpha.gh_issues",
+  "type": "outline_node",
+  "metadata": {
+    "persona":    "alpha",
+    "axis":       "gh_issues",
+    "source_uri": "github://ynishi/persona-wire?kind=issues&state=open&limit=10"
+  } }
+```
+
+Do **not** embed the token in the URI. Credentials are resolved at fetch
+time through the provider chain above; `source_uri` values are stored in
+plaintext in the SQLite graph and would leak a token literal.
 
 ## 2b. Alias path — filtered / paginated fetches
 
