@@ -1503,6 +1503,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "persona-wire-adapter-todoist"
+version = "0.10.0"
+dependencies = [
+ "async-trait",
+ "percent-encoding",
+ "persona-wire-core",
+ "persona-wire-credentials",
+ "persona-wire-transport-http",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "persona-wire-core"
 version = "0.10.0"
 dependencies = [
@@ -1541,6 +1558,7 @@ dependencies = [
  "persona-wire-adapter-persona-pack",
  "persona-wire-adapter-rss",
  "persona-wire-adapter-sqlite-x",
+ "persona-wire-adapter-todoist",
  "persona-wire-core",
  "rmcp",
  "schemars",

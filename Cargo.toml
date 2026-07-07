@@ -13,6 +13,7 @@ members = [
     "crates/persona-wire-transport-http",
     "crates/persona-wire-credentials",
     "crates/persona-wire-adapter-github",
+    "crates/persona-wire-adapter-todoist",
 ]
 
 [workspace.package]
@@ -47,6 +48,11 @@ clap = { version = "4", features = ["derive"] }
 
 # URI parse (Adapter source_uri query string)
 url = "2"
+
+# Percent-decode of query values already normalized to raw form by adapters
+# (e.g. persona-wire-adapter-todoist's `filter` value, since WireUri::query_get
+# stores raw/undecoded query strings).
+percent-encoding = "2"
 
 # Plugin trait (dyn-compatible async fn — Adapter / Projection)
 async-trait = "0.1"
@@ -83,3 +89,4 @@ persona-wire-adapter-rss = { path = "crates/persona-wire-adapter-rss", version =
 persona-wire-transport-http = { path = "crates/persona-wire-transport-http", version = "0.10.0" }
 persona-wire-credentials = { path = "crates/persona-wire-credentials", version = "0.10.0" }
 persona-wire-adapter-github = { path = "crates/persona-wire-adapter-github", version = "0.10.0" }
+persona-wire-adapter-todoist = { path = "crates/persona-wire-adapter-todoist", version = "0.10.0" }

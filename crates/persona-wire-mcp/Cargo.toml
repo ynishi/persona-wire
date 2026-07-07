@@ -19,6 +19,7 @@ persona-wire-adapter-persona-pack.workspace = true
 persona-wire-adapter-sqlite-x.workspace = true
 persona-wire-adapter-rss.workspace = true
 persona-wire-adapter-github.workspace = true
+persona-wire-adapter-todoist.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true

@@ -16,6 +16,7 @@ use persona_wire_adapter_obsidian::ObsidianAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_rss::RssAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
+use persona_wire_adapter_todoist::TodoistAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
 use persona_wire_core::application::projection_registry::ProjectionRegistry;
 use persona_wire_core::application::spec_registry::SpecRegistry;
@@ -74,6 +75,7 @@ impl WireServer {
                     .with_adapter(McpAdapter::new(mcp_resolver))
                     .with_adapter(RssAdapter)
                     .with_adapter(GithubAdapter)
+                    .with_adapter(TodoistAdapter)
                     .build()
                     .expect("default plugin registry build"),
             ),
