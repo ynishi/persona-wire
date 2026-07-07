@@ -33,7 +33,15 @@
 //!   invalid value (anything other than `open` / `closed` / `all`) fails
 //!   loud.
 //! - `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
-//!   A non-numeric or zero value fails loud.
+//!   A non-numeric or zero value fails loud. For `kind=issues`, the GitHub
+//!   `per_page` sent upstream is over-fetched (4× `limit`, capped at
+//!   [`GITHUB_PER_PAGE_MAX`]) so that up to `limit` real issues can still be
+//!   returned even when the repo mixes many pull requests into the
+//!   `/issues` endpoint (see "GitHub's `/issues` endpoint mixes..." note
+//!   below). `pulls` and `releases` fetch `per_page = limit` directly, since
+//!   there is no post-fetch filtering for those kinds. This over-fetch has
+//!   no effect when `limit >= 25`, since `4 * 25 = 100` already saturates
+//!   the GitHub API's `per_page` ceiling.
 //! - Unknown query keys are silently ignored (same forward-compatible
 //!   convention as `persona-wire-adapter-rss`).
 //!
@@ -108,6 +116,9 @@ pub const BODY_MAX_CHARS: usize = 500;
 /// GitHub REST API base URL.
 pub const API_BASE: &str = "https://api.github.com";
 
+/// GitHub REST API's maximum allowed `per_page` value.
+pub const GITHUB_PER_PAGE_MAX: usize = 100;
+
 /// persona-wire Adapter for GitHub (`github://` scheme).
 pub struct GithubAdapter;
 
@@ -173,16 +184,31 @@ struct GithubUriSpec {
 
 impl GithubUriSpec {
     /// Builds the full GitHub REST API request URL for this spec.
+    ///
+    /// `kind=issues` over-fetches `per_page` (4× `limit`, capped at
+    /// [`GITHUB_PER_PAGE_MAX`]) since GitHub's `/issues` endpoint mixes in
+    /// pull requests that [`normalize_github`] filters out post-fetch; see
+    /// the module docs "URI grammar" section. `pulls` and `releases` have no
+    /// post-fetch filtering, so `per_page = limit` directly.
     fn endpoint_url(&self) -> String {
         match self.kind {
-            GithubKind::Issues | GithubKind::Pulls => {
+            GithubKind::Issues => {
+                let state = self.state.as_deref().unwrap_or("open");
+                // `saturating_mul(4)` is always >= `self.limit` for `limit >= 1`
+                // (guaranteed by `parse_github_uri`'s `limit == 0` rejection), so
+                // `min` alone suffices here; `clamp(self.limit, MAX)` would panic
+                // when `self.limit > GITHUB_PER_PAGE_MAX` (unbounded URI input).
+                let per_page = self.limit.saturating_mul(4).min(GITHUB_PER_PAGE_MAX);
+                format!(
+                    "{API_BASE}/repos/{}/{}/issues?state={state}&per_page={per_page}",
+                    self.owner, self.repo,
+                )
+            }
+            GithubKind::Pulls => {
                 let state = self.state.as_deref().unwrap_or("open");
                 format!(
-                    "{API_BASE}/repos/{}/{}/{}?state={state}&per_page={}",
-                    self.owner,
-                    self.repo,
-                    self.kind.as_str(),
-                    self.limit
+                    "{API_BASE}/repos/{}/{}/pulls?state={state}&per_page={}",
+                    self.owner, self.repo, self.limit
                 )
             }
             GithubKind::Releases => {
@@ -520,10 +546,53 @@ mod tests {
 
     #[test]
     fn endpoint_url_issues_shape() {
+        // limit=5 over-fetches to per_page=20 (4x) so post-filter PR removal
+        // still leaves enough real issues to satisfy the requested limit.
         let spec = parse("github://octocat/hello-world?limit=5").unwrap();
         assert_eq!(
             spec.endpoint_url(),
-            "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=5"
+            "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=20"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_issues_over_fetches_per_page() {
+        let spec = parse("github://octocat/hello-world?limit=3").unwrap();
+        assert_eq!(
+            spec.endpoint_url(),
+            "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=12"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_issues_per_page_capped_at_100() {
+        // limit=50 * 4 = 200, but GitHub's per_page ceiling caps it at 100.
+        let spec = parse("github://octocat/hello-world?limit=50").unwrap();
+        assert_eq!(
+            spec.endpoint_url(),
+            "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=100"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_issues_large_limit_does_not_panic() {
+        // limit > GITHUB_PER_PAGE_MAX must not panic (regression guard for
+        // the clamp-vs-min choice in `endpoint_url`); per_page still caps at
+        // GITHUB_PER_PAGE_MAX.
+        let spec = parse("github://octocat/hello-world?limit=250").unwrap();
+        assert_eq!(
+            spec.endpoint_url(),
+            "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=100"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_pulls_shape_uses_limit_directly() {
+        // `pulls` has no post-fetch filtering, so per_page = limit (no over-fetch).
+        let spec = parse("github://octocat/hello-world?kind=pulls&limit=5").unwrap();
+        assert_eq!(
+            spec.endpoint_url(),
+            "https://api.github.com/repos/octocat/hello-world/pulls?state=open&per_page=5"
         );
     }
 
