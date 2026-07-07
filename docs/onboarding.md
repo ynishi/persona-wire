@@ -40,8 +40,11 @@ the mapper rather than reading `metadata["axis"]` directly.
 Each wiring entry carries a `metadata.source_uri` that points at the real
 Source-of-Truth (mini-app table, file, …). A **Specification** picks the
 wiring entries; a **NamedProjection** binds the Specification to a
-handlebars template and a target form. `wire_render` fetches the source
-fresh through the Layer 6 Adapter and renders the template.
+handlebars template and a target form. `wire_prompt_context` fresh-fetches
+each wiring entry's `source_uri` through the Layer 6 Adapter and renders
+the template; `wire_render` / `wire_init` render the same template against
+graph state only (no adapter fetch — see §3 for the two render-context
+shapes).
 `wire_prompt_context` walks every Slot for the persona, optionally
 filtered by `projection_names` (include subset) and / or
 `projection_exclude_names` (exclude subset), and concatenates the
@@ -450,8 +453,10 @@ fetch budget on an existing `source_uri`. Rules of thumb:
   list path (`mini-app://<table>?limit=N`) and on the alias path
   (`?alias=<name>&limit=N`). Existing aliases keep working.
 
-After the patch, run `wire_render` (or `wire_prompt_context` end-to-end)
-to confirm the row count and template output reflect the new cap.
+After the patch, run `wire_prompt_context` end-to-end to confirm the row
+count and template output reflect the new cap. `wire_render` reflects
+the metadata / node changes but does not exercise the adapter, so it
+will not show a different row count on its own.
 
 ## 3. Register the Specification and NamedProjection (template = data)
 
@@ -474,11 +479,37 @@ is data, registered through the same tool surface.
 }
 ```
 
-The render-time context has:
+The render-time context depends on which use case renders the projection.
+There are two shapes, and the difference is not cosmetic — only one of
+them fetches the `source_uri` through a Layer 6 Adapter.
 
-- `count`, `persona_id`, `axis`
-- `entries`: `[ { wiring_entry: { axis, source_uri }, fetched_data: <Adapter return value> } ]`
-- `nodes`: legacy projection of the matched nodes (kept for ad-hoc use cases)
+**`wire_prompt_context` (async, Adapter-fetched)** — every wiring entry's
+`source_uri` is fresh-fetched through the Layer 6 Adapter before the
+template runs. Context shape:
+
+- `count` — number of matched wiring entries for this slot
+- `persona_id` — the persona passed to `wire_prompt_context`
+- `axis` — the slot name
+- `entries`: `[ { wiring_entry: { axis, source_uri, metadata }, fetched_data: <Adapter return value> } ]`
+  — this is where fetched adapter output lives; iterate with
+  `{{#each entries}}{{this.fetched_data...}}{{/each}}`
+
+**`wire_render` / `wire_init` (sync, no Adapter fetch)** — the spec is
+evaluated against the graph and the matched nodes are handed to the
+template verbatim. **No `source_uri` fetch happens**, so
+`this.fetched_data` is not available. Context shape:
+
+- `count` — number of matched nodes
+- `names` — comma-separated node names (`"n1, n2, …"`)
+- `nodes`: `[ { id, type, metadata } ]` — the matched nodes as-is; use
+  this axis when you only need graph state, not adapter output
+- `persona_id` — only present on `wire_init` (it is name-addressed on
+  `wire_render` and omitted)
+
+Rule of thumb: iterate `entries[].fetched_data` if the template needs
+adapter output (mailbox rows, feed items, page bodies, …) — call it via
+`wire_prompt_context`. Iterate `nodes[]` if the template only needs
+graph state (id / type / metadata) — either path renders it.
 
 Handlebars features available: `{{var}}`, `{{a.b.c}}`, `{{#each list}}…{{/each}}`,
 `{{#if cond}}…{{else}}…{{/if}}`. HTML escaping is disabled. A parse failure
