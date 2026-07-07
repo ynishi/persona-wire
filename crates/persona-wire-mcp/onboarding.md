@@ -487,12 +487,18 @@ them fetches the `source_uri` through a Layer 6 Adapter.
 `source_uri` is fresh-fetched through the Layer 6 Adapter before the
 template runs. Context shape:
 
-- `count` — number of matched wiring entries for this slot
+- `count` — always `1` for the wire_prompt_context per-slot path (one
+  entry per rendered projection)
 - `persona_id` — the persona passed to `wire_prompt_context`
-- `axis` — the slot name
-- `entries`: `[ { wiring_entry: { axis, source_uri, metadata }, fetched_data: <Adapter return value> } ]`
+- `slot` — the slot name (legacy metadata key `axis` on the wiring
+  node; the render context surfaces it as `slot`)
+- `entries`: `[ { wiring_entry: { slot, source_uri }, fetched_data: <Adapter return value> } ]`
   — this is where fetched adapter output lives; iterate with
-  `{{#each entries}}{{this.fetched_data...}}{{/each}}`
+  `{{#each entries}}{{this.fetched_data...}}{{/each}}`. The
+  `wiring_entry` view is deliberately minimal (only `slot` and
+  `source_uri`); if you need node metadata inside the template, route
+  it through the adapter output or add a `nodes[]` axis via
+  `wire_render`
 
 **`wire_render` / `wire_init` (sync, no Adapter fetch)** — the spec is
 evaluated against the graph and the matched nodes are handed to the
@@ -731,7 +737,7 @@ All three are the same shape: a Projection over Nodes whose metadata says
      "name":        "alpha.section.review_pending",
      "spec_ref":    "alpha.spec.review_pending",
      "target_form": "markdown",
-     "template":    "## Review pending\n{{#each entries}}- **{{this.wiring_entry.axis}}** — {{this.wiring_entry.source_uri}}{{#if this.wiring_entry.metadata.review_note}} _(note: {{this.wiring_entry.metadata.review_note}})_{{/if}}\n{{/each}}"
+     "template":    "## Review pending\n{{#each entries}}- **{{this.wiring_entry.slot}}** — {{this.wiring_entry.source_uri}}\n{{/each}}"
    }
    ```
 
