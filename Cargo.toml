@@ -10,6 +10,8 @@ members = [
     "crates/persona-wire-adapter-obsidian",
     "crates/persona-wire-adapter-mcp",
     "crates/persona-wire-adapter-rss",
+    "crates/persona-wire-transport-http",
+    "crates/persona-wire-credentials",
 ]
 
 [workspace.package]
@@ -60,8 +62,14 @@ toml = "0.8"
 # RSS 2.0 / RSS 1.0 / Atom / JSON Feed auto-detecting parser (rss:// adapter)
 feed-rs = "2"
 
-# HTTP client for feed fetch (rss:// adapter) — rustls only, no native-tls/openssl dep.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# HTTP client for feed fetch (rss:// adapter) / shared HTTP transport — rustls only, no native-tls/openssl dep.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Secret-holding token type (credentials, HTTP bearer auth) — never Debug/log-exposed.
+secrecy = "0.10"
+
+# OS keychain access (credentials crate).
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.10.0" }
@@ -71,3 +79,5 @@ persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x",
 persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.10.0" }
 persona-wire-adapter-mcp = { path = "crates/persona-wire-adapter-mcp", version = "0.10.0" }
 persona-wire-adapter-rss = { path = "crates/persona-wire-adapter-rss", version = "0.10.0" }
+persona-wire-transport-http = { path = "crates/persona-wire-transport-http", version = "0.10.0" }
+persona-wire-credentials = { path = "crates/persona-wire-credentials", version = "0.10.0" }

@@ -1,0 +1,21 @@
+[package]
+name = "persona-wire-transport-http"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Shared HTTP transport for persona-wire Adapters (JSON GET/POST + raw byte fetch, bearer auth, custom headers). No scheme-specific knowledge."
+
+[dependencies]
+persona-wire-core.workspace = true
+serde_json.workspace = true
+secrecy.workspace = true
+# HTTP client — rustls only (no native-tls / openssl dep).
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

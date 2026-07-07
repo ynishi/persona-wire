@@ -28,6 +28,7 @@ path = "src/bin/migrate_id_to_ulid.rs"
 
 [dependencies]
 persona-wire-core.workspace = true
+persona-wire-credentials.workspace = true
 rusqlite.workspace = true
 ulid.workspace = true
 persona-wire-adapter-mini-app.workspace = true

@@ -19,8 +19,8 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] 
 tracing.workspace = true
 # RSS 2.0 / RSS 1.0 / Atom / JSON Feed auto-detecting parser.
 feed-rs.workspace = true
-# HTTP client for feed fetch — rustls only (no native-tls / openssl dep).
-reqwest.workspace = true
+# Shared HTTP transport (fetch is scheme-agnostic; see module docs).
+persona-wire-transport-http.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

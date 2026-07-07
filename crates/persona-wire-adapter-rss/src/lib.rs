@@ -3,12 +3,12 @@
 //! ## Architecture
 //!
 //! `RssAdapter` is a stateless [`Adapter`] impl split into three independent
-//! functions so the HTTP-fetch layer can be lifted into a shared crate the
-//! moment a second HTTP-backed adapter needs it (no RSS-specific knowledge
-//! leaks into [`fetch_bytes`]):
+//! functions:
 //!
 //! - [`parse_rss_uri`] — `WireUri` → `RssUriSpec` (target URL + item limit).
-//! - [`fetch_bytes`] — plain HTTP GET, no feed semantics.
+//! - HTTP fetch — delegated to `persona_wire_transport_http::HttpClient`
+//!   (promoted to a shared crate 2026-07-07; no RSS-specific knowledge in the
+//!   transport layer).
 //! - [`normalize_feed`] — feed bytes → the Wire JSON shape below, via
 //!   `feed_rs::parser::parse` (auto-detects RSS 2.0 / RSS 1.0 / Atom / JSON
 //!   Feed; no manual format branching).
@@ -45,6 +45,7 @@
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
 use persona_wire_core::{WireError, WireResult};
+use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
 
 /// Default `items` cap when `?limit=` is absent from the URI.
@@ -69,7 +70,8 @@ impl Adapter for RssAdapter {
     /// Fetch the feed at the URL derived from `uri` and normalize it.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_rss_uri(uri)?;
-        let bytes = fetch_bytes(&spec.url).await?;
+        let client = HttpClient::new("rss adapter").with_timeout(FETCH_TIMEOUT);
+        let bytes = client.get_bytes(&spec.url).await?;
         normalize_feed(&bytes, &spec.url, spec.limit)
     }
 }
@@ -91,10 +93,7 @@ struct RssUriSpec {
 ///   loud with [`WireError::Storage`].
 fn parse_rss_uri(uri: &WireUri) -> WireResult<RssUriSpec> {
     let host = uri.host().filter(|h| !h.is_empty()).ok_or_else(|| {
-        WireError::Storage(format!(
-            "rss adapter: missing host in '{}'",
-            uri.as_raw()
-        ))
+        WireError::Storage(format!("rss adapter: missing host in '{}'", uri.as_raw()))
     })?;
 
     let scheme = match uri.query_get("scheme") {
@@ -122,41 +121,6 @@ fn parse_rss_uri(uri: &WireUri) -> WireResult<RssUriSpec> {
     let url = format!("{scheme}://{host}{}", uri.path());
 
     Ok(RssUriSpec { url, limit })
-}
-
-/// Fetch raw bytes from `url` via a single stateless HTTP GET.
-///
-/// RSS-agnostic on purpose (see module docs) — a future HTTP adapter can
-/// reuse this verbatim.
-async fn fetch_bytes(url: &str) -> WireResult<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()
-        .map_err(|e| WireError::Storage(format!("rss adapter: http client build: {e}")))?;
-
-    let resp = client.get(url).send().await.map_err(|e| {
-        if e.is_timeout() {
-            WireError::Storage(format!(
-                "rss adapter: http timeout ({FETCH_TIMEOUT:?}) fetching '{url}': {e}"
-            ))
-        } else {
-            WireError::Storage(format!("rss adapter: network error fetching '{url}': {e}"))
-        }
-    })?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(WireError::Storage(format!(
-            "rss adapter: http status {status} fetching '{url}'"
-        )));
-    }
-
-    let bytes = resp.bytes().await.map_err(|e| {
-        WireError::Storage(format!(
-            "rss adapter: reading response body from '{url}': {e}"
-        ))
-    })?;
-    Ok(bytes.to_vec())
 }
 
 /// Parse `bytes` as an RSS 2.0 / RSS 1.0 / Atom / JSON Feed document (format
@@ -366,7 +330,10 @@ mod tests {
             "https://example.com/atom1"
         );
         assert_eq!(items[0]["summary"].as_str().unwrap(), "Atom summary");
-        assert_eq!(items[0]["published"].as_str().unwrap(), "2024-01-01T00:00:00+00:00");
+        assert_eq!(
+            items[0]["published"].as_str().unwrap(),
+            "2024-01-01T00:00:00+00:00"
+        );
     }
 
     #[test]
@@ -380,8 +347,8 @@ mod tests {
 
     #[test]
     fn normalize_feed_invalid_bytes_errors() {
-        let err = normalize_feed(b"not a feed at all", "https://example.com/feed.xml", 20)
-            .unwrap_err();
+        let err =
+            normalize_feed(b"not a feed at all", "https://example.com/feed.xml", 20).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("feed parse"), "unexpected error: {msg}");
     }

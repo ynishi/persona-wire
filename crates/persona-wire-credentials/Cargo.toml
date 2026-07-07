@@ -1,0 +1,16 @@
+[package]
+name = "persona-wire-credentials"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Provider-chain credential resolution for persona-wire Adapters (env var → OS keychain), token type unified as secrecy::SecretString."
+
+[dependencies]
+persona-wire-core.workspace = true
+secrecy.workspace = true
+keyring.workspace = true

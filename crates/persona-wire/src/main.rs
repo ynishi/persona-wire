@@ -21,6 +21,8 @@ use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::{default_db_path, SqliteStorage};
+use persona_wire_credentials::{Credentials, KeyringTokenProvider, ALIAS_ENV_VARS};
+use std::io::{IsTerminal, Write};
 
 #[derive(Parser, Debug)]
 #[command(name = "persona-wire", version, about = "persona-wire CLI")]
@@ -95,6 +97,33 @@ enum Command {
     Bundle {
         #[command(subcommand)]
         op: BundleOp,
+    },
+
+    /// Service API token management (keyring-backed; env vars take precedence).
+    Token {
+        #[command(subcommand)]
+        op: TokenOp,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenOp {
+    /// Store a token in the OS keyring. Reads the token from stdin
+    /// (pipe it in, or paste at the prompt — input echoes on a TTY).
+    Set {
+        /// Service name (e.g. `github`).
+        service: String,
+    },
+    /// Remove a token from the OS keyring (idempotent).
+    Rm {
+        /// Service name (e.g. `github`).
+        service: String,
+    },
+    /// Show which provider (env / keyring / none) supplies each service's
+    /// token. Never prints token values.
+    Status {
+        /// Optional service name filter. Omit to list every known service.
+        service: Option<String>,
     },
 }
 
@@ -642,9 +671,74 @@ fn main() -> Result<()> {
         }
 
         Command::Bundle { op } => bundle_op(op, &db)?,
+
+        Command::Token { op } => token_op(op)?,
     }
 
     Ok(())
+}
+
+/// Dispatch for `persona-wire token <op>`. Never touches the wire store —
+/// token management is orthogonal to the graph db.
+fn token_op(op: TokenOp) -> Result<()> {
+    match op {
+        TokenOp::Set { service } => {
+            let stdin = std::io::stdin();
+            if stdin.is_terminal() {
+                eprint!("Token for {service} (input echoes): ");
+                std::io::stderr().flush().ok();
+            }
+            let token = read_token(stdin.lock())
+                .with_context(|| format!("read token for '{service}' from stdin"))?;
+            KeyringTokenProvider
+                .set(&service, &token)
+                .with_context(|| format!("store token for '{service}' in OS keyring"))?;
+            println!("stored token for '{service}' in OS keyring");
+        }
+        TokenOp::Rm { service } => {
+            KeyringTokenProvider
+                .delete(&service)
+                .with_context(|| format!("delete token for '{service}' from OS keyring"))?;
+            println!("removed token for '{service}' from OS keyring (if present)");
+        }
+        TokenOp::Status { service } => {
+            let creds = Credentials::default_chain();
+            let services: Vec<String> = match service {
+                Some(s) => vec![s],
+                None => ALIAS_ENV_VARS
+                    .iter()
+                    .map(|(svc, _)| svc.to_string())
+                    .collect(),
+            };
+            for svc in services {
+                let source = creds
+                    .resolve_source(&svc)
+                    .with_context(|| format!("resolve token source for '{svc}'"))?;
+                println!("{}", format_token_status(&svc, source));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read one line from `r`, trim trailing newline/whitespace, and reject an
+/// empty result. Never logs or echoes the value itself (caller controls the
+/// TTY prompt, if any).
+fn read_token<R: std::io::BufRead>(mut r: R) -> Result<String> {
+    let mut line = String::new();
+    r.read_line(&mut line).context("read line from stdin")?;
+    let token = line.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!("empty token (nothing read from stdin)");
+    }
+    Ok(token)
+}
+
+/// Render one `token status` line for `service`, given the resolved provider
+/// name (or `None` if no provider supplies a token). Never includes the
+/// token value.
+fn format_token_status(service: &str, source: Option<&str>) -> String {
+    format!("{service}: {}", source.unwrap_or("none"))
 }
 
 fn bundle_op(op: BundleOp, db: &str) -> Result<()> {
@@ -741,5 +835,50 @@ fn parse_severity(s: &str) -> Result<persona_wire_core::domain::graph::Severity>
         "soft" => Ok(Severity::Soft),
         "advisory" => Ok(Severity::Advisory),
         other => anyhow::bail!("unknown severity: {other} (expected hard|soft|advisory)"),
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn read_token_trims_trailing_newline() {
+        let got = read_token("secret-tok\n".as_bytes()).unwrap();
+        assert_eq!(got, "secret-tok");
+    }
+
+    #[test]
+    fn read_token_trims_surrounding_whitespace() {
+        let got = read_token("  secret-tok  \n".as_bytes()).unwrap();
+        assert_eq!(got, "secret-tok");
+    }
+
+    #[test]
+    fn read_token_rejects_empty_input() {
+        let err = read_token("\n".as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("empty token"));
+    }
+
+    #[test]
+    fn read_token_rejects_whitespace_only_input() {
+        let err = read_token("   \n".as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("empty token"));
+    }
+
+    #[test]
+    fn read_token_rejects_eof_with_no_data() {
+        let err = read_token(&b""[..]).unwrap_err();
+        assert!(err.to_string().contains("empty token"));
+    }
+
+    #[test]
+    fn format_token_status_with_source() {
+        assert_eq!(format_token_status("github", Some("env")), "github: env");
+    }
+
+    #[test]
+    fn format_token_status_without_source() {
+        assert_eq!(format_token_status("github", None), "github: none");
     }
 }

@@ -37,9 +37,11 @@
 //! stateless, direct SDK integration).
 //!
 //! - **Three-function split**: `parse_<scheme>_uri` ([`WireUri`] → Spec struct),
-//!   transport fetch (no domain knowledge; promote to a shared crate once a
-//!   second adapter needs the same transport), and `normalize_<scheme>`
-//!   (raw response → Wire JSON shape).
+//!   transport fetch (no domain knowledge), and `normalize_<scheme>`
+//!   (raw response → Wire JSON shape). HTTP transport is provided by the
+//!   shared `persona-wire-transport-http` crate (promoted 2026-07-07);
+//!   HTTP-backed adapters use its `HttpClient` instead of hand-rolling
+//!   `reqwest` calls.
 //! - **Guard constants**: declare item caps / timeouts / text truncation as
 //!   `pub const` (rss example: `DEFAULT_LIMIT=20` / `FETCH_TIMEOUT=30s` /
 //!   `SUMMARY_MAX_CHARS=500`). Align timeouts with existing adapters
