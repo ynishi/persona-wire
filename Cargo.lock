@@ -1577,6 +1577,7 @@ dependencies = [
  "keyring",
  "persona-wire-core",
  "secrecy",
+ "security-framework 3.7.0",
 ]
 
 [[package]]

@@ -70,6 +70,20 @@ pub trait TokenProvider: Send + Sync {
     /// entry for this service" (try the next provider); `Err` means a real
     /// failure in this provider and must not be swallowed (fail loud).
     fn get(&self, service: &str) -> WireResult<Option<SecretString>>;
+
+    /// Whether this provider has an entry for `service`, without exposing
+    /// the token value.
+    ///
+    /// The default implementation delegates to [`TokenProvider::get`] and
+    /// discards the value. Providers with a cheaper existence-only lookup
+    /// (notably platform keyrings, where a full read can trigger an OS
+    /// permission prompt) should override this to avoid paying that cost
+    /// just to answer "does an entry exist" — see
+    /// [`Credentials::resolve_source`], which uses this method precisely
+    /// because it must not expose (or pay the cost of reading) the token.
+    fn exists(&self, service: &str) -> WireResult<bool> {
+        Ok(self.get(service)?.is_some())
+    }
 }
 
 /// Looks up tokens from process environment variables.
@@ -165,6 +179,55 @@ impl TokenProvider for KeyringTokenProvider {
             ))),
         }
     }
+
+    /// Existence check without extracting the secret value (macOS only).
+    ///
+    /// [`KeyringTokenProvider::get`] goes through the `keyring` crate's
+    /// `apple-native` backend, which calls the legacy
+    /// `SecKeychainFindGenericPassword` API — that API *always* returns the
+    /// password bytes, so it always triggers the "wants to use confidential
+    /// information" Keychain prompt in addition to the "wants to access
+    /// key" prompt (two dialogs per `token status` call). This override
+    /// instead queries the newer unified Keychain Item Search API
+    /// (`SecItemCopyMatching`, via
+    /// [`security_framework::item::ItemSearchOptions`]) asking only for an
+    /// item reference (`kSecReturnRef`) and explicitly not its data
+    /// (`kSecReturnData`), against the exact same `(service, account)`
+    /// attribute pair the `keyring` crate uses for this entry
+    /// (`kSecAttrService = "persona-wire"`, `kSecAttrAccount = service`;
+    /// see `keyring::Entry::new("persona-wire", service)` in
+    /// [`KeyringTokenProvider::entry`]). This surfaces at most the "wants
+    /// to access key" dialog, never the confidential-data one.
+    ///
+    /// Other platforms (`secret-service` on Linux, `wincred` on Windows)
+    /// don't have this two-dialog behavior, so they keep the default
+    /// [`TokenProvider::exists`] implementation (delegates to `get`).
+    #[cfg(target_os = "macos")]
+    fn exists(&self, service: &str) -> WireResult<bool> {
+        use security_framework::item::{ItemClass, ItemSearchOptions};
+
+        // `errSecItemNotFound` (Security.framework `OSStatus`): no keychain
+        // item matched the search. Not re-exported by the
+        // `security-framework` crate at this call site, so mirrored here as
+        // a literal; see
+        // <https://developer.apple.com/documentation/security/errsecitemnotfound>.
+        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+        match ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service("persona-wire")
+            .account(service)
+            .load_refs(true)
+            .load_data(false)
+            .search()
+        {
+            Ok(items) => Ok(!items.is_empty()),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(false),
+            Err(e) => Err(WireError::Storage(format!(
+                "credentials: keyring existence check for '{service}': {e}"
+            ))),
+        }
+    }
 }
 
 /// Ordered provider chain for token resolution. See module docs.
@@ -204,7 +267,7 @@ impl Credentials {
     /// diagnostics UIs that must not expose the token value).
     pub fn resolve_source(&self, service: &str) -> WireResult<Option<&'static str>> {
         for provider in &self.providers {
-            if provider.get(service)?.is_some() {
+            if provider.exists(service)? {
                 return Ok(Some(provider.name()));
             }
         }
@@ -384,6 +447,45 @@ mod tests {
             name: "only",
             result: None,
             called: AtomicBool::new(false),
+        })]);
+        assert!(creds.resolve_source("svc").unwrap().is_none());
+    }
+
+    // A provider whose `get` panics, to prove `resolve_source` calls
+    // `exists` (not `get`). Its `exists` override returns a fixed answer
+    // without ever touching `get`.
+    struct ExistsOnlyMockProvider {
+        name: &'static str,
+        exists_result: bool,
+    }
+
+    impl TokenProvider for ExistsOnlyMockProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn get(&self, _service: &str) -> WireResult<Option<SecretString>> {
+            panic!("resolve_source must call `exists`, not `get`, on this provider");
+        }
+        fn exists(&self, _service: &str) -> WireResult<bool> {
+            Ok(self.exists_result)
+        }
+    }
+
+    #[test]
+    fn resolve_source_uses_exists_not_get() {
+        let creds = Credentials::with_providers(vec![Box::new(ExistsOnlyMockProvider {
+            name: "exists-only",
+            exists_result: true,
+        })]);
+        // Would panic (via `get`) if `resolve_source` didn't call `exists`.
+        assert_eq!(creds.resolve_source("svc").unwrap(), Some("exists-only"));
+    }
+
+    #[test]
+    fn resolve_source_uses_exists_not_get_when_absent() {
+        let creds = Credentials::with_providers(vec![Box::new(ExistsOnlyMockProvider {
+            name: "exists-only",
+            exists_result: false,
         })]);
         assert!(creds.resolve_source("svc").unwrap().is_none());
     }

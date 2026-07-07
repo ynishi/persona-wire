@@ -225,6 +225,17 @@ provider). Backend errors from the OS keyring **fail loud** — the
 adapter does not silently fall through to the next provider on failure
 (the exception is `NoEntry`, which is a normal miss).
 
+### macOS Keychain access prompts
+
+On macOS, `token set` and `token get`-through-adapter still trigger a
+Keychain access dialog (the secret value is actually read). `token
+status` was updated to check for entry existence without extracting
+the secret, so it now surfaces at most one dialog ("キーへのアクセス"),
+not two. Clicking "常に許可" on the first prompt for a given binary
+grants the ACL for subsequent runs — until `cargo install` replaces
+the binary and its codesign hash changes, at which point the prompt
+returns.
+
 `github://` falls back to unauthenticated requests when no token is
 found (public repos work). The other three fail loud with the setup
 instructions if no token is available.

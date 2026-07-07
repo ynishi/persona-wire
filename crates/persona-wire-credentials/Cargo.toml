@@ -14,3 +14,11 @@ description = "Provider-chain credential resolution for persona-wire Adapters (e
 persona-wire-core.workspace = true
 secrecy.workspace = true
 keyring.workspace = true
+
+# macOS-only: `KeyringTokenProvider::exists` uses the unified Keychain Item
+# Search API (`SecItemCopyMatching`) directly to check for an entry without
+# extracting its secret data, avoiding the "wants to use confidential
+# information" prompt that the `keyring` crate's legacy
+# `SecKeychainFindGenericPassword`-backed `get_password()` always triggers.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
