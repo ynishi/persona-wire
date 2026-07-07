@@ -1,0 +1,26 @@
+[package]
+name = "persona-wire-adapter-rss"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for RSS/Atom/JSON feeds (scheme `rss://`). Fetches a feed over HTTP(S) and normalizes it to a compact JSON shape via feed-rs."
+
+[dependencies]
+persona-wire-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+# RSS 2.0 / RSS 1.0 / Atom / JSON Feed auto-detecting parser.
+feed-rs.workspace = true
+# HTTP client for feed fetch — rustls only (no native-tls / openssl dep).
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

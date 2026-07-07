@@ -9,6 +9,7 @@ members = [
     "crates/persona-wire-adapter-sqlite-x",
     "crates/persona-wire-adapter-obsidian",
     "crates/persona-wire-adapter-mcp",
+    "crates/persona-wire-adapter-rss",
 ]
 
 [workspace.package]
@@ -56,6 +57,12 @@ gray_matter = "0.2"
 # TOML serde (Bundle manifest body parse)
 toml = "0.8"
 
+# RSS 2.0 / RSS 1.0 / Atom / JSON Feed auto-detecting parser (rss:// adapter)
+feed-rs = "2"
+
+# HTTP client for feed fetch (rss:// adapter) — rustls only, no native-tls/openssl dep.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.10.0" }
 persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.10.0" }
@@ -63,3 +70,4 @@ persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-person
 persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.10.0" }
 persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.10.0" }
 persona-wire-adapter-mcp = { path = "crates/persona-wire-adapter-mcp", version = "0.10.0" }
+persona-wire-adapter-rss = { path = "crates/persona-wire-adapter-rss", version = "0.10.0" }
