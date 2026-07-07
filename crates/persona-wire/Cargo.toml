@@ -36,7 +36,7 @@ persona-wire-adapter-mini-app.workspace = true
 persona-wire-adapter-obsidian.workspace = true
 persona-wire-adapter-persona-pack.workspace = true
 persona-wire-adapter-sqlite-x.workspace = true
-persona-wire-mcp = { path = "../persona-wire-mcp", version = "0.10.0" }
+persona-wire-mcp = { path = "../persona-wire-mcp", version = "0.11.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

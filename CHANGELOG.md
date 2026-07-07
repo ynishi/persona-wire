@@ -19,6 +19,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [0.11.0] - 2026-07-08
+
+### Added
+
+- **Shared HTTP transport + credential management layer**
+  (`persona-wire-transport-http` / `persona-wire-credentials`) as
+  reusable infrastructure crates for adapter authors. The transport
+  crate offers JSON GET/POST + raw byte fetch, bearer auth, and custom
+  headers with no scheme-specific knowledge. The credentials crate
+  provides provider-chain token resolution (env var → OS keychain) with
+  `secrecy::SecretString` as the unified token type.
+- **Five new SoT adapters** built on the shared transport + credentials
+  layer:
+  - `persona-wire-adapter-rss` (`rss://`) — RSS/Atom/JSON feeds via
+    `feed-rs`, normalized to a compact JSON shape.
+  - `persona-wire-adapter-github` (`github://`) — issues / pull
+    requests / releases via the GitHub REST API, with optional token
+    auth.
+  - `persona-wire-adapter-todoist` (`todoist://`) — tasks / projects
+    via the Todoist unified API v1, with token auth.
+  - `persona-wire-adapter-notion` (`notion://`) — search results /
+    database (data source) queries / page blocks via the Notion API.
+  - `persona-wire-adapter-slack` (`slack://`) — conversation lists /
+    channel history / user info via the Slack Web API.
+- **Adapter authoring guide** (`docs/adapter-authoring.md`) documenting
+  the SoT vs Facade split, the shared transport / credentials contract,
+  and the integration policy for adding new schemes.
+- **Onboarding guide entries** for the five new schemes and their token
+  setup flow.
+
+### Changed
+
+- **`persona-wire token` CLI masks TTY input via `rpassword`** on the
+  interactive path so token values do not echo to the terminal. The
+  pipe path (stdin non-TTY) is unchanged, preserving scripted flows.
+- **Credentials write-side split into `MutableTokenProvider` trait**.
+  On macOS, `set` / `delete` now go through `security-framework`
+  directly rather than the generic keychain crate, giving finer control
+  over item creation and cleanup semantics.
+
+### Fixed
+
+- **`persona-wire-adapter-github`: over-fetch `per_page` to honour
+  `?limit=N` after PR filter on `kind=issues`** — the GitHub REST API
+  returns issues + pull requests in the same list endpoint. Client-side
+  PR filtering shrinks the effective yield, so `per_page` is now
+  over-fetched to keep `?limit=N` honoured on `kind=issues`.
+- **`persona-wire-credentials`: drop the secret-read from
+  `resolve_source` to silence one Keychain prompt on macOS** — the
+  source resolution path no longer reads the secret value, so users see
+  one fewer authorization dialog per query on macOS.
+- **Onboarding doc corrections**: `wire_render` vs `wire_prompt_context`
+  render context distinction, and `wire_prompt_context` `wiring_entry`
+  shape (slot, no metadata).
+
 ## [0.10.0] - 2026-07-04
 
 ### Added
