@@ -80,6 +80,9 @@ secrecy = "0.10"
 # OS keychain access (credentials crate).
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
+# TTY no-echo password/token prompt (`persona-wire token set`).
+rpassword = "7"
+
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.10.0" }
 persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.10.0" }

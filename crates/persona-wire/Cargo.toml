@@ -31,6 +31,7 @@ persona-wire-core.workspace = true
 persona-wire-credentials.workspace = true
 rusqlite.workspace = true
 ulid.workspace = true
+rpassword.workspace = true
 persona-wire-adapter-mini-app.workspace = true
 persona-wire-adapter-obsidian.workspace = true
 persona-wire-adapter-persona-pack.workspace = true

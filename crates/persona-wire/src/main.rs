@@ -22,7 +22,7 @@ use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::{default_db_path, SqliteStorage};
 use persona_wire_credentials::{Credentials, KeyringTokenProvider, ALIAS_ENV_VARS};
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 #[derive(Parser, Debug)]
 #[command(name = "persona-wire", version, about = "persona-wire CLI")]
@@ -684,12 +684,17 @@ fn token_op(op: TokenOp) -> Result<()> {
     match op {
         TokenOp::Set { service } => {
             let stdin = std::io::stdin();
-            if stdin.is_terminal() {
-                eprint!("Token for {service} (input echoes): ");
-                std::io::stderr().flush().ok();
+            let raw = if stdin.is_terminal() {
+                rpassword::prompt_password(format!("Token for {service}: "))
+                    .with_context(|| format!("read token for '{service}' from tty"))?
+            } else {
+                read_token(stdin.lock())
+                    .with_context(|| format!("read token for '{service}' from stdin"))?
+            };
+            let token = raw.trim().to_string();
+            if token.is_empty() {
+                anyhow::bail!("empty token");
             }
-            let token = read_token(stdin.lock())
-                .with_context(|| format!("read token for '{service}' from stdin"))?;
             KeyringTokenProvider
                 .set(&service, &token)
                 .with_context(|| format!("store token for '{service}' in OS keyring"))?;

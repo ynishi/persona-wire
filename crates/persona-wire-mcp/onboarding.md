@@ -232,8 +232,14 @@ instructions if no token is available.
 ### CLI — `persona-wire token`
 
 ```sh
-# Register a token (reads from stdin — pipe it in or paste at the prompt).
+# Register a token.
+# TTY: paste at the prompt — input is masked (no-echo) like `passwd`.
 # Token values are never printed back.
+persona-wire token set github
+#   Token for github: ****...   (input hidden)
+
+# Pipe: stdin one-liner (shell history hazard — prefer the TTY path for
+# interactive use).
 echo "<paste-token-here>" | persona-wire token set github
 
 # Show which provider supplies each service (env / keyring / none).
@@ -248,10 +254,11 @@ persona-wire token status
 persona-wire token rm slack
 ```
 
-`token set` accepts stdin only; the token is never taken as a command-line
-argument, so it does not appear in shell history or `ps`. `token` is a
-CLI-only surface — it is intentionally not exposed as an MCP tool, so a
-tool-call argument cannot leak a token into a session log.
+`token set` reads from a masked TTY prompt or piped stdin; the token is
+never taken as a command-line argument, so it does not appear in shell
+history or `ps`. `token` is a CLI-only surface — it is intentionally not
+exposed as an MCP tool, so a tool-call argument cannot leak a token into a
+session log.
 
 ### Where to obtain a token
 
