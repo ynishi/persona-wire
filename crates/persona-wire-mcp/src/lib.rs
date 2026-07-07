@@ -16,6 +16,7 @@ use persona_wire_adapter_notion::NotionAdapter;
 use persona_wire_adapter_obsidian::ObsidianAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_rss::RssAdapter;
+use persona_wire_adapter_slack::SlackAdapter;
 use persona_wire_adapter_sqlite_x::SqliteAdapter;
 use persona_wire_adapter_todoist::TodoistAdapter;
 use persona_wire_core::application::plugin_registry::PluginRegistry;
@@ -78,6 +79,7 @@ impl WireServer {
                     .with_adapter(GithubAdapter)
                     .with_adapter(TodoistAdapter)
                     .with_adapter(NotionAdapter)
+                    .with_adapter(SlackAdapter)
                     .build()
                     .expect("default plugin registry build"),
             ),
