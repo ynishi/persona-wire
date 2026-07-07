@@ -26,6 +26,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # libdbus-1-dev is required by libdbus-sys (transitive: keyring →
+      # secret-service on Linux). macOS uses Keychain (no dbus), Windows
+      # uses Credential Manager (no dbus).
+      - name: Install libdbus (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo check --workspace --all-targets
 
   test:
@@ -39,4 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install libdbus (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo test --workspace
