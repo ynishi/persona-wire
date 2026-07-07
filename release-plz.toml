@@ -1,0 +1,97 @@
+[workspace]
+changelog_update = false     # default off; only the root/representative crate updates the root CHANGELOG
+dependencies_update = false
+git_release_enable = false   # GitHub Release is created by cargo-dist
+git_tag_enable = false       # default off; only the representative crate tags
+git_tag_name = "v{{ version }}"  # unified tag name, also used for CHANGELOG compare links
+semver_check = true
+release_always = false       # publish only when the release PR is merged
+pr_labels = ["release"]
+# Rate limit mitigation for the 15-crate workspace: give each `cargo publish` a
+# generous timeout so release-plz waits for crates.io indexing between crates
+# instead of failing subsequent dependent publishes on transient 429/index-lag.
+publish_timeout = "30m"
+
+# Keep all 15 crates in lockstep versioning under one `version_group`.
+# The representative crate (persona-wire) owns the tag and the root CHANGELOG.
+# `changelog_include` folds every sibling crate's commits into the single unified
+# root CHANGELOG so scoped commits (e.g. touching only `crates/persona-wire-core/`)
+# still land in the release notes.
+
+[[package]]
+name = "persona-wire"
+version_group = "persona-wire"
+changelog_update = true
+git_tag_enable = true
+changelog_include = [
+    "persona-wire-core",
+    "persona-wire-mcp",
+    "persona-wire-adapter-mini-app",
+    "persona-wire-adapter-persona-pack",
+    "persona-wire-adapter-sqlite-x",
+    "persona-wire-adapter-obsidian",
+    "persona-wire-adapter-mcp",
+    "persona-wire-adapter-rss",
+    "persona-wire-transport-http",
+    "persona-wire-credentials",
+    "persona-wire-adapter-github",
+    "persona-wire-adapter-todoist",
+    "persona-wire-adapter-notion",
+    "persona-wire-adapter-slack",
+]
+
+[[package]]
+name = "persona-wire-core"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-mcp"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-mini-app"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-persona-pack"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-sqlite-x"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-obsidian"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-mcp"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-rss"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-transport-http"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-credentials"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-github"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-todoist"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-notion"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-slack"
+version_group = "persona-wire"
