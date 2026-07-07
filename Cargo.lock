@@ -1450,6 +1450,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "persona-wire-adapter-notion"
+version = "0.10.0"
+dependencies = [
+ "async-trait",
+ "percent-encoding",
+ "persona-wire-core",
+ "persona-wire-credentials",
+ "persona-wire-transport-http",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "persona-wire-adapter-obsidian"
 version = "0.10.0"
 dependencies = [
@@ -1554,6 +1570,7 @@ dependencies = [
  "persona-wire-adapter-github",
  "persona-wire-adapter-mcp",
  "persona-wire-adapter-mini-app",
+ "persona-wire-adapter-notion",
  "persona-wire-adapter-obsidian",
  "persona-wire-adapter-persona-pack",
  "persona-wire-adapter-rss",

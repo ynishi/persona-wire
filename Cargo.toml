@@ -14,6 +14,7 @@ members = [
     "crates/persona-wire-credentials",
     "crates/persona-wire-adapter-github",
     "crates/persona-wire-adapter-todoist",
+    "crates/persona-wire-adapter-notion",
 ]
 
 [workspace.package]
@@ -90,3 +91,4 @@ persona-wire-transport-http = { path = "crates/persona-wire-transport-http", ver
 persona-wire-credentials = { path = "crates/persona-wire-credentials", version = "0.10.0" }
 persona-wire-adapter-github = { path = "crates/persona-wire-adapter-github", version = "0.10.0" }
 persona-wire-adapter-todoist = { path = "crates/persona-wire-adapter-todoist", version = "0.10.0" }
+persona-wire-adapter-notion = { path = "crates/persona-wire-adapter-notion", version = "0.10.0" }

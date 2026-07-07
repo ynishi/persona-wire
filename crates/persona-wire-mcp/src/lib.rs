@@ -12,6 +12,7 @@ use serde::Deserialize;
 use persona_wire_adapter_github::GithubAdapter;
 use persona_wire_adapter_mcp::{McpAdapter, McpEndpointResolver, SqliteEndpointResolver};
 use persona_wire_adapter_mini_app::MiniAppAdapter;
+use persona_wire_adapter_notion::NotionAdapter;
 use persona_wire_adapter_obsidian::ObsidianAdapter;
 use persona_wire_adapter_persona_pack::PersonaPackAdapter;
 use persona_wire_adapter_rss::RssAdapter;
@@ -76,6 +77,7 @@ impl WireServer {
                     .with_adapter(RssAdapter)
                     .with_adapter(GithubAdapter)
                     .with_adapter(TodoistAdapter)
+                    .with_adapter(NotionAdapter)
                     .build()
                     .expect("default plugin registry build"),
             ),
