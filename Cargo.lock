@@ -1409,6 +1409,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "persona-wire-adapter-github"
+version = "0.10.0"
+dependencies = [
+ "async-trait",
+ "persona-wire-core",
+ "persona-wire-credentials",
+ "persona-wire-transport-http",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "persona-wire-adapter-mcp"
 version = "0.10.0"
 dependencies = [
@@ -1519,6 +1534,7 @@ name = "persona-wire-mcp"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "persona-wire-adapter-github",
  "persona-wire-adapter-mcp",
  "persona-wire-adapter-mini-app",
  "persona-wire-adapter-obsidian",
