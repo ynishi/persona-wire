@@ -1,28 +1,75 @@
-//! Layer 6 Adapter (SoT) — concept-doc §3 Layer 6 + §5 #3 / §P3b 反映済。
+//! Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.
 //!
-//! Adapter trait + 同梱 `FileAdapter` のみを core で保持。 各 wiring entry node の
-//! `metadata.source_uri` を scheme 別に dispatch する Plugin 軸 1 / 3。
+//! The core keeps only the Adapter trait and the bundled `FileAdapter`. Each
+//! wiring entry node's `metadata.source_uri` is dispatched by scheme — plugin
+//! axis 1 of 3.
 //!
-//! 同梱 scheme:
-//! - `file://<absolute-or-tilde-path>` — std::fs::read で raw 字面を取得 (json/toml は将来
-//!   parse 拡張、 現状は string として返す)。
+//! Bundled scheme:
+//! - `file://<absolute-or-tilde-path>` — reads the raw contents via
+//!   std::fs::read (json/toml parsing is a future extension; currently the
+//!   contents are returned as a string).
 //!
-//!   query param 拡張 (R5):
-//!   - `?tail=last_section` — 末尾章 (markdown `## ` h2 boundary で切り、最後の h2 以降を返す)
-//!   - `?tail_n=<N>` — 末尾 N 行 (line-based; 上限 [`TAIL_N_MAX`] = 1000 行 = context size guard)
-//!   - query param なし → file 全体 fetch (backward-compat)
-//!   - 不明値 / parse 不能 → graceful fail = 全体 fetch
+//!   Query param extensions (R5):
+//!   - `?tail=last_section` — the trailing section (split at markdown `## `
+//!     h2 boundaries; returns everything from the last h2 onward)
+//!   - `?tail_n=<N>` — the last N lines (line-based; capped at
+//!     [`TAIL_N_MAX`] = 1000 lines as a context size guard)
+//!   - no query param → fetch the whole file (backward-compat)
+//!   - unknown / unparsable values → graceful fail = whole-file fetch
 //!
-//!   metadata (R4):
-//!   - `size_bytes` — ファイル全体のバイト数 (tail 適用後 body size ではなく元 file 全体の size)
-//!   - `modified_at` — 最終更新時刻 (Unix epoch 秒, u64)
-//!   - `metadata` — ネスト metadata オブジェクト (`filename` / `full_path` / `last_modified` /
-//!     `size_bytes` / `age_days`)
+//!   Metadata (R4):
+//!   - `size_bytes` — size of the whole file in bytes (the original file
+//!     size, not the post-tail body size)
+//!   - `modified_at` — last modified time (Unix epoch seconds, u64)
+//!   - `metadata` — nested metadata object (`filename` / `full_path` /
+//!     `last_modified` / `size_bytes` / `age_days`)
 //!
-//! 外部 crate で提供 (P3b で分離済):
+//! Provided by external crates (split out in P3b):
 //! - `mini-app://<table>...` → `persona-wire-adapter-mini-app` crate (`MiniAppAdapter`)
 //!
-//! outline / persona-pack / journal scheme は外部 adapter crate carry。
+//! The outline / persona-pack / journal schemes are carried by external
+//! adapter crates.
+//!
+//! ## Adapter authoring guide (conventions for adding a new scheme)
+//!
+//! Add one crate per scheme, named `persona-wire-adapter-<scheme>`, to the
+//! workspace. The canonical reference is `persona-wire-adapter-rss` (minimal,
+//! stateless, direct SDK integration).
+//!
+//! - **Three-function split**: `parse_<scheme>_uri` ([`WireUri`] → Spec struct),
+//!   transport fetch (no domain knowledge; promote to a shared crate once a
+//!   second adapter needs the same transport), and `normalize_<scheme>`
+//!   (raw response → Wire JSON shape).
+//! - **Guard constants**: declare item caps / timeouts / text truncation as
+//!   `pub const` (rss example: `DEFAULT_LIMIT=20` / `FETCH_TIMEOUT=30s` /
+//!   `SUMMARY_MAX_CHARS=500`). Align timeouts with existing adapters
+//!   (`DEFAULT_RPC_TIMEOUT` in the mcp adapter).
+//! - **Error / query conventions**: missing or invalid required components
+//!   (empty host, `limit=0`, ...) fail loud with [`WireError::Storage`].
+//!   Unknown query keys are silently ignored (forward-compat convention).
+//!   Missing output fields are `null`; timestamps are RFC3339. A missing
+//!   source is graceful (`FileAdapter` in this file: non-existent path →
+//!   `body: null` with `Ok`).
+//! - **Docs**: `#![warn(missing_docs)]` plus a crate-root `//!` header with
+//!   three sections: Architecture / URI grammar / Output shape.
+//! - **Tests**: parse / normalize are offline unit tests over inline
+//!   fixtures. Never add tests that depend on live network access.
+//! - **Registration**: add one `.with_adapter(XxxAdapter)` line to the
+//!   `PluginRegistry::default_builder_for_wire()` chain on the boot side
+//!   (`persona-wire-mcp/src/lib.rs`). Scheme collisions fail fast at
+//!   registry build time.
+//!
+//! ## External service integration policy (decided 2026-07-07)
+//!
+//! - When a service exposes a public SDK / API, call it **directly** from the
+//!   adapter. Do not relay through an MCP integration (this is a core benefit
+//!   of the Rust + Adapter pattern).
+//! - UX first: never make the user repeat authentication. Receive credentials
+//!   via environment variables and never embed secrets in `source_uri`.
+//!   Choose the auth mechanism per SDK on a case-by-case basis.
+//! - Adapter expansion targets coverage (including minor services), not
+//!   demand-ranked prioritization. The only exclusion criterion is that the
+//!   service has been discontinued.
 
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
@@ -31,32 +78,35 @@ use crate::domain::error::{WireError, WireResult};
 use crate::infrastructure::wire_uri::WireUri;
 use async_trait::async_trait;
 
-/// `?tail_n=<N>` の N の上限 (context size guard)。
-/// 超過時はこの値に clamp して末尾行を取得する。
+/// Upper bound for `N` in `?tail_n=<N>` (context size guard).
+/// Values above this are clamped before taking the tail lines.
 pub const TAIL_N_MAX: usize = 1000;
 
-/// Adapter trait — Plugin 軸 1 / 3 (SoT Adapter)。
+/// Adapter trait — plugin axis 1 of 3 (SoT Adapter).
 ///
-/// dyn-compatible にするため `#[async_trait]` で `Pin<Box<Future>>` 化。 PluginRegistry
-/// が `Arc<dyn Adapter>` で複数 impl を一様に保持する前提。
+/// Uses `#[async_trait]` (`Pin<Box<Future>>`) to stay dyn-compatible; the
+/// PluginRegistry holds multiple impls uniformly as `Arc<dyn Adapter>`.
 ///
-/// ACL Facade として機能する責務:
-/// - URI grammar parse は registry 側 (`WireUri::parse`) が一手に集約済。 Adapter は
-///   parsed `WireUri` を受けて、 scheme 固有の semantic 解釈 + 外部 SDK 呼出し +
-///   Wire 定義 JSON への翻訳 を担う。
-/// - 既存 adapter で internal parser を持つものは `uri.as_raw()` で full URI 文字列を
-///   取り出して当面互換 (carry)、 新規 adapter は typed access (`host()` / `query()` 等)
-///   推奨。
+/// Responsibilities as an ACL Facade:
+/// - URI grammar parsing is centralized on the registry side
+///   (`WireUri::parse`). An Adapter receives the parsed `WireUri` and handles
+///   scheme-specific semantic interpretation, external SDK calls, and
+///   translation into Wire definition JSON.
+/// - Existing adapters with internal parsers may keep extracting the full URI
+///   string via `uri.as_raw()` for now (carry); new adapters should use typed
+///   access (`host()` / `query()` etc.).
 #[async_trait]
 pub trait Adapter: Send + Sync {
-    /// このアダプタが扱う URI scheme 識別子 (例: `"mini-app"` / `"file"` / `"pg"`).
+    /// URI scheme identifier handled by this adapter (e.g. `"mini-app"` /
+    /// `"file"` / `"pg"`).
     ///
-    /// `PluginRegistry` (application 層) が `source_uri` の prefix と突き合わせて
-    /// dispatch 判定に使う。 1 scheme = 1 impl が原則 (collision は registry build 時に
-    /// fail-fast)。
+    /// The `PluginRegistry` (application layer) matches this against the
+    /// `source_uri` prefix for dispatch. One scheme = one impl as a rule
+    /// (collisions fail fast at registry build time).
     fn scheme(&self) -> &'static str;
 
-    /// parsed `WireUri` を scheme 別に解釈し、 fresh data を `serde_json::Value` で返す。
+    /// Interprets the parsed `WireUri` per scheme and returns fresh data as a
+    /// `serde_json::Value`.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value>;
 }
 
@@ -64,11 +114,11 @@ pub trait Adapter: Send + Sync {
 
 pub struct FileAdapter;
 
-/// `FileAdapter` 内部の tail 取得モード。
+/// Tail-fetch mode internal to `FileAdapter`.
 ///
-/// - [`TailMode::Full`]        — query param なし / 不正値 (graceful fail)
+/// - [`TailMode::Full`]        — no query param / invalid value (graceful fail)
 /// - [`TailMode::LastSection`] — `?tail=last_section`
-/// - [`TailMode::LastN`]       — `?tail_n=N` (N は [`TAIL_N_MAX`] に clamp 済)
+/// - [`TailMode::LastN`]       — `?tail_n=N` (N already clamped to [`TAIL_N_MAX`])
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TailMode {
     Full,
@@ -77,12 +127,15 @@ enum TailMode {
 }
 
 impl FileAdapter {
-    /// `file://<path>` or `file:<path>` の path 部分を受けて、 std::fs::read で raw 字面を取得。
-    /// `~/` で始まる場合は HOME 展開。 directory が渡された場合は最新 mtime の child file 1 件を読む。
-    /// non-existent path は `body: null, metadata: null` で `Ok` を返す (graceful)。
+    /// Takes the path part of `file://<path>` or `file:<path>` and reads the
+    /// raw contents via std::fs::read. Paths starting with `~/` are
+    /// HOME-expanded. When a directory is given, the single child file with
+    /// the newest mtime is read. A non-existent path returns `Ok` with
+    /// `body: null, metadata: null` (graceful).
     ///
-    /// query param なし = backward-compat (全体 fetch)。
-    /// R4 metadata (`size_bytes` / `modified_at` / ネスト `metadata` フィールド) を結果に含む。
+    /// No query param = backward-compat (whole-file fetch).
+    /// The result includes the R4 metadata (`size_bytes` / `modified_at` /
+    /// nested `metadata` field).
     pub async fn fetch_file(&self, raw_path: &str) -> WireResult<serde_json::Value> {
         self.fetch_file_impl(raw_path, TailMode::Full).await
     }
@@ -94,7 +147,7 @@ impl FileAdapter {
     ) -> WireResult<serde_json::Value> {
         let resolved = resolve_file_path(raw_path)?;
 
-        // Graceful: non-existent path → body: null, metadata: null (WireError にしない)
+        // Graceful: non-existent path → body: null, metadata: null (not a WireError)
         if !resolved.exists() {
             return Ok(serde_json::json!({
                 "scheme": "file",
@@ -154,9 +207,9 @@ impl Adapter for FileAdapter {
     }
 
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        // file URI は `file://~/foo` 等の非 RFC な lenient form を受け入れたいため、
-        // raw 文字列から strip_prefix で path 部を取り出す (typed host/path だと
-        // `~` が host 扱いになり挙動が変わる)。
+        // The file URI accepts lenient, non-RFC forms like `file://~/foo`, so
+        // extract the path part from the raw string via strip_prefix (typed
+        // host/path would treat `~` as a host and change the behavior).
         let source_uri = uri.as_raw();
         let rest = source_uri
             .strip_prefix("file://")
@@ -167,17 +220,17 @@ impl Adapter for FileAdapter {
     }
 }
 
-/// `WireUri` の query params から [`TailMode`] を決定する。
+/// Determines the [`TailMode`] from the `WireUri` query params.
 ///
 /// - `?tail=last_section` → [`TailMode::LastSection`]
-/// - `?tail_n=N` (N > 0 の整数) → [`TailMode::LastN`] (N は [`TAIL_N_MAX`] に clamp)
-/// - 不明値 / parse 不能 / N=0 → [`TailMode::Full`] (graceful fail)
+/// - `?tail_n=N` (integer N > 0) → [`TailMode::LastN`] (N clamped to [`TAIL_N_MAX`])
+/// - unknown value / unparsable / N=0 → [`TailMode::Full`] (graceful fail)
 fn parse_tail_mode(uri: &WireUri) -> TailMode {
     if let Some(tail) = uri.query_get("tail") {
         if tail == "last_section" {
             return TailMode::LastSection;
         }
-        // 不明値 → graceful fail = Full
+        // Unknown value → graceful fail = Full
         return TailMode::Full;
     }
     if let Some(n_str) = uri.query_get("tail_n") {
@@ -186,17 +239,17 @@ fn parse_tail_mode(uri: &WireUri) -> TailMode {
                 return TailMode::LastN(n.min(TAIL_N_MAX));
             }
         }
-        // parse 不能 / n=0 → graceful fail = Full
+        // Unparsable / n=0 → graceful fail = Full
         return TailMode::Full;
     }
     TailMode::Full
 }
 
-/// `body` に `mode` を適用し部分文字列を返す。
+/// Applies `mode` to `body` and returns the resulting substring.
 ///
-/// - [`TailMode::Full`]        — `body` をそのまま返す
-/// - [`TailMode::LastSection`] — 最後の `## ` h2 見出し行から末尾まで返す
-/// - [`TailMode::LastN`]       — 末尾 N 行を `"\n"` で join して返す
+/// - [`TailMode::Full`]        — returns `body` unchanged
+/// - [`TailMode::LastSection`] — returns from the last `## ` h2 heading line to the end
+/// - [`TailMode::LastN`]       — returns the last N lines joined with `"\n"`
 fn apply_tail(body: &str, mode: &TailMode) -> String {
     match mode {
         TailMode::Full => body.to_string(),
@@ -212,12 +265,12 @@ fn apply_tail(body: &str, mode: &TailMode) -> String {
     }
 }
 
-/// `body` 内の最後の markdown h2 見出し (`## ` で始まる行) の byte 位置を返す。
-/// 見つからない場合は `0` (= body 全体を返す)。
+/// Returns the byte position of the last markdown h2 heading (a line starting
+/// with `## `) in `body`. Returns `0` when none is found (= return the whole body).
 fn last_h2_pos(body: &str) -> usize {
     let needle = "\n## ";
     if let Some(pos) = body.rfind(needle) {
-        // `\n` の次の byte (= `#` の先頭) から返す
+        // Return from the byte after `\n` (= the leading `#`)
         return pos + 1;
     }
     if body.starts_with("## ") {
@@ -226,7 +279,7 @@ fn last_h2_pos(body: &str) -> usize {
     0
 }
 
-/// `std::fs::Metadata` から Unix epoch 秒を取り出す。取得不能なら `0`。
+/// Extracts Unix epoch seconds from `std::fs::Metadata`. Returns `0` when unavailable.
 fn mtime_unix(meta: &std::fs::Metadata) -> u64 {
     meta.modified()
         .ok()
@@ -235,9 +288,10 @@ fn mtime_unix(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-/// stat(path) から R4 metadata JSON を構築する。 stat 失敗は Null を返す (no panic)。
-/// `last_modified` は UNIX epoch 秒 (u64)、 `age_days` は現在時刻との差分日数 (u64)。
-/// chrono 非依存 — std::time::SystemTime のみ使用。
+/// Builds the R4 metadata JSON from stat(path). Returns Null on stat failure
+/// (no panic). `last_modified` is UNIX epoch seconds (u64); `age_days` is the
+/// difference from now in days (u64). No chrono dependency — uses
+/// std::time::SystemTime only.
 fn build_file_metadata(path: &std::path::Path) -> serde_json::Value {
     match std::fs::metadata(path) {
         Ok(meta) => {
@@ -273,8 +327,9 @@ fn build_file_metadata(path: &std::path::Path) -> serde_json::Value {
 }
 
 fn resolve_file_path(raw: &str) -> WireResult<PathBuf> {
-    // `~/...` -> $HOME 展開
-    // `#fragment` と `?query` を path から剥がす (どちらも filesystem lookup では無効)
+    // `~/...` -> $HOME expansion
+    // Strip `#fragment` and `?query` from the path (both are invalid for
+    // filesystem lookup)
     let stripped = raw.split('#').next().unwrap_or(raw);
     let stripped = stripped.split('?').next().unwrap_or(stripped);
     let expanded = if let Some(rest) = stripped.strip_prefix("~/") {
@@ -315,7 +370,7 @@ fn newest_child(dir: &std::path::Path) -> WireResult<PathBuf> {
 mod tests {
     use super::*;
 
-    // ---- ヘルパー ----
+    // ---- helpers ----
 
     fn write_test_file(name: &str, content: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
@@ -324,7 +379,7 @@ mod tests {
         path
     }
 
-    // ---- 既存テスト (backward-compat) ----
+    // ---- existing tests (backward-compat) ----
 
     #[tokio::test]
     async fn file_adapter_reads_existing_file() {
@@ -408,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_adapter_r5_tail_n_clamp() {
-        // 5 行のファイルで tail_n=2000 (> TAIL_N_MAX=1000) → clamp → 全 5 行が返る
+        // A 5-line file with tail_n=2000 (> TAIL_N_MAX=1000) → clamp → all 5 lines returned
         let content = "a1\na2\na3\na4\na5\n";
         let path = write_test_file("r5_clamp.txt", content);
         let uri = WireUri::parse(&format!("file://{}?tail_n=2000", path.display())).unwrap();
@@ -481,20 +536,20 @@ mod tests {
         let uri = WireUri::parse(&format!("file://{}?tail=last_section", path.display())).unwrap();
         let a = FileAdapter;
         let v = a.fetch(&uri).await.unwrap();
-        // R5: body は末尾セクションのみ
+        // R5: body is the last section only
         let body = v["body"].as_str().unwrap();
         assert!(
             body.starts_with("## Section 2"),
             "R5: last section; got: {body}"
         );
         assert!(!body.contains("Section 1"), "R5: no earlier section");
-        // R4: size_bytes は元 file 全体の size (tail 後 body ではない)
+        // R4: size_bytes is the original whole-file size (not the post-tail body)
         assert_eq!(
             v["size_bytes"].as_u64().unwrap(),
             full_size,
             "R4: size_bytes = full file size"
         );
-        // R4: modified_at は u64 として存在
+        // R4: modified_at is present as u64
         assert!(
             v["modified_at"].as_u64().is_some(),
             "R4: modified_at present"
