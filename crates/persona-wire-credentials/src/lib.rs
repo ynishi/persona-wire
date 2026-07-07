@@ -86,6 +86,22 @@ pub trait TokenProvider: Send + Sync {
     }
 }
 
+/// Write-side extension of [`TokenProvider`]. Backends that support storing
+/// or removing tokens implement this in addition to [`TokenProvider`]; read-
+/// only backends (e.g. [`EnvTokenProvider`]) intentionally do NOT implement
+/// it, so `set` / `delete` on those is a compile-time error rather than a
+/// runtime `unimplemented!()`.
+pub trait MutableTokenProvider: TokenProvider {
+    /// Store `token` in the backend under `service`, overwriting any prior
+    /// value. Backend errors are returned as [`WireError::Storage`] — never
+    /// silently swallowed.
+    fn set(&self, service: &str, token: &str) -> WireResult<()>;
+
+    /// Remove any token stored under `service`. Idempotent — a missing
+    /// entry is `Ok(())`, not an error.
+    fn delete(&self, service: &str) -> WireResult<()>;
+}
+
 /// Looks up tokens from process environment variables.
 ///
 /// See the module-level "Precedence" section for the exact lookup order.
@@ -143,10 +159,16 @@ impl KeyringTokenProvider {
             ))
         })
     }
+}
 
+impl MutableTokenProvider for KeyringTokenProvider {
     /// Store `token` in the OS keychain for `service`, overwriting any
     /// existing entry.
-    pub fn set(&self, service: &str, token: &str) -> WireResult<()> {
+    ///
+    /// Non-macOS: routed through the `keyring` crate (`secret-service` on
+    /// Linux, `wincred` on Windows), consistent with [`KeyringTokenProvider::entry`].
+    #[cfg(not(target_os = "macos"))]
+    fn set(&self, service: &str, token: &str) -> WireResult<()> {
         Self::entry(service)?.set_password(token).map_err(|e| {
             WireError::Storage(format!("credentials: keyring set for '{service}': {e}"))
         })
@@ -154,10 +176,55 @@ impl KeyringTokenProvider {
 
     /// Delete the OS keychain entry for `service`, if any. Idempotent — a
     /// missing entry is `Ok(())`, not an error.
-    pub fn delete(&self, service: &str) -> WireResult<()> {
+    ///
+    /// Non-macOS: routed through the `keyring` crate.
+    #[cfg(not(target_os = "macos"))]
+    fn delete(&self, service: &str) -> WireResult<()> {
         match Self::entry(service)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(WireError::Storage(format!(
+                "credentials: keyring delete for '{service}': {e}"
+            ))),
+        }
+    }
+
+    /// Store `token` in the macOS Keychain for `service`, overwriting any
+    /// existing entry.
+    ///
+    /// Goes directly through [`security_framework::passwords::set_generic_password`]
+    /// (same `(service, account)` attribute pair as [`KeyringTokenProvider::entry`]:
+    /// `kSecAttrService = "persona-wire"`, `kSecAttrAccount = service`)
+    /// instead of the `keyring` crate's `apple-native` backend. This is a
+    /// single `SecItemAdd` call that falls back to `SecItemUpdate`
+    /// internally on `errSecDuplicateItem`, so a create-or-overwrite `set`
+    /// triggers at most one "wants to add/change" Keychain ACL prompt —
+    /// never two.
+    #[cfg(target_os = "macos")]
+    fn set(&self, service: &str, token: &str) -> WireResult<()> {
+        security_framework::passwords::set_generic_password("persona-wire", service, token.as_bytes())
+            .map_err(|e| {
+                WireError::Storage(format!("credentials: keyring set for '{service}': {e}"))
+            })
+    }
+
+    /// Delete the macOS Keychain entry for `service`, if any. Idempotent —
+    /// a missing entry (`errSecItemNotFound`) is `Ok(())`, not an error.
+    ///
+    /// Goes directly through
+    /// [`security_framework::passwords::delete_generic_password`] rather
+    /// than the `keyring` crate, for the same reason as
+    /// [`KeyringTokenProvider::set`] above.
+    #[cfg(target_os = "macos")]
+    fn delete(&self, service: &str) -> WireResult<()> {
+        // `errSecItemNotFound` (Security.framework `OSStatus`): mirrored as
+        // a literal here for the same reason as in `exists` below — see
+        // that doc comment for the upstream reference link.
+        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+        match security_framework::passwords::delete_generic_password("persona-wire", service) {
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
             Err(e) => Err(WireError::Storage(format!(
                 "credentials: keyring delete for '{service}': {e}"
             ))),
@@ -488,5 +555,57 @@ mod tests {
             exists_result: false,
         })]);
         assert!(creds.resolve_source("svc").unwrap().is_none());
+    }
+
+    // ---- MutableTokenProvider (ISP split) ----
+
+    struct RecordingMutable {
+        set_calls: std::sync::Mutex<Vec<(String, String)>>,
+        delete_calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TokenProvider for RecordingMutable {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+        fn get(&self, _service: &str) -> WireResult<Option<SecretString>> {
+            Ok(None)
+        }
+    }
+
+    impl MutableTokenProvider for RecordingMutable {
+        fn set(&self, service: &str, token: &str) -> WireResult<()> {
+            self.set_calls
+                .lock()
+                .unwrap()
+                .push((service.to_string(), token.to_string()));
+            Ok(())
+        }
+        fn delete(&self, service: &str) -> WireResult<()> {
+            self.delete_calls.lock().unwrap().push(service.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mutable_provider_can_be_dyn_dispatched() {
+        let m: Box<dyn MutableTokenProvider> = Box::new(RecordingMutable {
+            set_calls: std::sync::Mutex::new(Vec::new()),
+            delete_calls: std::sync::Mutex::new(Vec::new()),
+        });
+        m.set("svc", "tok").unwrap();
+        m.delete("svc").unwrap();
+    }
+
+    // ISP guarantee: `EnvTokenProvider` is read-only and must not implement
+    // `MutableTokenProvider`. `set` / `delete` on it should be a compile
+    // error, not a runtime `unimplemented!()`. This fn only compiles because
+    // `EnvTokenProvider: TokenProvider` holds and does NOT require
+    // `MutableTokenProvider` — a positive control proving the trait bound is
+    // the (sole) enforcement mechanism.
+    #[test]
+    fn env_token_provider_is_read_only_by_trait_bound() {
+        fn assert_read_only<P: TokenProvider>(_: &P) {}
+        assert_read_only(&EnvTokenProvider);
     }
 }

@@ -21,7 +21,9 @@ use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::domain::graph::{Edge, Node};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::{default_db_path, SqliteStorage};
-use persona_wire_credentials::{Credentials, KeyringTokenProvider, ALIAS_ENV_VARS};
+use persona_wire_credentials::{
+    Credentials, KeyringTokenProvider, MutableTokenProvider, ALIAS_ENV_VARS,
+};
 use std::io::IsTerminal;
 
 #[derive(Parser, Debug)]
