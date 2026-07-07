@@ -202,10 +202,12 @@ impl MutableTokenProvider for KeyringTokenProvider {
     /// never two.
     #[cfg(target_os = "macos")]
     fn set(&self, service: &str, token: &str) -> WireResult<()> {
-        security_framework::passwords::set_generic_password("persona-wire", service, token.as_bytes())
-            .map_err(|e| {
-                WireError::Storage(format!("credentials: keyring set for '{service}': {e}"))
-            })
+        security_framework::passwords::set_generic_password(
+            "persona-wire",
+            service,
+            token.as_bytes(),
+        )
+        .map_err(|e| WireError::Storage(format!("credentials: keyring set for '{service}': {e}")))
     }
 
     /// Delete the macOS Keychain entry for `service`, if any. Idempotent —
