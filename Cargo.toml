@@ -1,3 +1,11 @@
+# The profile that 'dist' will build with (invoked by the Release workflow
+# via `cargo build --profile dist` for cargo-dist's multi-target artifacts).
+# Missing this section was the root cause of the v0.12.0 Release workflow
+# failure — cargo-dist bailed with `error: profile 'dist' is not defined`.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [workspace]
 resolver = "2"
 members = [
