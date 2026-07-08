@@ -79,6 +79,7 @@ use std::time::UNIX_EPOCH;
 use crate::domain::error::{WireError, WireResult};
 use crate::infrastructure::wire_uri::WireUri;
 use async_trait::async_trait;
+use serde_json::Value;
 
 /// Upper bound for `N` in `?tail_n=<N>` (context size guard).
 /// Values above this are clamped before taking the tail lines.
@@ -110,6 +111,54 @@ pub trait Adapter: Send + Sync {
     /// Interprets the parsed `WireUri` per scheme and returns fresh data as a
     /// `serde_json::Value`.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value>;
+}
+
+/// Opaque pagination cursor. Each adapter picks the variant matching its
+/// upstream API. The wire layer treats this as an opaque token to thread
+/// through subsequent `fetch_page` calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cursor {
+    /// GitHub-style page number: `?page=N`.
+    PageNumber(u32),
+    /// GitHub-style `Link` header `rel="next"` URL.
+    LinkHeader(String),
+    /// Notion / Slack-style opaque continuation token.
+    NextToken(String),
+    /// Todoist-style numeric offset.
+    Offset(u64),
+}
+
+/// Capability trait: an adapter that can paginate its upstream API.
+///
+/// The wire-layer fetch driver checks whether an adapter implements
+/// `Pageable`. If it does, and the caller requests more items than
+/// `max_page_size` returns, the driver threads the returned `Cursor`
+/// through subsequent `fetch_page` calls until the requested count is
+/// satisfied or the upstream signals end-of-data (`Ok((_, None))`).
+///
+/// Adapters that do not implement `Pageable` are called through the plain
+/// `Adapter::fetch` path; the wire layer emits a WARN log when a caller
+/// requests `limit > max_page_size` from such an adapter (see Layer 2
+/// follow-up subtask).
+#[async_trait]
+pub trait Pageable: Send + Sync {
+    /// Maximum items returned in a single upstream request. When the caller
+    /// requests more than this value, the wire layer drives the pagination
+    /// loop through `fetch_page`.
+    fn max_page_size(&self) -> usize;
+
+    /// Fetch one page. `cursor = None` requests the first page. Returns
+    /// `(items, next_cursor)`; a `None` next_cursor signals end-of-data.
+    ///
+    /// The exact `Item` shape is per-adapter but each item is a
+    /// `serde_json::Value` matching the adapter's normalized single-item
+    /// shape (same shape the adapter's `fetch` would put in the top-level
+    /// `items` array).
+    async fn fetch_page(
+        &self,
+        uri: &WireUri,
+        cursor: Option<Cursor>,
+    ) -> WireResult<(Vec<Value>, Option<Cursor>)>;
 }
 
 // ---- file adapter (std::fs) ----
@@ -724,5 +773,84 @@ mod tests {
             full_path.starts_with('/'),
             "full_path should be an absolute path"
         );
+    }
+
+    // ---- Pageable / Cursor (Layer 1) ----
+
+    #[test]
+    fn cursor_variants_construct_and_compare() {
+        let page_number = Cursor::PageNumber(2);
+        let link_header = Cursor::LinkHeader("https://api.example.com?page=3".to_string());
+        let next_token = Cursor::NextToken("abc123".to_string());
+        let offset = Cursor::Offset(50);
+
+        // equality within the same variant
+        assert_eq!(page_number, Cursor::PageNumber(2));
+        assert_eq!(
+            link_header.clone(),
+            Cursor::LinkHeader("https://api.example.com?page=3".to_string())
+        );
+        assert_eq!(next_token.clone(), Cursor::NextToken("abc123".to_string()));
+        assert_eq!(offset, Cursor::Offset(50));
+
+        // inequality within the same variant (different payload)
+        assert_ne!(page_number, Cursor::PageNumber(3));
+        assert_ne!(next_token, Cursor::NextToken("xyz789".to_string()));
+
+        // inequality across variants
+        assert_ne!(page_number, link_header);
+        assert_ne!(link_header, offset);
+        assert_ne!(Cursor::Offset(2), Cursor::PageNumber(2));
+    }
+
+    #[test]
+    fn pageable_is_object_safe() {
+        // Compile-time-only assertion: `dyn Pageable` must be constructible
+        // as a trait object (Send + Sync + no non-dispatchable generics).
+        fn _assert_object_safe(_p: &dyn Pageable) {}
+    }
+
+    struct MockPageableAdapter;
+
+    #[async_trait]
+    impl Pageable for MockPageableAdapter {
+        fn max_page_size(&self) -> usize {
+            2
+        }
+
+        async fn fetch_page(
+            &self,
+            _uri: &WireUri,
+            cursor: Option<Cursor>,
+        ) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
+            match cursor {
+                None => Ok((
+                    vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
+                    Some(Cursor::NextToken("page-2".to_string())),
+                )),
+                Some(Cursor::NextToken(ref token)) if token == "page-2" => {
+                    Ok((vec![serde_json::json!({"id": 3})], None))
+                }
+                Some(other) => Err(WireError::Storage(format!(
+                    "mock adapter: unexpected cursor: {other:?}"
+                ))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_pageable_adapter_fetch_page_threads_cursor() {
+        let adapter = MockPageableAdapter;
+        let uri = WireUri::parse("mock://items").unwrap();
+
+        assert_eq!(adapter.max_page_size(), 2);
+
+        let (first_items, next) = adapter.fetch_page(&uri, None).await.unwrap();
+        assert_eq!(first_items.len(), 2);
+        assert_eq!(next, Some(Cursor::NextToken("page-2".to_string())));
+
+        let (second_items, next2) = adapter.fetch_page(&uri, next).await.unwrap();
+        assert_eq!(second_items.len(), 1);
+        assert_eq!(next2, None);
     }
 }
