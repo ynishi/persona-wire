@@ -23,6 +23,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # persona-wire-credentials → keyring → secret-service on Linux pulls in
+      # libdbus-sys, which requires libdbus-1-dev + pkg-config at build time
+      # (release-plz's cargo publish verify step compiles each crate). Kept
+      # in sync with ci.yml and dist-workspace.toml `[dist.dependencies.apt]`.
+      - name: Install libdbus (Linux system dep for keyring)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: release-plz/action@v0.5
         with:
@@ -48,6 +54,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Same libdbus rationale as `release-plz-release` above — release-plz's
+      # PR-open step runs cargo metadata / package inspection that pulls in
+      # libdbus-sys via the credentials crate's Linux path.
+      - name: Install libdbus (Linux system dep for keyring)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: release-plz/action@v0.5
         with:
