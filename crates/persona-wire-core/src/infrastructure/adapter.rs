@@ -60,6 +60,13 @@
 //!   `PluginRegistry::default_builder_for_wire()` chain on the boot side
 //!   (`persona-wire-mcp/src/lib.rs`). Scheme collisions fail fast at
 //!   registry build time.
+//! - **Pagination**: adapters that support `?limit=N` where `N` can exceed a
+//!   single upstream page MUST drive the pagination loop internally inside
+//!   `Adapter::fetch` and emit a truthful `has_more` field distinguishing
+//!   truncated-at-limit from upstream-exhausted. Cursor form (Link header,
+//!   NextToken, offset, ...) is a private implementation detail — the wire
+//!   layer never sees it. Adapters that ignore `?limit` (single-shot fetches
+//!   such as `FileAdapter`) simply return their canonical shape.
 //!
 //! ## External service integration policy (decided 2026-07-07)
 //!
@@ -79,7 +86,6 @@ use std::time::UNIX_EPOCH;
 use crate::domain::error::{WireError, WireResult};
 use crate::infrastructure::wire_uri::WireUri;
 use async_trait::async_trait;
-use serde_json::Value;
 
 /// Upper bound for `N` in `?tail_n=<N>` (context size guard).
 /// Values above this are clamped before taking the tail lines.
@@ -110,106 +116,13 @@ pub trait Adapter: Send + Sync {
 
     /// Interprets the parsed `WireUri` per scheme and returns fresh data as a
     /// `serde_json::Value`.
+    ///
+    /// Adapters honoring `?limit=N` MUST return `min(N, upstream)` items and
+    /// emit a truthful `has_more` field in their canonical response shape,
+    /// distinguishing "truncated at limit" from "upstream exhausted".
+    /// Pagination against the upstream API is an implementation detail of the
+    /// adapter — the wire layer never sees cursor state.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value>;
-
-    /// Capability accessor for the wire-layer pagination driver (Layer 2 of
-    /// GH #1). Override to opt into wire-layer pagination by returning
-    /// `Some(self)` once the adapter also implements [`Pageable`].
-    ///
-    /// Default returns `None` — existing adapters keep working with zero
-    /// changes. Rust trait objects don't support cross-trait downcasting
-    /// without `Any + 'static` bounds, so this companion accessor is the
-    /// idiomatic pattern (mirrors `std::error::Error::source`). The wire
-    /// layer (`application::use_cases::fetch_with_pagination_awareness`)
-    /// calls this to decide whether to drive a [`Pageable::fetch_page`] loop
-    /// or fall back to a plain capped `fetch` with a WARN.
-    fn as_pageable(&self) -> Option<&dyn Pageable> {
-        None
-    }
-}
-
-/// Opaque pagination cursor. Each adapter picks the variant matching its
-/// upstream API. The wire layer treats this as an opaque token to thread
-/// through subsequent `fetch_page` calls.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cursor {
-    /// GitHub-style page number: `?page=N`.
-    PageNumber(u32),
-    /// GitHub-style `Link` header `rel="next"` URL.
-    LinkHeader(String),
-    /// Notion / Slack-style opaque continuation token.
-    NextToken(String),
-    /// Todoist-style numeric offset.
-    Offset(u64),
-}
-
-/// Wire-layer heuristic threshold used when a caller requests `limit` items
-/// from an adapter that does **not** implement [`Pageable`] (Layer 2 of GH
-/// #1). This is not a per-adapter contract — adapters that want proper
-/// pagination should implement [`Pageable`] and override
-/// [`Adapter::as_pageable`]; this constant only decides when the wire layer
-/// should emit a WARN before falling back to a plain capped `fetch`.
-///
-/// Value: `100`, matching GitHub's REST list API `per_page` cap — a
-/// de-facto industry norm for this class of API.
-pub const NON_PAGEABLE_MAX_HINT: usize = 100;
-
-/// Capability trait: an adapter that can paginate its upstream API.
-///
-/// The wire-layer fetch driver checks whether an adapter implements
-/// `Pageable`. If it does, and the caller requests more items than
-/// `max_page_size` returns, the driver threads the returned `Cursor`
-/// through subsequent `fetch_page` calls until the requested count is
-/// satisfied or the upstream signals end-of-data (`Ok((_, None))`).
-///
-/// Adapters that do not implement `Pageable` are called through the plain
-/// `Adapter::fetch` path; the wire layer emits a WARN log when a caller
-/// requests `limit > NON_PAGEABLE_MAX_HINT` from such an adapter (see Layer
-/// 2 follow-up subtask).
-///
-/// Once the loop finishes (or the caller's `limit` is satisfied), the driver
-/// hands the collected items to [`Pageable::wrap_items`] to assemble the
-/// final response (Layer 3a of GH #1).
-#[async_trait]
-pub trait Pageable: Send + Sync {
-    /// Maximum items returned in a single upstream request. When the caller
-    /// requests more than this value, the wire layer drives the pagination
-    /// loop through `fetch_page`.
-    fn max_page_size(&self) -> usize;
-
-    /// Fetch one page. `cursor = None` requests the first page. Returns
-    /// `(items, next_cursor)`; a `None` next_cursor signals end-of-data.
-    ///
-    /// The exact `Item` shape is per-adapter but each item is a
-    /// `serde_json::Value` matching the adapter's normalized single-item
-    /// shape (same shape the adapter's `fetch` would put in the top-level
-    /// `items` array).
-    async fn fetch_page(
-        &self,
-        uri: &WireUri,
-        cursor: Option<Cursor>,
-    ) -> WireResult<(Vec<Value>, Option<Cursor>)>;
-
-    /// Wraps the items collected across a completed pagination loop into the
-    /// final wire-compatible `serde_json::Value` returned to the caller.
-    ///
-    /// Without this hook, the wire-layer driver would have to guess a
-    /// generic response shape, which would silently diverge from the shape
-    /// `Adapter::fetch` produces on the non-paginated fast path (e.g.
-    /// GitHub's `{repo, kind, items}`). Overriding `wrap_items` lets each
-    /// `Pageable` adapter preserve its canonical shape across both paths.
-    ///
-    /// Sync (not `async`): building the wrapper JSON is pure, no I/O.
-    ///
-    /// Default produces the generic `{"count": items.len(), "items": items}`
-    /// shape (no `scheme` — assembling that is `Adapter`'s business, and this
-    /// generic default has no scheme knowledge).
-    fn wrap_items(&self, items: Vec<Value>, _uri: &WireUri) -> WireResult<Value> {
-        Ok(serde_json::json!({
-            "count": items.len(),
-            "items": items,
-        }))
-    }
 }
 
 // ---- file adapter (std::fs) ----
@@ -824,135 +737,5 @@ mod tests {
             full_path.starts_with('/'),
             "full_path should be an absolute path"
         );
-    }
-
-    // ---- Pageable / Cursor (Layer 1) ----
-
-    #[test]
-    fn cursor_variants_construct_and_compare() {
-        let page_number = Cursor::PageNumber(2);
-        let link_header = Cursor::LinkHeader("https://api.example.com?page=3".to_string());
-        let next_token = Cursor::NextToken("abc123".to_string());
-        let offset = Cursor::Offset(50);
-
-        // equality within the same variant
-        assert_eq!(page_number, Cursor::PageNumber(2));
-        assert_eq!(
-            link_header.clone(),
-            Cursor::LinkHeader("https://api.example.com?page=3".to_string())
-        );
-        assert_eq!(next_token.clone(), Cursor::NextToken("abc123".to_string()));
-        assert_eq!(offset, Cursor::Offset(50));
-
-        // inequality within the same variant (different payload)
-        assert_ne!(page_number, Cursor::PageNumber(3));
-        assert_ne!(next_token, Cursor::NextToken("xyz789".to_string()));
-
-        // inequality across variants
-        assert_ne!(page_number, link_header);
-        assert_ne!(link_header, offset);
-        assert_ne!(Cursor::Offset(2), Cursor::PageNumber(2));
-    }
-
-    #[test]
-    fn pageable_is_object_safe() {
-        // Compile-time-only assertion: `dyn Pageable` must be constructible
-        // as a trait object (Send + Sync + no non-dispatchable generics).
-        fn _assert_object_safe(_p: &dyn Pageable) {}
-    }
-
-    struct MockPageableAdapter;
-
-    #[async_trait]
-    impl Pageable for MockPageableAdapter {
-        fn max_page_size(&self) -> usize {
-            2
-        }
-
-        async fn fetch_page(
-            &self,
-            _uri: &WireUri,
-            cursor: Option<Cursor>,
-        ) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-            match cursor {
-                None => Ok((
-                    vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
-                    Some(Cursor::NextToken("page-2".to_string())),
-                )),
-                Some(Cursor::NextToken(ref token)) if token == "page-2" => {
-                    Ok((vec![serde_json::json!({"id": 3})], None))
-                }
-                Some(other) => Err(WireError::Storage(format!(
-                    "mock adapter: unexpected cursor: {other:?}"
-                ))),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn mock_pageable_adapter_fetch_page_threads_cursor() {
-        let adapter = MockPageableAdapter;
-        let uri = WireUri::parse("mock://items").unwrap();
-
-        assert_eq!(adapter.max_page_size(), 2);
-
-        let (first_items, next) = adapter.fetch_page(&uri, None).await.unwrap();
-        assert_eq!(first_items.len(), 2);
-        assert_eq!(next, Some(Cursor::NextToken("page-2".to_string())));
-
-        let (second_items, next2) = adapter.fetch_page(&uri, next).await.unwrap();
-        assert_eq!(second_items.len(), 1);
-        assert_eq!(next2, None);
-    }
-
-    #[test]
-    fn mock_pageable_adapter_wrap_items_default_shape() {
-        // MockPageableAdapter does not override `wrap_items` — it must fall
-        // back to the trait's default `{count, items}` shape (no `scheme`).
-        let adapter = MockPageableAdapter;
-        let uri = WireUri::parse("mock://items").unwrap();
-        let items = vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})];
-
-        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
-
-        assert_eq!(wrapped["count"], 2);
-        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
-        assert!(
-            wrapped.get("scheme").is_none(),
-            "default wrap_items must not add a `scheme` field: {wrapped}"
-        );
-    }
-
-    // ---- Adapter::as_pageable (Layer 2) ----
-
-    #[async_trait]
-    impl Adapter for MockPageableAdapter {
-        fn scheme(&self) -> &'static str {
-            "mock"
-        }
-
-        async fn fetch(&self, _uri: &WireUri) -> WireResult<serde_json::Value> {
-            Ok(serde_json::json!({"scheme": "mock", "count": 0, "items": []}))
-        }
-
-        fn as_pageable(&self) -> Option<&dyn Pageable> {
-            Some(self)
-        }
-    }
-
-    #[test]
-    fn as_pageable_default_returns_none() {
-        // FileAdapter implements Adapter without overriding as_pageable —
-        // the default impl must return None (backward-compat).
-        let a = FileAdapter;
-        assert!(a.as_pageable().is_none());
-    }
-
-    #[test]
-    fn as_pageable_override_returns_some() {
-        let a = MockPageableAdapter;
-        let pageable = a.as_pageable();
-        assert!(pageable.is_some(), "override should return Some(self)");
-        assert_eq!(pageable.unwrap().max_page_size(), 2);
     }
 }

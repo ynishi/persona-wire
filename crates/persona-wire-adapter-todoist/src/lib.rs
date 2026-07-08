@@ -9,9 +9,10 @@
 //!   project filter / natural-language filter + item limit).
 //! - HTTP fetch — delegated to `persona_wire_transport_http::HttpClient` (no
 //!   Todoist-specific knowledge in the transport layer).
-//! - [`normalize_todoist`] — raw Todoist API v1 response (`{"results": [...],
-//!   "next_cursor": ...}`) → the Wire JSON shape below, branching only on
-//!   `kind`.
+//! - Internal `next_cursor` loop in [`Adapter::fetch`] — accumulates
+//!   Todoist API v1 response pages (`{"results": [...], "next_cursor":
+//!   ...}`) into the Wire JSON shape below, branching only on `kind` for
+//!   the per-item normalization.
 //!
 //! ## URI grammar
 //!
@@ -36,9 +37,10 @@
 //!   (silently ignored, not even read).
 //! - `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
 //!   A non-numeric or zero value fails loud; there is no upper bound at
-//!   parse time — [`MAX_LIMIT`] (the API's own `1..=200` constraint) is now
-//!   a `Pageable`-only concept (see "Pagination" below), not a parse-time
-//!   gate.
+//!   parse time. [`MAX_LIMIT`] (the Todoist API's own per-request cap of
+//!   200) is enforced only when the adapter builds the upstream request URL;
+//!   `?limit=N` with `N > MAX_LIMIT` triggers the internal pagination loop
+//!   (see "Pagination" below).
 //! - Unknown query keys are silently ignored (same forward-compatible
 //!   convention as `persona-wire-adapter-rss` / `-github`).
 //! - The `filter` value is percent-decoded once at parse time (it commonly
@@ -63,8 +65,12 @@
 //! ## Output shape
 //!
 //! ```json
-//! { "kind": "tasks", "items": [ ... ] }
+//! { "kind": "tasks", "items": [ ... ], "has_more": false }
 //! ```
+//!
+//! `has_more` is `true` when the adapter truncated the result at `?limit=N`
+//! and the upstream still had more items available. It is `false` when the
+//! loop terminated because Todoist's `next_cursor` was `null`.
 //!
 //! `items` entries for `kind=tasks`:
 //!
@@ -89,34 +95,22 @@
 //! }
 //! ```
 //!
-//! The response wrapper's `next_cursor` field is read only by the
-//! wire-layer pagination path (see "Pagination" below); `Adapter::fetch`
-//! (the non-paginated fast path) still ignores it and relies on `?limit=`
-//! alone to bound the result size.
+//! ## Pagination
 //!
-//! ## Pagination (Layer 3b-todoist of GH #1)
-//!
-//! `TodoistAdapter` implements [`Pageable`]: when a caller requests
-//! `?limit=N` with `N` greater than [`MAX_LIMIT`] (200), the wire-layer
-//! driver (`persona_wire_core::application::use_cases`) threads a
-//! [`Cursor::NextToken`] extracted from the response body's `next_cursor`
-//! field (a nullable string; `null` signals end-of-data) across repeated
-//! requests instead of the single capped fetch `Adapter::fetch` performs.
-//! `parse_todoist_uri`'s `limit` parsing accepts any positive integer — the
-//! parse-time `limit > MAX_LIMIT` gate was removed once all three Layer 3b
-//! adapters (todoist / notion / slack) had `Pageable` impls (GH #1);
-//! [`MAX_LIMIT`] now solely defines [`Pageable::max_page_size`], not a
-//! parse-time bound.
-//! `limit <= MAX_LIMIT` is unaffected — it stays on the existing
-//! single-request fast path.
+//! `Adapter::fetch` drives the pagination loop internally: it follows the
+//! response body's `next_cursor` field (an opaque token; `null` signals
+//! end-of-data) across repeated requests until it has accumulated `?limit=N`
+//! items or the upstream signals end-of-data. The cursor form is a private
+//! implementation detail — the wire layer only sees the final assembled
+//! `{kind, items, has_more}` shape. Every upstream request is sent with
+//! `limit = MAX_LIMIT` (Todoist's own per-request ceiling of 200), so the
+//! loop runs once for `?limit <= MAX_LIMIT` and continues page-by-page for
+//! larger requests.
 
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
-use persona_wire_core::infrastructure::{
-    adapter::{Adapter, Cursor, Pageable},
-    wire_uri::WireUri,
-};
+use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
 use persona_wire_core::{WireError, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
@@ -149,25 +143,43 @@ impl Adapter for TodoistAdapter {
         "todoist"
     }
 
-    /// Fetch `spec.kind` items and normalize them. See the module docs for
-    /// URI grammar, auth resolution, and output shape.
+    /// Fetch `spec.kind` items, driving the `next_cursor` pagination loop
+    /// internally until `?limit=N` items are accumulated or the upstream
+    /// signals end-of-data. See the module docs for URI grammar, auth
+    /// resolution, and output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_todoist_uri(uri)?;
         let client = todoist_http_client()?;
-        let raw = client.get_json(&spec.endpoint_url()).await?;
-        normalize_todoist(&spec, &raw)
-    }
-
-    /// Opts into the wire-layer pagination driver (Layer 3b-todoist of GH
-    /// #1). See the module docs "Pagination" section.
-    fn as_pageable(&self) -> Option<&dyn Pageable> {
-        Some(self)
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let has_more = loop {
+            let url = build_request_url(&spec, cursor.as_deref());
+            let raw = client.get_json(&url).await?;
+            let arr = response_array(spec.kind, &raw)?;
+            items.extend(normalize_items(spec.kind, arr));
+            let next = raw
+                .get("next_cursor")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if items.len() >= spec.limit {
+                break items.len() > spec.limit || next.is_some();
+            }
+            match next {
+                Some(token) => cursor = Some(token),
+                None => break false,
+            }
+        };
+        items.truncate(spec.limit);
+        Ok(serde_json::json!({
+            "kind": spec.kind.as_str(),
+            "items": items,
+            "has_more": has_more,
+        }))
     }
 }
 
 /// Builds a fresh, Todoist-configured `HttpClient` (auth resolved per-call,
-/// not at boot; see module docs "Auth"). Shared by `Adapter::fetch` and
-/// `Pageable::fetch_page` so both paths stay in sync on headers/timeout.
+/// not at boot; see module docs "Auth").
 fn todoist_http_client() -> WireResult<HttpClient> {
     // Auth is resolved per-fetch (not at boot); see module docs "Auth".
     // Todoist has no unauthenticated access mode, unlike the github
@@ -212,145 +224,55 @@ struct TodoistUriSpec {
     limit: usize,
 }
 
-impl TodoistUriSpec {
-    /// Builds the full Todoist API v1 request URL for this spec, using
-    /// `limit` as the `?limit=` value. Shared by [`Self::endpoint_url`]
-    /// (limit = the caller's requested `?limit=`) and
-    /// [`Self::endpoint_url_for_first_page`] (limit fixed to [`MAX_LIMIT`]
-    /// for the wire-layer pagination loop's first page).
-    fn build_url_with_limit(&self, limit: usize) -> String {
-        match self.kind {
-            TodoistKind::Tasks => {
-                if let Some(filter) = &self.filter {
-                    let mut url = url::Url::parse(&format!("{API_BASE}/tasks/filter"))
-                        .expect("API_BASE + /tasks/filter is a valid URL");
-                    url.query_pairs_mut()
-                        .append_pair("query", filter)
-                        .append_pair("limit", &limit.to_string());
-                    url.to_string()
-                } else {
-                    let mut url = url::Url::parse(&format!("{API_BASE}/tasks"))
-                        .expect("API_BASE + /tasks is a valid URL");
-                    {
-                        let mut qp = url.query_pairs_mut();
-                        qp.append_pair("limit", &limit.to_string());
-                        if let Some(project_id) = &self.project_id {
-                            qp.append_pair("project_id", project_id);
-                        }
-                    }
-                    url.to_string()
-                }
-            }
-            TodoistKind::Projects => {
-                let mut url = url::Url::parse(&format!("{API_BASE}/projects"))
-                    .expect("API_BASE + /projects is a valid URL");
+/// Builds one upstream request URL for `Adapter::fetch`'s internal loop.
+///
+/// The per-request `limit` is `min(spec.limit, MAX_LIMIT)` — capped at
+/// Todoist's per-request ceiling of 200 so that `?limit > MAX_LIMIT`
+/// triggers the loop and picks up the remainder via `next_cursor`. When
+/// `cursor` is `Some`, the continuation token from the previous page's
+/// `next_cursor` field is appended as a `cursor=<token>` query param; other
+/// query params (`limit`, for tasks `project_id` / `filter`'s `query`) are
+/// resent unchanged, since Todoist's cursor does not itself carry the
+/// filter/scope state.
+fn build_request_url(spec: &TodoistUriSpec, cursor: Option<&str>) -> String {
+    let per_request_limit = spec.limit.min(MAX_LIMIT).to_string();
+    let base = match spec.kind {
+        TodoistKind::Tasks => {
+            if let Some(filter) = &spec.filter {
+                let mut url = url::Url::parse(&format!("{API_BASE}/tasks/filter"))
+                    .expect("API_BASE + /tasks/filter is a valid URL");
                 url.query_pairs_mut()
-                    .append_pair("limit", &limit.to_string());
-                url.to_string()
+                    .append_pair("query", filter)
+                    .append_pair("limit", &per_request_limit);
+                url
+            } else {
+                let mut url = url::Url::parse(&format!("{API_BASE}/tasks"))
+                    .expect("API_BASE + /tasks is a valid URL");
+                {
+                    let mut qp = url.query_pairs_mut();
+                    qp.append_pair("limit", &per_request_limit);
+                    if let Some(project_id) = &spec.project_id {
+                        qp.append_pair("project_id", project_id);
+                    }
+                }
+                url
             }
         }
-    }
-
-    /// Builds the full Todoist API v1 request URL for this spec (the
-    /// non-paginated `Adapter::fetch` fast path; `limit` = the caller's
-    /// requested `?limit=`).
-    fn endpoint_url(&self) -> String {
-        self.build_url_with_limit(self.limit)
-    }
-
-    /// Builds the request URL for the *first page* of the wire-layer
-    /// pagination loop (Layer 3b-todoist of GH #1, `Pageable::fetch_page`
-    /// with `cursor = None`).
-    ///
-    /// Unlike [`Self::endpoint_url`] (which scales `limit` to the caller's
-    /// requested count), this always requests `limit = `[`MAX_LIMIT`] — the
-    /// wire-layer driver caps the total item count by breaking the loop
-    /// early once enough items accumulate across pages, so there is no
-    /// `limit`-based scaling to apply here.
-    fn endpoint_url_for_first_page(&self) -> String {
-        self.build_url_with_limit(MAX_LIMIT)
-    }
-}
-
-/// Resolves the request URL for one `Pageable::fetch_page` call from the
-/// pagination `Cursor`.
-///
-/// - `cursor = None` → the first-page endpoint
-///   ([`TodoistUriSpec::endpoint_url_for_first_page`]).
-/// - `Some(Cursor::NextToken(token))` → the first-page endpoint URL with a
-///   `cursor=<token>` query param appended (Todoist's continuation cursor;
-///   see module docs "Pagination"). The other query params (`limit`, and
-///   for tasks `project_id` / `filter`'s `query`) are resent unchanged —
-///   Todoist's cursor does not itself carry the filter/scope state.
-/// - Any other `Cursor` variant → fails loud with [`WireError::Storage`].
-///   Todoist only ever produces `NextToken` cursors, so seeing another
-///   variant here means caller confusion (e.g. threading a cursor from a
-///   different adapter), not a legitimate pagination state.
-///
-/// A free function (not inlined into `fetch_page`) so the cursor→URL
-/// decision is unit-testable offline without a live HTTP round-trip
-/// (mirrors `persona-wire-adapter-github::resolve_fetch_page_url`).
-fn resolve_fetch_page_url(spec: &TodoistUriSpec, cursor: &Option<Cursor>) -> WireResult<String> {
-    match cursor {
-        None => Ok(spec.endpoint_url_for_first_page()),
-        Some(Cursor::NextToken(token)) => {
-            let mut url = url::Url::parse(&spec.endpoint_url_for_first_page())
-                .expect("endpoint_url_for_first_page produces a valid URL");
-            url.query_pairs_mut().append_pair("cursor", token);
-            Ok(url.to_string())
+        TodoistKind::Projects => {
+            let mut url = url::Url::parse(&format!("{API_BASE}/projects"))
+                .expect("API_BASE + /projects is a valid URL");
+            url.query_pairs_mut()
+                .append_pair("limit", &per_request_limit);
+            url
         }
-        Some(other) => Err(WireError::Storage(format!(
-            "todoist adapter: unsupported cursor variant for pagination: {other:?}"
-        ))),
-    }
-}
-
-#[async_trait]
-impl Pageable for TodoistAdapter {
-    /// Todoist API v1's own `limit` ceiling (`1..=200`, matching
-    /// [`MAX_LIMIT`]; see module docs "URI grammar").
-    fn max_page_size(&self) -> usize {
-        MAX_LIMIT
-    }
-
-    /// Fetches one page (see [`resolve_fetch_page_url`] for the cursor→URL
-    /// decision) and normalizes it the same way [`normalize_todoist`] does
-    /// (same per-kind mapping), without truncating to `limit` — the
-    /// wire-layer driver truncates across accumulated pages. Extracts the
-    /// response body's `next_cursor` field (nullable string; `null` = no
-    /// more pages) to thread as a [`Cursor::NextToken`].
-    async fn fetch_page(
-        &self,
-        uri: &WireUri,
-        cursor: Option<Cursor>,
-    ) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-        let spec = parse_todoist_uri(uri)?;
-        let url = resolve_fetch_page_url(&spec, &cursor)?;
-
-        let client = todoist_http_client()?;
-        let raw = client.get_json(&url).await?;
-
-        let arr = response_array(spec.kind, &raw)?;
-        let items = normalize_items(spec.kind, arr);
-        let next_cursor = raw
-            .get("next_cursor")
-            .and_then(|v| v.as_str())
-            .map(|s| Cursor::NextToken(s.to_string()));
-        Ok((items, next_cursor))
-    }
-
-    /// Preserves `Adapter::fetch`'s `{kind, items}` output shape across the
-    /// pagination path (see module docs "Pagination").
-    fn wrap_items(
-        &self,
-        items: Vec<serde_json::Value>,
-        uri: &WireUri,
-    ) -> WireResult<serde_json::Value> {
-        let spec = parse_todoist_uri(uri)?;
-        Ok(serde_json::json!({
-            "kind": spec.kind.as_str(),
-            "items": items,
-        }))
+    };
+    match cursor {
+        Some(token) => {
+            let mut url = base;
+            url.query_pairs_mut().append_pair("cursor", token);
+            url.to_string()
+        }
+        None => base.to_string(),
     }
 }
 
@@ -441,25 +363,37 @@ fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
     }
 }
 
-/// Normalize a Todoist API v1 response (`raw`, expected to be an object with
-/// a `results` array) per `spec.kind` into the Wire JSON shape (see module
-/// docs "Output shape").
+/// Normalize a single-page Todoist API v1 response (`raw`, expected to be
+/// an object with a `results` array) per `spec.kind` into the Wire JSON
+/// shape (see module docs "Output shape"). `has_more` is `true` when the
+/// single-page results (after truncation to `spec.limit`) leave more upstream
+/// data (either the raw array exceeded `limit`, or `next_cursor` is set).
+///
+/// This helper is used by unit tests to exercise the parse-and-shape path
+/// offline; [`Adapter::fetch`] drives the multi-page `next_cursor` loop and
+/// assembles the shape inline, so it does not call this function.
+#[cfg(test)]
 fn normalize_todoist(
     spec: &TodoistUriSpec,
     raw: &serde_json::Value,
 ) -> WireResult<serde_json::Value> {
     let results = response_array(spec.kind, raw)?;
-    let items = normalize_items(spec.kind, results);
+    let all = normalize_items(spec.kind, results);
+    let next_cursor = raw.get("next_cursor").and_then(|v| v.as_str());
+    let has_more = all.len() > spec.limit || next_cursor.is_some();
+    let items: Vec<serde_json::Value> = all.into_iter().take(spec.limit).collect();
 
     Ok(serde_json::json!({
         "kind": spec.kind.as_str(),
         "items": items,
+        "has_more": has_more,
     }))
 }
 
 /// Extracts the raw `results` JSON array from a Todoist API v1 response,
 /// failing loud (naming the kind) when the response isn't shaped as
-/// expected. Shared by [`normalize_todoist`] and `Pageable::fetch_page`.
+/// expected. Shared by [`normalize_todoist`] and the internal Link-header
+/// loop in [`Adapter::fetch`].
 fn response_array(
     kind: TodoistKind,
     raw: &serde_json::Value,
@@ -473,10 +407,8 @@ fn response_array(
 }
 
 /// Normalizes every entry in `arr` per `kind`. No `limit` truncation is
-/// applied here — the fast path (`Adapter::fetch`) never needs it (Todoist's
-/// own `?limit=` already caps the upstream response), and the pagination
-/// path (`Pageable::fetch_page`) normalizes a full page and lets the
-/// wire-layer driver truncate across accumulated pages instead.
+/// applied here — [`Adapter::fetch`]'s internal loop truncates across
+/// accumulated pages instead.
 fn normalize_items(kind: TodoistKind, arr: &[serde_json::Value]) -> Vec<serde_json::Value> {
     match kind {
         TodoistKind::Tasks => arr.iter().map(normalize_task).collect(),
@@ -644,7 +576,7 @@ mod tests {
     fn parse_todoist_uri_filter_raw_value_accepted() {
         let spec = parse("todoist://tasks?filter=today | overdue&limit=5").unwrap();
         assert_eq!(spec.filter.as_deref(), Some("today | overdue"));
-        let url = spec.endpoint_url();
+        let url = build_request_url(&spec, None);
         assert!(!url.contains(' '), "space must be encoded: {url}");
         assert!(!url.contains('|'), "pipe must be encoded: {url}");
     }
@@ -695,7 +627,7 @@ mod tests {
     fn endpoint_url_tasks_default_shape() {
         let spec = parse("todoist://tasks?limit=5").unwrap();
         assert_eq!(
-            spec.endpoint_url(),
+            build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=5"
         );
     }
@@ -704,7 +636,7 @@ mod tests {
     fn endpoint_url_tasks_with_project_id() {
         let spec = parse("todoist://tasks?project_id=123&limit=5").unwrap();
         assert_eq!(
-            spec.endpoint_url(),
+            build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=5&project_id=123"
         );
     }
@@ -713,7 +645,7 @@ mod tests {
     fn endpoint_url_tasks_filter_encodes_query() {
         let spec = parse("todoist://tasks?filter=today%20%7C%20overdue&limit=5").unwrap();
         assert_eq!(spec.filter.as_deref(), Some("today | overdue"));
-        let url = spec.endpoint_url();
+        let url = build_request_url(&spec, None);
         assert!(
             url.starts_with("https://api.todoist.com/api/v1/tasks/filter?"),
             "unexpected endpoint: {url}"
@@ -727,7 +659,7 @@ mod tests {
     fn endpoint_url_projects_shape() {
         let spec = parse("todoist://projects?limit=5").unwrap();
         assert_eq!(
-            spec.endpoint_url(),
+            build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/projects?limit=5"
         );
     }
@@ -920,89 +852,57 @@ mod tests {
         );
     }
 
-    // ---- Pageable (Layer 3b-todoist of GH #1) ----
+    // ---- internal pagination (build_request_url) ----
     //
-    // Same no-live-HTTP rationale as `persona-wire-adapter-github` (see that
-    // crate's test module docs): `fetch_page` / `Adapter::fetch` both
-    // perform live HTTP via `HttpClient` (a concrete struct, not behind a
-    // mockable trait), and this workspace has no wiremock / hand-rolled
-    // mock-server pattern. The cursor→URL decision (`resolve_fetch_page_url`)
-    // and the shape-building (`wrap_items`) are tested directly as the pure
-    // functions they are.
+    // The Link-header / cursor loop is driven internally by `Adapter::fetch`
+    // over `HttpClient` (a concrete struct not behind a mockable trait), and
+    // this workspace's convention (established in `adapter.rs` crate docs) is
+    // that Adapter tests are offline unit tests over inline fixtures. The
+    // request-URL construction is exercised as a pure function below.
 
     #[test]
-    fn todoist_pageable_max_page_size_is_200() {
-        let adapter = TodoistAdapter;
-        assert_eq!(adapter.max_page_size(), MAX_LIMIT);
-    }
-
-    #[test]
-    fn todoist_as_pageable_returns_some() {
-        let adapter = TodoistAdapter;
-        let pageable = adapter.as_pageable();
-        assert!(pageable.is_some(), "override should return Some(self)");
-        assert_eq!(pageable.unwrap().max_page_size(), MAX_LIMIT);
-    }
-
-    #[test]
-    fn todoist_fetch_page_first_call_uses_kind_endpoint() {
-        // cursor = None routes through `endpoint_url_for_first_page`
-        // (limit = MAX_LIMIT unconditionally), not the limit-scaled
-        // `endpoint_url` the non-paginated fast path uses.
-        let tasks = parse("todoist://tasks?limit=5").unwrap();
+    fn build_request_url_tasks_default_caps_at_max_limit() {
+        // ?limit=5: per-request limit = min(5, 200) = 5.
+        let spec = parse("todoist://tasks?limit=5").unwrap();
         assert_eq!(
-            resolve_fetch_page_url(&tasks, &None).unwrap(),
+            build_request_url(&spec, None),
+            "https://api.todoist.com/api/v1/tasks?limit=5"
+        );
+    }
+
+    #[test]
+    fn build_request_url_tasks_over_max_caps_at_max() {
+        // ?limit=500: per-request limit = min(500, MAX_LIMIT=200) = 200.
+        let spec = parse("todoist://tasks?limit=500").unwrap();
+        assert_eq!(
+            build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=200"
         );
+    }
 
-        let tasks_with_project = parse("todoist://tasks?project_id=123&limit=5").unwrap();
+    #[test]
+    fn build_request_url_tasks_over_max_with_project_scope() {
+        let spec = parse("todoist://tasks?project_id=123&limit=500").unwrap();
         assert_eq!(
-            resolve_fetch_page_url(&tasks_with_project, &None).unwrap(),
+            build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=200&project_id=123"
         );
+    }
 
-        let projects = parse("todoist://projects?limit=5").unwrap();
+    #[test]
+    fn build_request_url_projects_over_max_caps_at_max() {
+        let spec = parse("todoist://projects?limit=500").unwrap();
         assert_eq!(
-            resolve_fetch_page_url(&projects, &None).unwrap(),
+            build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/projects?limit=200"
         );
     }
 
     #[test]
-    fn todoist_fetch_page_with_next_token_appends_cursor_param() {
-        let spec = parse("todoist://tasks").unwrap();
-        let cursor = Some(Cursor::NextToken("abc".to_string()));
-        let url = resolve_fetch_page_url(&spec, &cursor).unwrap();
+    fn build_request_url_with_cursor_appends_token() {
+        let spec = parse("todoist://tasks?limit=500").unwrap();
+        let url = build_request_url(&spec, Some("abc"));
         assert!(url.contains("cursor=abc"), "unexpected url: {url}");
         assert!(url.contains("limit=200"), "unexpected url: {url}");
-    }
-
-    #[test]
-    fn todoist_fetch_page_rejects_other_cursor_variants() {
-        let spec = parse("todoist://tasks").unwrap();
-        for cursor in [
-            Cursor::PageNumber(2),
-            Cursor::LinkHeader("https://example.com".to_string()),
-            Cursor::Offset(10),
-        ] {
-            let err = resolve_fetch_page_url(&spec, &Some(cursor)).unwrap_err();
-            let msg = format!("{err}");
-            assert!(
-                msg.contains("unsupported cursor variant"),
-                "unexpected error: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn todoist_wrap_items_produces_kind_items_shape() {
-        let adapter = TodoistAdapter;
-        let uri = WireUri::parse("todoist://projects").unwrap();
-        let items = vec![serde_json::json!({"id": "1"})];
-
-        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
-
-        assert_eq!(wrapped["kind"].as_str().unwrap(), "projects");
-        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
     }
 }

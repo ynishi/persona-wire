@@ -9,15 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every adapter that honors `?limit=N` now emits a truthful `has_more`
+  field in its canonical response shape, distinguishing "truncated at
+  limit" (upstream still had more items) from "upstream exhausted".
+  Adapters affected: `github` (`{repo, kind, items, has_more}`),
+  `todoist` (`{kind, items, has_more}`), `notion` (all 4 kinds), and
+  `slack` (`kind=channels` / `kind=history`).
+
 ### Changed
 
-### Deprecated
+- **BREAKING (`persona-wire-core`)**: pagination is now an
+  adapter-internal implementation detail. `Adapter::fetch` is the sole
+  entry point for every source URI, driving whatever loop the upstream
+  API requires and returning `min(?limit=N, upstream)` items with a
+  truthful `has_more`. The wire layer only dispatches by scheme; it no
+  longer sees cursor state or per-adapter page-size heuristics. See
+  GH #1 for the design revision that motivated this change (the
+  original Layer 1-3 `Pageable` surface was found to leak upstream API
+  detail into the shared adapter contract, violating the ACL Facade
+  role `Adapter` is documented to hold).
 
 ### Removed
 
-### Fixed
-
-### Security
+- **BREAKING (`persona-wire-core`)**: `Pageable` trait, `Cursor` enum,
+  `NON_PAGEABLE_MAX_HINT` constant, and `Adapter::as_pageable`
+  companion accessor. Each pageable adapter now drives its own
+  Link-header / `next_cursor` / offset loop inside `Adapter::fetch`,
+  and the wire-layer `fetch_with_pagination_awareness` /
+  `drive_pageable_loop` helpers are gone.
 
 ## [0.11.0] - 2026-07-08
 

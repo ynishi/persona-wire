@@ -3,15 +3,16 @@
 //! ## Architecture
 //!
 //! `NotionAdapter` is a stateless [`Adapter`] impl split into three
-//! independent functions:
+//! independent responsibilities:
 //!
 //! - [`parse_notion_uri`] — `WireUri` → `NotionUriSpec` (endpoint kind +
 //!   optional search query/object filter + item limit).
 //! - HTTP fetch — delegated to `persona_wire_transport_http::HttpClient` (no
 //!   Notion-specific knowledge in the transport layer).
-//! - [`normalize_search`] / [`normalize_data_source_query`] /
-//!   [`normalize_page`] — raw Notion API response → the Wire JSON shape
-//!   below, one per endpoint kind.
+//! - Per-kind loop drivers (`fetch_search` / `drive_data_source_loop` /
+//!   `fetch_page_kind`) — accumulate results across `next_cursor` pages and
+//!   assemble the Wire JSON shape (see "Output shape" below), one per
+//!   endpoint kind.
 //!
 //! ## URI grammar
 //!
@@ -44,10 +45,12 @@
 //!   sources since the 2025-09-03 multi-source-database API change).
 //! - `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
 //!   A non-numeric or zero value fails loud; there is no upper bound at
-//!   parse time — [`MAX_LIMIT`] (Notion's own `page_size` ceiling) is now a
-//!   `Pageable`-only concept (see "Pagination" below), not a parse-time
-//!   gate. It is always sent explicitly to the Notion API (the default
-//!   behavior for an absent `page_size` is undocumented).
+//!   parse time. [`MAX_LIMIT`] (Notion's own `page_size` ceiling of 100)
+//!   is enforced only when the adapter builds each upstream request;
+//!   `?limit=N` with `N > MAX_LIMIT` triggers the internal pagination
+//!   loop (see "Pagination" below). `page_size` is always sent explicitly
+//!   to the Notion API (the default behavior for an absent `page_size` is
+//!   undocumented).
 //! - Unknown query keys are silently ignored (same forward-compatible
 //!   convention as `persona-wire-adapter-rss` / `-github` / `-todoist`); for
 //!   `kind=database` / `-data-source` / `-page`, `query` / `object` are
@@ -127,45 +130,28 @@
 //! without a rich-text array (e.g. `divider` / `child_page` / `image`) carry
 //! `text: null` alongside their `type`.
 //!
-//! ## Pagination (Layer 3b-notion of GH #1)
+//! ## Pagination
 //!
-//! `NotionAdapter` implements [`Pageable`]: when a caller requests
-//! `?limit=N` with `N` greater than [`MAX_LIMIT`] (100), the wire-layer
-//! driver (`persona_wire_core::application::use_cases`) threads a
-//! [`Cursor::NextToken`] extracted from the response body's `next_cursor`
-//! field (a nullable string, alongside a `has_more` boolean; either `false`
-//! `has_more` or a `null`/absent `next_cursor` signals end-of-data) across
-//! repeated requests instead of the single capped fetch `Adapter::fetch`
-//! performs. All four kinds (`search` / `database` / `data-source` /
-//! `page`) support pagination — `kind=database` re-resolves its data
-//! source on every page (an extra `GET /databases/{id}` round trip per
-//! page loop iteration), since that resolution is a lookup, not a
-//! paginated operation, and this keeps the adapter stateless.
-//! `parse_notion_uri`'s `limit` parsing accepts any positive integer — the
-//! parse-time `limit > MAX_LIMIT` gate was removed once all three Layer 3b
-//! adapters (todoist / notion / slack) had `Pageable` impls (GH #1);
-//! [`MAX_LIMIT`] now solely defines [`Pageable::max_page_size`], not a
-//! parse-time bound. `limit <= MAX_LIMIT` is unaffected — it stays on the
-//! existing single-request fast path.
+//! `Adapter::fetch` drives the pagination loop internally: it follows the
+//! response body's `next_cursor` field (an opaque token; `has_more: false`
+//! or a `null`/absent `next_cursor` signals end-of-data) across repeated
+//! requests until it has accumulated `?limit=N` items or the upstream
+//! signals end-of-data. The cursor form is a private implementation
+//! detail — the wire layer only sees the final assembled per-kind shape
+//! with a truthful `has_more` field.
 //!
-//! `Pageable::wrap_items` preserves each kind's canonical output shape
-//! (see "Output shape" above) with `has_more: false` on the pagination
-//! path — a caller who requested `limit > MAX_LIMIT` via the Pageable
-//! path got exactly what they asked for, and the fast-path `has_more`
-//! semantic ("upstream still has more") does not naturally extend to a
-//! completed pagination loop. For `kind=database`, the wrapped shape's
-//! `data_source_id` field carries the URI's `database_id` (not the
-//! resolved data source id): `wrap_items` is sync (no I/O, per the
-//! `Pageable` trait contract) and only has the parsed URI to work with,
-//! so it cannot repeat the per-page resolution `fetch_page` performs.
+//! Every upstream request is sent with `page_size = min(spec.limit,
+//! MAX_LIMIT)` (Notion's own per-request ceiling of 100), so the loop runs
+//! once for `?limit <= MAX_LIMIT` and continues page-by-page for larger
+//! requests. All four kinds (`search` / `database` / `data-source` /
+//! `page`) paginate the same way; `kind=database` resolves the single data
+//! source id once up front (before the loop starts), then re-uses it for
+//! every page.
 
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
-use persona_wire_core::infrastructure::{
-    adapter::{Adapter, Cursor, Pageable},
-    wire_uri::WireUri,
-};
+use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
 use persona_wire_core::{WireError, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
@@ -203,64 +189,53 @@ impl Adapter for NotionAdapter {
         "notion"
     }
 
-    /// Fetch `spec.kind` items and normalize them. See the module docs for
-    /// URI grammar, auth resolution, and output shape.
+    /// Fetch `spec.kind` items, driving the `next_cursor` pagination loop
+    /// internally until `?limit=N` items are accumulated or the upstream
+    /// signals end-of-data. See the module docs for URI grammar, auth
+    /// resolution, and output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_notion_uri(uri)?;
         let client = notion_http_client()?;
-
         match &spec.kind {
-            NotionKind::Search => {
-                let body = search_request_body(&spec);
-                let raw = client
-                    .post_json(&format!("{API_BASE}/search"), &body)
-                    .await?;
-                normalize_search(&spec, &raw)
-            }
+            NotionKind::Search => fetch_search(&client, &spec).await,
             NotionKind::Database(database_id) => {
                 let raw_db = client
                     .get_json(&format!("{API_BASE}/databases/{database_id}"))
                     .await?;
                 let data_source_id = resolve_single_data_source(&raw_db)?;
-                let raw = client
-                    .post_json(
-                        &format!("{API_BASE}/data_sources/{data_source_id}/query"),
-                        &serde_json::json!({ "page_size": spec.limit }),
-                    )
-                    .await?;
-                normalize_data_source_query(&data_source_id, &raw)
+                let (items, has_more) =
+                    drive_data_source_loop(&client, &data_source_id, spec.limit).await?;
+                Ok(serde_json::json!({
+                    "kind": "data_source_query",
+                    // For `kind=database`, the URI-supplied identifier is a
+                    // database id, but the actual query targets a resolved
+                    // single data source. The wrapped shape carries the
+                    // database id (matches the module docs "Pagination"
+                    // note): callers referring to their original URI find
+                    // the same id back on the response.
+                    "data_source_id": database_id,
+                    "items": items,
+                    "has_more": has_more,
+                }))
             }
             NotionKind::DataSource(data_source_id) => {
-                let raw = client
-                    .post_json(
-                        &format!("{API_BASE}/data_sources/{data_source_id}/query"),
-                        &serde_json::json!({ "page_size": spec.limit }),
-                    )
-                    .await?;
-                normalize_data_source_query(data_source_id, &raw)
+                let (items, has_more) =
+                    drive_data_source_loop(&client, data_source_id, spec.limit).await?;
+                Ok(serde_json::json!({
+                    "kind": "data_source_query",
+                    "data_source_id": data_source_id,
+                    "items": items,
+                    "has_more": has_more,
+                }))
             }
-            NotionKind::Page(page_id) => {
-                let url = format!(
-                    "{API_BASE}/blocks/{page_id}/children?page_size={}",
-                    spec.limit
-                );
-                let raw = client.get_json(&url).await?;
-                normalize_page(page_id, &raw)
-            }
+            NotionKind::Page(page_id) => fetch_page_kind(&client, page_id, spec.limit).await,
         }
-    }
-
-    /// Opts into the wire-layer pagination driver (Layer 3b-notion of GH
-    /// #1). See the module docs "Pagination" section.
-    fn as_pageable(&self) -> Option<&dyn Pageable> {
-        Some(self)
     }
 }
 
 /// Builds a fresh, Notion-configured `HttpClient` (auth resolved per-call,
-/// not at boot; see module docs "Auth"). Shared by `Adapter::fetch` and
-/// `Pageable::fetch_page` (all four kinds) so every path stays in sync on
-/// headers/timeout/version.
+/// not at boot; see module docs "Auth"). Shared by every fetch path so all
+/// stay in sync on headers/timeout/version.
 fn notion_http_client() -> WireResult<HttpClient> {
     // Auth is resolved per-fetch (not at boot); see module docs "Auth".
     // Notion has no unauthenticated access mode, unlike the github
@@ -416,17 +391,19 @@ fn search_request_body(spec: &NotionUriSpec) -> serde_json::Value {
             serde_json::json!({ "property": "object", "value": obj }),
         );
     }
-    body.insert("page_size".to_string(), serde_json::json!(spec.limit));
+    body.insert(
+        "page_size".to_string(),
+        serde_json::json!(spec.limit.min(MAX_LIMIT)),
+    );
     serde_json::Value::Object(body)
 }
 
 /// Builds the `POST /search` request body for `spec` with an optional
-/// `start_cursor` inserted (the wire-layer pagination path,
-/// `Pageable::fetch_page`). `cursor = None` is byte-identical to
-/// [`search_request_body`] (the non-paginated fast path never has a cursor
-/// to thread) — kept as a separate function rather than adding a `cursor`
-/// parameter to `search_request_body` itself, so its existing call site in
-/// `Adapter::fetch` and its tests stay untouched.
+/// `start_cursor` inserted (the internal pagination loop in
+/// [`Adapter::fetch`] threads the token returned in the previous page's
+/// `next_cursor`). `cursor = None` is byte-identical to
+/// [`search_request_body`] — kept as a separate function so
+/// [`search_request_body`]'s existing tests stay untouched.
 fn search_request_body_with_cursor(
     spec: &NotionUriSpec,
     cursor: Option<&str>,
@@ -481,28 +458,10 @@ fn page_children_url(page_id: &str, cursor: Option<&str>) -> String {
     }
 }
 
-/// Extracts the opaque cursor token from a `Pageable::fetch_page` `cursor`
-/// argument. `None` (first page) yields `Ok(None)`; only
-/// `Cursor::NextToken` is a valid non-`None` variant — Notion's cursor is
-/// always an opaque string (matches the `NextToken` variant's canonical
-/// semantics from the `Cursor` enum docs). Any other variant fails loud
-/// (module docs "Cursor variant discipline").
-fn notion_cursor_token(cursor: &Option<Cursor>) -> WireResult<Option<&str>> {
-    match cursor {
-        None => Ok(None),
-        Some(Cursor::NextToken(token)) => Ok(Some(token.as_str())),
-        Some(other) => Err(WireError::Storage(format!(
-            "notion adapter: unsupported cursor variant for pagination: {other:?}"
-        ))),
-    }
-}
-
-/// Extracts the raw `results` JSON array from a Notion API response for
-/// the wire-layer pagination path, failing loud (naming `context`) when
-/// the response isn't shaped as expected. A pagination-path-only sibling
-/// of the inline extraction each `normalize_*` function performs (kept
-/// separate rather than factored into a single shared helper, so the
-/// existing `normalize_*` functions and their tests stay untouched).
+/// Extracts the raw `results` JSON array from a Notion API response, failing
+/// loud (naming `context`) when the response isn't shaped as expected.
+/// Shared by the internal loop drivers in [`Adapter::fetch`] and the
+/// `normalize_*` test helpers.
 fn extract_results<'a>(
     raw: &'a serde_json::Value,
     context: &str,
@@ -514,10 +473,10 @@ fn extract_results<'a>(
     })
 }
 
-/// Extracts the pagination cursor from a Notion API response body per
-/// module docs "Response `next_cursor` extraction": `has_more: false`, or
-/// a `null`/absent `next_cursor`, both signal end-of-data (`None`).
-fn next_cursor_from_response(raw: &serde_json::Value) -> Option<Cursor> {
+/// Extracts the pagination cursor token from a Notion API response body:
+/// `has_more: false`, or a `null`/absent `next_cursor`, both signal
+/// end-of-data (`None`).
+fn next_cursor_token(raw: &serde_json::Value) -> Option<String> {
     let has_more = raw
         .get("has_more")
         .and_then(|v| v.as_bool())
@@ -527,164 +486,100 @@ fn next_cursor_from_response(raw: &serde_json::Value) -> Option<Cursor> {
     }
     raw.get("next_cursor")
         .and_then(|v| v.as_str())
-        .map(|s| Cursor::NextToken(s.to_string()))
+        .map(str::to_string)
 }
 
-/// Fetches one page of a `/data_sources/{id}/query` response using an
-/// already-built `client` (shared by [`fetch_page_for_data_source`] and
-/// [`fetch_page_for_database`], the latter needing the same client for
-/// its preceding `GET /databases/{id}` resolve call).
-async fn fetch_data_source_page(
+/// Drives the `next_cursor` loop for a `POST /data_sources/{id}/query`
+/// endpoint. Shared by `NotionKind::Database` (after the up-front
+/// resolve call) and `NotionKind::DataSource`.
+async fn drive_data_source_loop(
     client: &HttpClient,
     data_source_id: &str,
-    cursor: Option<&str>,
-) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-    let body = data_source_query_body(cursor);
-    let raw = client
-        .post_json(
-            &format!("{API_BASE}/data_sources/{data_source_id}/query"),
-            &body,
-        )
-        .await?;
-    let results = extract_results(&raw, &format!("data source '{data_source_id}' query"))?;
-    let items = results.iter().map(normalize_page_item).collect();
-    Ok((items, next_cursor_from_response(&raw)))
+    limit: usize,
+) -> WireResult<(Vec<serde_json::Value>, bool)> {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let has_more = loop {
+        let body = data_source_query_body(cursor.as_deref());
+        let raw = client
+            .post_json(
+                &format!("{API_BASE}/data_sources/{data_source_id}/query"),
+                &body,
+            )
+            .await?;
+        let results = extract_results(&raw, &format!("data source '{data_source_id}' query"))?;
+        items.extend(results.iter().map(normalize_page_item));
+        let next = next_cursor_token(&raw);
+        if items.len() >= limit {
+            break items.len() > limit || next.is_some();
+        }
+        match next {
+            Some(t) => cursor = Some(t),
+            None => break false,
+        }
+    };
+    items.truncate(limit);
+    Ok((items, has_more))
 }
 
-/// `Pageable::fetch_page` for `NotionKind::Search`.
-async fn fetch_page_for_search(
-    spec: &NotionUriSpec,
-    cursor: Option<&str>,
-) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-    let client = notion_http_client()?;
-    let body = search_request_body_with_cursor(spec, cursor);
-    let raw = client
-        .post_json(&format!("{API_BASE}/search"), &body)
-        .await?;
-    let results = extract_results(&raw, "search")?;
-    let items = results.iter().map(normalize_page_item).collect();
-    Ok((items, next_cursor_from_response(&raw)))
+/// Drives the `next_cursor` loop for `POST /search`.
+async fn fetch_search(client: &HttpClient, spec: &NotionUriSpec) -> WireResult<serde_json::Value> {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let has_more = loop {
+        let body = search_request_body_with_cursor(spec, cursor.as_deref());
+        let raw = client
+            .post_json(&format!("{API_BASE}/search"), &body)
+            .await?;
+        let results = extract_results(&raw, "search")?;
+        items.extend(results.iter().map(normalize_page_item));
+        let next = next_cursor_token(&raw);
+        if items.len() >= spec.limit {
+            break items.len() > spec.limit || next.is_some();
+        }
+        match next {
+            Some(t) => cursor = Some(t),
+            None => break false,
+        }
+    };
+    items.truncate(spec.limit);
+    Ok(serde_json::json!({
+        "kind": "search",
+        "query": spec.query,
+        "items": items,
+        "has_more": has_more,
+    }))
 }
 
-/// `Pageable::fetch_page` for `NotionKind::DataSource`.
-async fn fetch_page_for_data_source(
-    data_source_id: &str,
-    cursor: Option<&str>,
-) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-    let client = notion_http_client()?;
-    fetch_data_source_page(&client, data_source_id, cursor).await
-}
-
-/// `Pageable::fetch_page` for `NotionKind::Database`. Re-resolves the
-/// database's single data source on every page (module docs
-/// "Pagination"), reusing the same `client` for both the resolve call and
-/// the subsequent data-source-query call.
-async fn fetch_page_for_database(
-    database_id: &str,
-    cursor: Option<&str>,
-) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-    let client = notion_http_client()?;
-    let raw_db = client
-        .get_json(&format!("{API_BASE}/databases/{database_id}"))
-        .await?;
-    let data_source_id = resolve_single_data_source(&raw_db)?;
-    fetch_data_source_page(&client, &data_source_id, cursor).await
-}
-
-/// `Pageable::fetch_page` for `NotionKind::Page`.
-async fn fetch_page_for_page(
+/// Drives the `next_cursor` loop for `GET /blocks/{page_id}/children`.
+async fn fetch_page_kind(
+    client: &HttpClient,
     page_id: &str,
-    cursor: Option<&str>,
-) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-    let client = notion_http_client()?;
-    let url = page_children_url(page_id, cursor);
-    let raw = client.get_json(&url).await?;
-    let results = extract_results(&raw, &format!("page '{page_id}' blocks"))?;
-    let items = results.iter().map(normalize_block).collect();
-    Ok((items, next_cursor_from_response(&raw)))
-}
-
-#[async_trait]
-impl Pageable for NotionAdapter {
-    /// Notion API's own `page_size` ceiling (matches [`MAX_LIMIT`]; see
-    /// module docs "URI grammar").
-    fn max_page_size(&self) -> usize {
-        MAX_LIMIT
-    }
-
-    /// Fetches one page (dispatching by kind; see the per-function docs
-    /// above) and normalizes it the same way `Adapter::fetch`'s per-kind
-    /// branch does, without truncating to `limit` — the wire-layer driver
-    /// truncates across accumulated pages. Rejects any cursor variant
-    /// other than `None` / `Some(Cursor::NextToken(_))` (module docs
-    /// "Cursor variant discipline").
-    async fn fetch_page(
-        &self,
-        uri: &WireUri,
-        cursor: Option<Cursor>,
-    ) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
-        let spec = parse_notion_uri(uri)?;
-        let token = notion_cursor_token(&cursor)?;
-
-        match &spec.kind {
-            NotionKind::Search => fetch_page_for_search(&spec, token).await,
-            NotionKind::Database(database_id) => fetch_page_for_database(database_id, token).await,
-            NotionKind::DataSource(data_source_id) => {
-                fetch_page_for_data_source(data_source_id, token).await
-            }
-            NotionKind::Page(page_id) => fetch_page_for_page(page_id, token).await,
+    limit: usize,
+) -> WireResult<serde_json::Value> {
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let has_more = loop {
+        let url = page_children_url(page_id, cursor.as_deref());
+        let raw = client.get_json(&url).await?;
+        let results = extract_results(&raw, &format!("page '{page_id}' blocks"))?;
+        blocks.extend(results.iter().map(normalize_block));
+        let next = next_cursor_token(&raw);
+        if blocks.len() >= limit {
+            break blocks.len() > limit || next.is_some();
         }
-    }
-
-    /// Preserves each kind's canonical output shape (module docs "Output
-    /// shape") across the pagination path, with `has_more: false` (module
-    /// docs "Pagination" — see that section for the `kind=database`
-    /// `data_source_id` caveat).
-    fn wrap_items(
-        &self,
-        items: Vec<serde_json::Value>,
-        uri: &WireUri,
-    ) -> WireResult<serde_json::Value> {
-        let spec = parse_notion_uri(uri)?;
-        match &spec.kind {
-            NotionKind::Search => Ok(serde_json::json!({
-                "kind": "search",
-                "query": spec.query,
-                "items": items,
-                "has_more": false,
-            })),
-            NotionKind::DataSource(data_source_id) => Ok(serde_json::json!({
-                "kind": "data_source_query",
-                "data_source_id": data_source_id,
-                "items": items,
-                "has_more": false,
-            })),
-            NotionKind::Database(database_id) => Ok(serde_json::json!({
-                "kind": "data_source_query",
-                // `wrap_items` is sync (no I/O, per the `Pageable` trait
-                // contract) and only has the parsed URI to work with, so
-                // it cannot repeat the per-page `GET /databases/{id}`
-                // resolution `fetch_page` performs. `database_id` (the
-                // caller-supplied identifier that transparently resolved
-                // to the same data source for every page of this loop) is
-                // used here instead of the actual data source id.
-                "data_source_id": database_id,
-                "items": items,
-                "has_more": false,
-            })),
-            NotionKind::Page(page_id) => Ok(serde_json::json!({
-                "kind": "page",
-                "page_id": page_id,
-                // The fast-path shape (`normalize_page`) names this field
-                // `blocks`, not `items` — matched here verbatim rather
-                // than following the generic `items` name, to honestly
-                // preserve the per-kind shape (module docs "Output
-                // shape").
-                "blocks": items,
-                "has_more": false,
-            })),
+        match next {
+            Some(t) => cursor = Some(t),
+            None => break false,
         }
-    }
+    };
+    blocks.truncate(limit);
+    Ok(serde_json::json!({
+        "kind": "page",
+        "page_id": page_id,
+        "blocks": blocks,
+        "has_more": has_more,
+    }))
 }
 
 /// Resolves the single data source id for a `GET /databases/{id}`
@@ -769,9 +664,10 @@ fn normalize_page_item(v: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-/// Normalizes a `POST /search` response (`raw`, expected to be an object
-/// with a `results` array) into the Wire JSON shape. See module docs
-/// "Output shape".
+/// Normalizes a single-page `POST /search` response into the Wire JSON
+/// shape. Used by unit tests only; [`Adapter::fetch`] drives the multi-page
+/// loop and assembles the shape inline.
+#[cfg(test)]
 fn normalize_search(
     spec: &NotionUriSpec,
     raw: &serde_json::Value,
@@ -796,10 +692,10 @@ fn normalize_search(
     }))
 }
 
-/// Normalizes a `POST /data_sources/{id}/query` response (`raw`, expected
-/// to be an object with a `results` array) into the Wire JSON shape. Shared
-/// by `kind=database` (after resolving the single data source) and
-/// `kind=data-source`. See module docs "Output shape".
+/// Normalizes a single-page `POST /data_sources/{id}/query` response into
+/// the Wire JSON shape. Used by unit tests only; [`Adapter::fetch`] drives
+/// the multi-page loop and assembles the shape inline.
+#[cfg(test)]
 fn normalize_data_source_query(
     data_source_id: &str,
     raw: &serde_json::Value,
@@ -846,9 +742,10 @@ fn normalize_block(block: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-/// Normalizes a `GET /blocks/{id}/children` response (`raw`, expected to be
-/// an object with a `results` array) into the Wire JSON shape. See module
-/// docs "Output shape".
+/// Normalizes a single-page `GET /blocks/{id}/children` response into the
+/// Wire JSON shape. Used by unit tests only; [`Adapter::fetch`] drives the
+/// multi-page loop and assembles the shape inline.
+#[cfg(test)]
 fn normalize_page(page_id: &str, raw: &serde_json::Value) -> WireResult<serde_json::Value> {
     let results = raw.get("results").and_then(|v| v.as_array()).ok_or_else(|| {
         WireError::Storage(format!(
@@ -1328,56 +1225,31 @@ mod tests {
         );
     }
 
-    // ---- Pageable (Layer 3b-notion of GH #1) ----
+    // ---- internal pagination helpers ----
     //
-    // Same no-live-HTTP rationale as `persona-wire-adapter-github` /
-    // `persona-wire-adapter-todoist` (see those crates' test module docs):
-    // `fetch_page` / `Adapter::fetch` both perform live HTTP via
-    // `HttpClient` (a concrete struct, not behind a mockable trait), and
-    // this workspace has no wiremock / hand-rolled mock-server pattern.
-    // The cursor→token decision (`notion_cursor_token`), the request
-    // body/URL builders (`search_request_body_with_cursor` /
-    // `data_source_query_body` / `page_children_url`), and the
-    // shape-building (`wrap_items`) are tested directly as the pure
-    // functions they are.
+    // The `next_cursor` loop is driven internally by `Adapter::fetch` over
+    // `HttpClient` (a concrete struct not behind a mockable trait), and
+    // this workspace's convention (established in `adapter.rs` crate docs)
+    // is that Adapter tests are offline unit tests over inline fixtures.
+    // The request body / URL builders and the cursor-token extractor are
+    // exercised as pure functions below.
 
     #[test]
-    fn notion_pageable_max_page_size_is_100() {
-        let adapter = NotionAdapter;
-        assert_eq!(adapter.max_page_size(), MAX_LIMIT);
+    fn notion_next_cursor_token_signals_end_on_has_more_false() {
+        let raw = serde_json::json!({ "has_more": false, "next_cursor": "abc" });
+        assert_eq!(next_cursor_token(&raw), None);
     }
 
     #[test]
-    fn notion_as_pageable_returns_some() {
-        let adapter = NotionAdapter;
-        let pageable = adapter.as_pageable();
-        assert!(pageable.is_some(), "override should return Some(self)");
-        assert_eq!(pageable.unwrap().max_page_size(), MAX_LIMIT);
+    fn notion_next_cursor_token_signals_end_on_null_next_cursor() {
+        let raw = serde_json::json!({ "has_more": true, "next_cursor": null });
+        assert_eq!(next_cursor_token(&raw), None);
     }
 
     #[test]
-    fn notion_fetch_page_rejects_other_cursor_variants() {
-        for cursor in [
-            Cursor::PageNumber(2),
-            Cursor::LinkHeader("https://example.com".to_string()),
-            Cursor::Offset(10),
-        ] {
-            let err = notion_cursor_token(&Some(cursor)).unwrap_err();
-            let msg = format!("{err}");
-            assert!(
-                msg.contains("unsupported cursor variant"),
-                "unexpected error: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn notion_cursor_token_none_and_next_token() {
-        assert_eq!(notion_cursor_token(&None).unwrap(), None);
-        assert_eq!(
-            notion_cursor_token(&Some(Cursor::NextToken("abc123".to_string()))).unwrap(),
-            Some("abc123")
-        );
+    fn notion_next_cursor_token_extracts_when_has_more_and_token_set() {
+        let raw = serde_json::json!({ "has_more": true, "next_cursor": "abc123" });
+        assert_eq!(next_cursor_token(&raw).as_deref(), Some("abc123"));
     }
 
     #[test]
@@ -1428,93 +1300,5 @@ mod tests {
             format!("{API_BASE}/blocks/page-1/children?page_size={MAX_LIMIT}")
         );
         assert!(!url.contains("start_cursor"));
-    }
-
-    #[test]
-    fn notion_wrap_items_search_preserves_query_field() {
-        let adapter = NotionAdapter;
-        let uri = WireUri::parse("notion://search?query=Bug%20bash").unwrap();
-        let items = vec![serde_json::json!({"id": "1"})];
-
-        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
-
-        assert_eq!(wrapped["kind"].as_str().unwrap(), "search");
-        assert_eq!(wrapped["query"].as_str().unwrap(), "Bug bash");
-        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
-    }
-
-    #[test]
-    fn notion_wrap_items_data_source_preserves_data_source_id() {
-        let adapter = NotionAdapter;
-        let uri =
-            WireUri::parse("notion://data-source/1a44be12-0953-4631-b498-9e5817518db8").unwrap();
-        let items = vec![serde_json::json!({"id": "1"})];
-
-        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
-
-        assert_eq!(wrapped["kind"].as_str().unwrap(), "data_source_query");
-        assert_eq!(
-            wrapped["data_source_id"].as_str().unwrap(),
-            "1a44be12-0953-4631-b498-9e5817518db8"
-        );
-        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
-    }
-
-    #[test]
-    fn notion_wrap_items_database_uses_database_id_as_data_source_id() {
-        // Documented gray-area decision (module docs "Pagination"):
-        // `wrap_items` cannot repeat the per-page data-source resolution
-        // `fetch_page` performs (sync, no I/O), so the URI's database_id
-        // stands in for the resolved data_source_id.
-        let adapter = NotionAdapter;
-        let uri = WireUri::parse("notion://database/d9824bdc-8445-4327-be8b-5b47500af6ce").unwrap();
-        let items = vec![serde_json::json!({"id": "1"})];
-
-        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
-
-        assert_eq!(wrapped["kind"].as_str().unwrap(), "data_source_query");
-        assert_eq!(
-            wrapped["data_source_id"].as_str().unwrap(),
-            "d9824bdc-8445-4327-be8b-5b47500af6ce"
-        );
-        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
-    }
-
-    #[test]
-    fn notion_wrap_items_page_preserves_page_id() {
-        let adapter = NotionAdapter;
-        let uri = WireUri::parse("notion://page/be633bf1-dfa0-436d-b259-571129a590e5").unwrap();
-        let items = vec![serde_json::json!({"type": "paragraph"})];
-
-        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
-
-        assert_eq!(wrapped["kind"].as_str().unwrap(), "page");
-        assert_eq!(
-            wrapped["page_id"].as_str().unwrap(),
-            "be633bf1-dfa0-436d-b259-571129a590e5"
-        );
-        // The fast-path shape (`normalize_page`) names this field
-        // `blocks`, not `items` (module docs "Output shape").
-        assert_eq!(wrapped["blocks"], serde_json::Value::Array(items));
-    }
-
-    #[test]
-    fn notion_wrap_items_sets_has_more_false_on_pagination_path() {
-        let adapter = NotionAdapter;
-        let items = vec![serde_json::json!({"id": "1"})];
-
-        for uri_str in [
-            "notion://search",
-            "notion://data-source/1a44be12-0953-4631-b498-9e5817518db8",
-            "notion://database/d9824bdc-8445-4327-be8b-5b47500af6ce",
-            "notion://page/be633bf1-dfa0-436d-b259-571129a590e5",
-        ] {
-            let uri = WireUri::parse(uri_str).unwrap();
-            let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
-            assert!(
-                !wrapped["has_more"].as_bool().unwrap(),
-                "has_more should be false for {uri_str}"
-            );
-        }
     }
 }
