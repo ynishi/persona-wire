@@ -13,8 +13,13 @@ use rusqlite::{params, Connection};
 
 use super::{Migration, MigrationUlid as Ulid};
 
+/// Registry entry for migration 001 — referenced from
+/// [`super::ALL`] in execution order.
 pub static MIGRATION: Mig = Mig;
 
+/// Zero-sized [`Migration`] impl for the `001_node_id_ulid` schema
+/// change. Instances carry no state; the [`MIGRATION`] singleton is
+/// the intended handle.
 pub struct Mig;
 
 impl Migration for Mig {

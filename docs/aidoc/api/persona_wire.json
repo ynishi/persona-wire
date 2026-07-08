@@ -1,0 +1,83 @@
+{
+  "crate": "persona-wire",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire::migrations",
+      "kind": "module",
+      "docs": "Schema migration framework — Diesel / sqlx style, scoped to persona-wire's\nSQLite store. Each numbered migration declares an idempotent `up` step\nthat the [`Runner`] tracks in a `schema_migrations` table so re-running\nis a no-op once applied.\n\nMigrations are listed in [`ALL`] in **execution order**. A new schema\nchange adds one module under this directory plus one entry at the end of\n`ALL`. Down migrations are intentionally not modelled in v1 — the\nframework leaves room for a future `Migration::down` extension once a\nreal rollback need shows up."
+    },
+    {
+      "path": "persona_wire::migrations::ALL",
+      "kind": "static",
+      "docs": "Registry of all known migrations, in **execution order**. Append-only."
+    },
+    {
+      "path": "persona_wire::migrations::AppliedNow",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire::migrations::AppliedRow",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire::migrations::Migration",
+      "kind": "trait",
+      "docs": "One immutable, monotonic schema change. `id` must be unique across the\nwhole [`ALL`] list and never change once shipped — it is the persistent\nkey the `schema_migrations` table records."
+    },
+    {
+      "path": "persona_wire::migrations::Runner",
+      "kind": "struct",
+      "docs": "Driver around a `Connection` that knows how to read / write the\n`schema_migrations` ledger and apply pending migrations."
+    },
+    {
+      "path": "persona_wire::migrations::Status",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire::migrations::m001_node_id_ulid",
+      "kind": "module",
+      "docs": "001 — `nodes` / `edges` stringly `id` → opaque ULID + `name` extraction.\n\nIdempotent at the column level: if both `nodes.name` and `edges.name`\nalready exist, `up()` is a no-op (the framework still records the\nmigration as applied so [`pw-migrate status`] reflects the current\nshape correctly even on a DB that was migrated before the framework\nexisted)."
+    },
+    {
+      "path": "persona_wire::migrations::m001_node_id_ulid::MIGRATION",
+      "kind": "static",
+      "docs": "Registry entry for migration 001 — referenced from\n[`super::ALL`] in execution order."
+    },
+    {
+      "path": "persona_wire::migrations::m001_node_id_ulid::Mig",
+      "kind": "struct",
+      "docs": "Zero-sized [`Migration`] impl for the `001_node_id_ulid` schema\nchange. Instances carry no state; the [`MIGRATION`] singleton is\nthe intended handle."
+    },
+    {
+      "path": "persona_wire::migrations::m002_registry_id_ulid",
+      "kind": "module",
+      "docs": "002 — `specifications` / `projections` rebuild: `name TEXT PK` →\n`id TEXT PK + name TEXT NOT NULL UNIQUE`.\n\nSQLite cannot rename a PK in place, so this follows the canonical\n12-step ALTER recipe (CREATE new + INSERT SELECT + DROP old + RENAME).\nIdempotent: if both tables already have an `id` column, body is a no-op."
+    },
+    {
+      "path": "persona_wire::migrations::m002_registry_id_ulid::MIGRATION",
+      "kind": "static",
+      "docs": "Registry entry for migration 002 — referenced from\n[`super::ALL`] in execution order."
+    },
+    {
+      "path": "persona_wire::migrations::m002_registry_id_ulid::Mig",
+      "kind": "struct",
+      "docs": "Zero-sized [`Migration`] impl for the `002_registry_id_ulid`\nschema change. Instances carry no state; the [`MIGRATION`]\nsingleton is the intended handle."
+    },
+    {
+      "path": "persona_wire::migrations::m003_bundle_installs_fk_relax",
+      "kind": "module",
+      "docs": "003 — relax `bundle_installs.bundle_id` to nullable + ON DELETE SET NULL.\n\nBundle v1's `bundle_registry` documentation contract states \"install\nhistory is intentionally preserved across bundle deletion\", but the\ninitial 0.7.0 schema declared\n`bundle_id TEXT NOT NULL REFERENCES bundles(id)` (= default RESTRICT),\nwhich the SQLite engine enforces as a foreign_key_check on DELETE.\nResult: `wire_bundle_delete` failed with `FOREIGN KEY constraint\nfailed` whenever an install log entry referenced the bundle (= every\ninstalled bundle).\n\nThis migration applies the classic SQLite ALTER recipe to rebuild the\ntable with the corrected FK shape while preserving existing install\nrows verbatim. Idempotent — re-running once `bundle_id` already\naccepts NULL leaves the schema untouched."
+    },
+    {
+      "path": "persona_wire::migrations::m003_bundle_installs_fk_relax::MIGRATION",
+      "kind": "static",
+      "docs": "Registry entry for migration 003 — referenced from\n[`super::ALL`] in execution order."
+    },
+    {
+      "path": "persona_wire::migrations::m003_bundle_installs_fk_relax::Mig",
+      "kind": "struct",
+      "docs": "Zero-sized [`Migration`] impl for the\n`003_bundle_installs_fk_relax` schema change. Instances carry no\nstate; the [`MIGRATION`] singleton is the intended handle."
+    }
+  ]
+}

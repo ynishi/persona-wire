@@ -1,5 +1,10 @@
 //! persona-wire Adapter for any MCP server (scheme `mcp://`).
 //!
+//! Adapter type: [`McpAdapter`]. Wire into a
+//! [`persona_wire_core::application::plugin_registry::PluginRegistry`]
+//! via `.with_adapter(McpAdapter::new(resolver))` (see [`WireServer`]
+//! in `persona-wire-mcp` for the production wiring).
+//!
 //! Routes tool calls and resource reads to MCP servers via rmcp 1.x.
 //! Supports stdio (`transport-child-process`) and streamable HTTP
 //! (`transport-streamable-http-client`) transports.

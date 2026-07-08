@@ -1,5 +1,9 @@
 //! persona-wire Adapter for mini-app SoT (scheme `mini-app://`).
 //!
+//! Adapter type: [`MiniAppAdapter`] — zero-sized, wire it directly
+//! into a [`persona_wire_core::application::plugin_registry::PluginRegistry`]
+//! via `.with_adapter(MiniAppAdapter)`.
+//!
 //! P3b roadmap deliverable: external adapter crate split out from
 //! `persona-wire-core`. Consumers wire this adapter into their `PluginRegistry`
 //! by chaining `.with_adapter(MiniAppAdapter)` on top of

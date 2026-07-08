@@ -1,0 +1,10 @@
+{
+  "crate": "persona-wire-adapter-sqlite-x",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_sqlite_x::SqliteAdapter",
+      "kind": "struct"
+    }
+  ]
+}

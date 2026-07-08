@@ -1,0 +1,36 @@
+{
+  "crate": "persona-wire-adapter-github",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_github::API_BASE",
+      "kind": "constant",
+      "docs": "GitHub REST API base URL."
+    },
+    {
+      "path": "persona_wire_adapter_github::BODY_MAX_CHARS",
+      "kind": "constant",
+      "docs": "Max `body_excerpt` length in `char`s before truncation (context size guard)."
+    },
+    {
+      "path": "persona_wire_adapter_github::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `items` cap when `?limit=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_github::FETCH_TIMEOUT",
+      "kind": "constant",
+      "docs": "Per-request HTTP timeout (connect + body), matching\n`persona-wire-adapter-rss::FETCH_TIMEOUT`."
+    },
+    {
+      "path": "persona_wire_adapter_github::GITHUB_PER_PAGE_MAX",
+      "kind": "constant",
+      "docs": "GitHub REST API's maximum allowed `per_page` value."
+    },
+    {
+      "path": "persona_wire_adapter_github::GithubAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for GitHub (`github://` scheme)."
+    }
+  ]
+}

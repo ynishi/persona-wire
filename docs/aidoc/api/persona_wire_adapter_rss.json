@@ -1,0 +1,26 @@
+{
+  "crate": "persona-wire-adapter-rss",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_rss::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `items` cap when `?limit=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_rss::FETCH_TIMEOUT",
+      "kind": "constant",
+      "docs": "Per-request HTTP timeout (connect + body), matching\n`persona-wire-adapter-mcp::DEFAULT_RPC_TIMEOUT`."
+    },
+    {
+      "path": "persona_wire_adapter_rss::RssAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for RSS/Atom/JSON feeds (`rss://` scheme)."
+    },
+    {
+      "path": "persona_wire_adapter_rss::SUMMARY_MAX_CHARS",
+      "kind": "constant",
+      "docs": "Max `summary` length in `char`s before truncation (context size guard)."
+    }
+  ]
+}

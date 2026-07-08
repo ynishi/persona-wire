@@ -49,3 +49,25 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo test --workspace
+
+  # Drift check for the LLM-facing doc artifacts committed under
+  # docs/aidoc/. Non-blocking (continue-on-error): cargo-aidoc pins the
+  # rustdoc JSON format_version, and any nightly bump ahead of a
+  # cargo-aidoc release trips a FormatVersionMismatch. When that fires,
+  # bumping cargo-aidoc (in ../cargo-aidoc) is the right fix, not
+  # pinning nightly here. Failures show up in the Actions UI so we know
+  # to regenerate.
+  aidoc:
+    name: cargo aidoc --check
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libdbus (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install cargo-aidoc
+        run: cargo install cargo-aidoc --locked
+      - run: cargo aidoc --check --strict

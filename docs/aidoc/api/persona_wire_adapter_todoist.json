@@ -1,0 +1,36 @@
+{
+  "crate": "persona-wire-adapter-todoist",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_todoist::API_BASE",
+      "kind": "constant",
+      "docs": "Todoist unified API v1 base URL (the REST v2 `rest/v2` API was retired\n2026-02-10; this adapter targets the current API only)."
+    },
+    {
+      "path": "persona_wire_adapter_todoist::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `items` cap when `?limit=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_todoist::DESCRIPTION_MAX_CHARS",
+      "kind": "constant",
+      "docs": "Max `description_excerpt` length in `char`s before truncation (context\nsize guard)."
+    },
+    {
+      "path": "persona_wire_adapter_todoist::FETCH_TIMEOUT",
+      "kind": "constant",
+      "docs": "Per-request HTTP timeout (connect + body), matching\n`persona-wire-adapter-github::FETCH_TIMEOUT`."
+    },
+    {
+      "path": "persona_wire_adapter_todoist::MAX_LIMIT",
+      "kind": "constant",
+      "docs": "Maximum allowed `?limit=` value (Todoist API's own `1..=200` constraint)."
+    },
+    {
+      "path": "persona_wire_adapter_todoist::TodoistAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for Todoist (`todoist://` scheme)."
+    }
+  ]
+}

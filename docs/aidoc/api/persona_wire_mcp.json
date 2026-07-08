@@ -1,0 +1,109 @@
+{
+  "crate": "persona-wire-mcp",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_mcp::ONBOARDING_GUIDE",
+      "kind": "constant",
+      "docs": "Full end-to-end onboarding guide bundled with the MCP server.\n\n# Sync policy (must not edit only one side)\n\n- **Canonical**: `docs/onboarding.md` (workspace root, human-navigable\n  from project root, cross-referenced by other docs / READMEs).\n- **Bundled copy**: `crates/persona-wire-mcp/onboarding.md` (= the file\n  `include_str!`-ed below). This copy exists because `cargo publish`\n  only packages files within the crate's own directory tree —\n  `include_str!(\"../../../docs/onboarding.md\")` worked for local builds\n  but broke `cargo publish --dry-run` (= file outside the packaged\n  tarball). Hence the in-crate mirror.\n\n**Editing rule**: always edit the canonical workspace copy\n(`docs/onboarding.md`), then run `cp docs/onboarding.md\ncrates/persona-wire-mcp/onboarding.md` to refresh the bundled copy.\n\n**Safety nets enforcing this rule**:\n1. `include_str!(\"../onboarding.md\")` here → cargo build / publish\n   error out if the bundled copy is missing.\n2. `crates/persona-wire-mcp/build.rs` byte-compares the two copies on\n   every dev build and `panic!`s with a one-line fix command if they\n   diverge. Published-tarball builds (= workspace doc absent) skip\n   this check — they ship only the bundled copy.\n\nBackground: introduced in commit `37e7cec` with the original\n`../../../docs/onboarding.md` path; the workspace-relative path silently\nbroke `cargo publish` until P5-a' work surfaced it via publish-checker\ninvoke (see `docs/wire-workflow-spec.md` §10)."
+    },
+    {
+      "path": "persona_wire_mcp::WireBundleInstallParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireBundleRefParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireBundleRegisterParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireCloseParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireContextGetParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireDeleteParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireDoctorParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireEdgeCreateParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireEdgesCreateBatchParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireInitParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireListPageParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireNodeCreateParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireNodeUpdateParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireNodesCreateBatchParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireProjectionRegisterParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WirePromptContextParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireQueryParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireRenderParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireServer",
+      "kind": "struct",
+      "docs": "MCP server wrapping persona-wire-core."
+    },
+    {
+      "path": "persona_wire_mcp::WireSpecRegisterParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireWorkflowFireParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireWorkflowListParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireWorkflowRegisterParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::serve_stdio",
+      "kind": "function",
+      "docs": "Run the MCP server over stdio against the given SQLite db path. Caller\n(typically the unified `persona-wire mcp` subcommand) owns tokio runtime\nsetup and tracing init."
+    }
+  ]
+}

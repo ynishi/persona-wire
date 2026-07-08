@@ -19,8 +19,13 @@ use rusqlite::Connection;
 
 use super::Migration;
 
+/// Registry entry for migration 003 — referenced from
+/// [`super::ALL`] in execution order.
 pub static MIGRATION: Mig = Mig;
 
+/// Zero-sized [`Migration`] impl for the
+/// `003_bundle_installs_fk_relax` schema change. Instances carry no
+/// state; the [`MIGRATION`] singleton is the intended handle.
 pub struct Mig;
 
 impl Migration for Mig {

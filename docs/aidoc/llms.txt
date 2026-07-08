@@ -1,0 +1,124 @@
+# persona-wire
+
+> persona-wire — CLI + migration hub for the 15-crate persona-wire
+
+## persona-wire 0.12.0
+
+- [persona-wire overview](persona_wire/index.md): persona-wire — CLI + migration hub for the 15-crate persona-wire
+- [persona-wire::migrations](persona_wire/migrations.md): Schema migration framework — Diesel / sqlx style, scoped to persona-wire's
+- [persona-wire::migrations::m001_node_id_ulid](persona_wire/migrations__m001_node_id_ulid.md): 001 — `nodes` / `edges` stringly `id` → opaque ULID + `name` extraction.
+- [persona-wire::migrations::m002_registry_id_ulid](persona_wire/migrations__m002_registry_id_ulid.md): 002 — `specifications` / `projections` rebuild: `name TEXT PK` →
+- [persona-wire::migrations::m003_bundle_installs_fk_relax](persona_wire/migrations__m003_bundle_installs_fk_relax.md): 003 — relax `bundle_installs.bundle_id` to nullable + ON DELETE SET NULL.
+
+## persona-wire-adapter-github 0.12.0
+
+- [persona-wire-adapter-github overview](persona_wire_adapter_github/index.md): persona-wire Adapter for GitHub (scheme `github://`).
+
+## persona-wire-adapter-mcp 0.12.0
+
+- [persona-wire-adapter-mcp overview](persona_wire_adapter_mcp/index.md): persona-wire Adapter for any MCP server (scheme `mcp://`).
+
+## persona-wire-adapter-mini-app 0.12.0
+
+- [persona-wire-adapter-mini-app overview](persona_wire_adapter_mini_app/index.md): persona-wire Adapter for mini-app SoT (scheme `mini-app://`).
+
+## persona-wire-adapter-notion 0.12.0
+
+- [persona-wire-adapter-notion overview](persona_wire_adapter_notion/index.md): persona-wire Adapter for Notion (scheme `notion://`).
+
+## persona-wire-adapter-obsidian 0.12.0
+
+- [persona-wire-adapter-obsidian overview](persona_wire_adapter_obsidian/index.md): persona-wire Adapter for Obsidian vault (scheme `obsidian://`).
+
+## persona-wire-adapter-persona-pack 0.12.0
+
+- [persona-wire-adapter-persona-pack overview](persona_wire_adapter_persona_pack/index.md): `persona-wire-adapter-persona-pack` — persona-pack SDK access の ACL Facade。
+
+## persona-wire-adapter-rss 0.12.0
+
+- [persona-wire-adapter-rss overview](persona_wire_adapter_rss/index.md): persona-wire Adapter for RSS/Atom/JSON feeds (scheme `rss://`).
+
+## persona-wire-adapter-slack 0.12.0
+
+- [persona-wire-adapter-slack overview](persona_wire_adapter_slack/index.md): persona-wire Adapter for Slack (scheme `slack://`).
+
+## persona-wire-adapter-sqlite-x 0.12.0
+
+- [persona-wire-adapter-sqlite-x overview](persona_wire_adapter_sqlite_x/index.md): persona-wire Adapter for raw SQLite SoT (scheme `sqlite://`).
+
+## persona-wire-adapter-todoist 0.12.0
+
+- [persona-wire-adapter-todoist overview](persona_wire_adapter_todoist/index.md): persona-wire Adapter for Todoist (scheme `todoist://`).
+
+## persona-wire-core 0.12.0
+
+- [persona-wire-core overview](persona_wire_core/index.md): # persona-wire-core
+- [persona-wire-core::application](persona_wire_core/application.md): Application layer — use cases and registries.
+- [persona-wire-core::application::bundle_install](persona_wire_core/application__bundle_install.md): Bundle install use case — TOML parse → name resolution → registry
+- [persona-wire-core::application::bundle_registry](persona_wire_core/application__bundle_registry.md): Bundle registry — PoEAA Registry pattern (Fowler PoEAA Ch.18) for
+- [persona-wire-core::application::doctor](persona_wire_core/application__doctor.md): wire_doctor module — Finding-driven 2-axis (graph / workflow) health
+- [persona-wire-core::application::doctor::finding](persona_wire_core/application__doctor__finding.md): Finding — wire_doctor が emit する 1 件の NG 観察。
+- [persona-wire-core::application::doctor::probe](persona_wire_core/application__doctor__probe.md): Probe trait — wire_doctor の検査素子。
+- [persona-wire-core::application::doctor::probes](persona_wire_core/application__doctor__probes.md): Individual Probe implementations。 1 file = 1 kind が default。
+- [persona-wire-core::application::doctor::probes::graph_dangling_edge](persona_wire_core/application__doctor__probes__graph_dangling_edge.md): graph.dangling_edge — edge target に該当 node が存在しない (error)。
+- [persona-wire-core::application::doctor::probes::graph_edges_zero](persona_wire_core/application__doctor__probes__graph_edges_zero.md): # graph.edges_zero
+- [persona-wire-core::application::doctor::probes::graph_orphan_node](persona_wire_core/application__doctor__probes__graph_orphan_node.md): graph.orphan_node — in/out edge ゼロ + 自己参照なしの node を warn で emit。
+- [persona-wire-core::application::doctor::probes::workflow_disabled](persona_wire_core/application__doctor__probes__workflow_disabled.md): workflow.disabled — `enabled=false` の workflow を info で emit。
+- [persona-wire-core::application::doctor::probes::workflow_duplicate_trigger](persona_wire_core/application__doctor__probes__workflow_duplicate_trigger.md): workflow.duplicate_trigger — 同 persona × 同 trigger.event の重複検出 (warn)。
+- [persona-wire-core::application::doctor::probes::workflow_emit_target_unregistered](persona_wire_core/application__doctor__probes__workflow_emit_target_unregistered.md): workflow.emit_target_unregistered — `action.projection_names` slot を
+- [persona-wire-core::application::doctor::probes::workflow_persona_no_workflow](persona_wire_core/application__doctor__probes__workflow_persona_no_workflow.md): workflow.persona_no_workflow — persona に紐づく workflow が 1 件もない (warn)。
+- [persona-wire-core::application::doctor::probes::workflow_trigger_infra_missing](persona_wire_core/application__doctor__probes__workflow_trigger_infra_missing.md): workflow.trigger_infra_missing — trigger.kind=cron で cron 指定なし、
+- [persona-wire-core::application::doctor::registry](persona_wire_core/application__doctor__registry.md): Probe registry — default 全埋め込み。
+- [persona-wire-core::application::doctor::render](persona_wire_core/application__doctor__render.md): Finding → Markdown render + verdict 集約。
+- [persona-wire-core::application::merger](persona_wire_core/application__merger.md): Template Merger Strategy。
+- [persona-wire-core::application::plugin_registry](persona_wire_core/application__plugin_registry.md): PluginRegistry — 3 軸 Plugin (Adapter / TemplateEngine / Projection) を統合管理。
+- [persona-wire-core::application::projection_mapper](persona_wire_core/application__projection_mapper.md): Mapper boundary: [`Projection`] Domain Entity ↔ `projections` table row.
+- [persona-wire-core::application::projection_naming](persona_wire_core/application__projection_naming.md): Projection name derivation — single SoT for `(persona_id, slot)` → registered
+- [persona-wire-core::application::projection_overlay](persona_wire_core/application__projection_overlay.md): Projection Overlay — Wire の domain 型 (上流 SoT 非依存)。
+- [persona-wire-core::application::projection_registry](persona_wire_core/application__projection_registry.md): Projection registry — PoEAA Registry pattern (Fowler PoEAA Ch.18) for
+- [persona-wire-core::application::spec_registry](persona_wire_core/application__spec_registry.md): Specification registry — store dynamic / composable Specifications by name.
+- [persona-wire-core::application::use_cases](persona_wire_core/application__use_cases.md): Use cases — orchestration of Domain + Infrastructure for wire_* flows.
+- [persona-wire-core::application::wiring_mapper](persona_wire_core/application__wiring_mapper.md): Mapper boundary: [`Wiring`] Domain Entity ↔ wiring [`Node`].
+- [persona-wire-core::application::workflow_mapper](persona_wire_core/application__workflow_mapper.md): Mapper boundary: [`Workflow`] Domain Entity ↔ `workflow_def` [`Node`].
+- [persona-wire-core::domain](persona_wire_core/domain.md): Domain layer — pure entities, value objects, and business rules.
+- [persona-wire-core::domain::entity](persona_wire_core/domain__entity.md): Domain Entity Layer — persona-wire vocabulary as first-class entities.
+- [persona-wire-core::domain::entity::bundle](persona_wire_core/domain__entity__bundle.md): `Bundle` Domain Entity — scaffolding template that bundles
+- [persona-wire-core::domain::entity::context_wiring](persona_wire_core/domain__entity__context_wiring.md): `ContextWiring` — per-persona Composition Root (Aggregate Root identity).
+- [persona-wire-core::domain::entity::persona_id](persona_wire_core/domain__entity__persona_id.md): `PersonaId` — owner identity Value Object.
+- [persona-wire-core::domain::entity::projection](persona_wire_core/domain__entity__projection.md): `Projection` Domain Entity — rendering intent for a `Wiring`.
+- [persona-wire-core::domain::entity::slot](persona_wire_core/domain__entity__slot.md): `Slot` Value Object — 1 binding name within a persona's context.
+- [persona-wire-core::domain::entity::source](persona_wire_core/domain__entity__source.md): `Source` Entity — SoT location (URI) that a `Wiring` points at.
+- [persona-wire-core::domain::entity::wiring](persona_wire_core/domain__entity__wiring.md): `Wiring` Entity — 1 slot binding within one persona's context.
+- [persona-wire-core::domain::entity::workflow](persona_wire_core/domain__entity__workflow.md): `Workflow` Entity — trigger-driven autonomous binding within a persona's
+- [persona-wire-core::domain::error](persona_wire_core/domain__error.md): Error types layered by responsibility.
+- [persona-wire-core::domain::graph](persona_wire_core/domain__graph.md): Math backend Graph — open-vocabulary graph primitives.
+- [persona-wire-core::domain::graph::autoversion](persona_wire_core/domain__graph__autoversion.md): AutoVersion primitive — append-only version chain with diff/rollback.
+- [persona-wire-core::domain::graph::compute](persona_wire_core/domain__graph__compute.md): Compute primitive — traversal + execution + constraint eval.
+- [persona-wire-core::domain::graph::constraint](persona_wire_core/domain__graph__constraint.md): Constraint primitive — evaluate edges of `kind="constraint"` against current graph state.
+- [persona-wire-core::domain::graph::crud](persona_wire_core/domain__graph__crud.md): CRUD primitive — node/edge level commands routed to the storage port.
+- [persona-wire-core::domain::graph::node](persona_wire_core/domain__graph__node.md): Graph primitive — Node + Edge entities (open vocabulary type system).
+- [persona-wire-core::domain::graph::repository](persona_wire_core/domain__graph__repository.md): Repository port — abstract graph persistence operations.
+- [persona-wire-core::domain::graph::specification](persona_wire_core/domain__graph__specification.md): Specification primitive — first-class composable query object.
+- [persona-wire-core::domain::port](persona_wire_core/domain__port.md): Domain Ports — outbound (Driven) trait contracts owned by the Domain.
+- [persona-wire-core::domain::port::projection_renderer](persona_wire_core/domain__port__projection_renderer.md): `ProjectionRenderer` — Driven Port for projection rendering.
+- [persona-wire-core::infrastructure](persona_wire_core/infrastructure.md): Infrastructure layer — drives Storage and Rendering as adapters.
+- [persona-wire-core::infrastructure::adapter](persona_wire_core/infrastructure__adapter.md): Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.
+- [persona-wire-core::infrastructure::projection](persona_wire_core/infrastructure__projection.md): Projection Adapters — concrete [`ProjectionRenderer`] implementations.
+- [persona-wire-core::infrastructure::projection::static](persona_wire_core/infrastructure__projection__static.md): `StaticProjection` — core 同梱 default Adapter for [`ProjectionRenderer`].
+- [persona-wire-core::infrastructure::rendering](persona_wire_core/infrastructure__rendering.md): Rendering adapter — render extracted graph subsets into output forms.
+- [persona-wire-core::infrastructure::storage](persona_wire_core/infrastructure__storage.md): SQLite storage adapter.
+- [persona-wire-core::infrastructure::template](persona_wire_core/infrastructure__template.md): Template Engine Plugin trait — Plugin 軸 2 / 3。
+- [persona-wire-core::infrastructure::wire_uri](persona_wire_core/infrastructure__wire_uri.md): WireUri — Wire 内で扱う URI の typed view (Layer 6 Adapter dispatch の共通入力)。
+
+## persona-wire-credentials 0.12.0
+
+- [persona-wire-credentials overview](persona_wire_credentials/index.md): Provider-chain credential resolution for persona-wire Adapters
+
+## persona-wire-mcp 0.12.0
+
+- [persona-wire-mcp overview](persona_wire_mcp/index.md): persona-wire MCP server library — the transport layer that wraps
+
+## persona-wire-transport-http 0.12.0
+
+- [persona-wire-transport-http overview](persona_wire_transport_http/index.md): Shared HTTP transport for persona-wire Adapters (`persona-wire-transport-http`).
+

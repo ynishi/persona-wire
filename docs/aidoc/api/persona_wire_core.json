@@ -1,0 +1,1127 @@
+{
+  "crate": "persona-wire-core",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_core::application",
+      "kind": "module",
+      "docs": "Application layer — use cases and registries.\n\nHolds:\n- [`spec_registry`]       — Specification registry (dynamic / composable selector)\n- [`projection_registry`] — NamedProjection registry (fixed / named view)\n- [`use_cases`]           — wire_init / wire_close / wire_doctor / etc. flows"
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install",
+      "kind": "module",
+      "docs": "Bundle install use case — TOML parse → name resolution → registry\ndispatch → install report → install log append.\n\nConsumed by `wire_bundle_install` (MCP / CLI surface). The Bundle\n[`BundleRegistry`](crate::application::bundle_registry::BundleRegistry)\nowns CRUD on the `bundles` table; this module owns the parse +\ndispatch flow that turns one Bundle row into many registry writes.\n\n# Sections handled (v1)\n\n- `[[specs]]` → [`SpecRegistry`]\n- `[[projections]]` → [`ProjectionRegistry`]\n- `[[nodes]]` → `SqliteStorage::insert_node`\n- `[[edges]]` → `SqliteStorage::insert_edge`\n\n`[[wirings]]` / `[[workflows]]` dispatch is the same shape — handled\nthrough the existing `wire_workflow_register` flow when wired up at\nthe MCP surface. The install report carries per-entity rows so each\nsection can be extended without changing the public report shape.\n\n# Conflict resolution\n\nName conflict policy is selected per-install via\n[`ConflictMode`](crate::domain::entity::bundle::ConflictMode):\n\n- `Increment` (default) — entity name auto-increments (`-1` / `-2` ...)\n  until a free slot is found. Internal references inside the same\n  bundle (e.g. `projections.spec_ref` pointing at `specs.name`) are\n  rewritten to the final name.\n- `Skip` — leave the existing entity, record the collision in the\n  install report's `skipped[]`.\n- `Error` — abort on first collision. Nothing is written.\n\n# Atomicity\n\nv1 is **non-transactional** — dispatch iterates section-by-section\nagainst the registries. Failures partway through leave previously\ninstalled entities in place; the install report's `errors[]` lists\nthe boundary. SQLite transaction wrapping is a follow-up carry."
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::BundleManifest",
+      "kind": "struct",
+      "docs": "Top-level TOML manifest deserialized from `Bundle.body`. All section\narrays are optional; an empty bundle (header only) parses successfully\nand dispatches as a no-op."
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::EdgeEntry",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::NodeEntry",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::ProjectionEntry",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::SpecEntry",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::WiringEntry",
+      "kind": "struct",
+      "docs": "Wiring section entry — one slot binding for one persona.\n\nPersisted as a `Node` of type `outline_node` whose name is\n`format!(\"{persona_id}.{slot}\")` and whose metadata carries\n`persona` / `axis` (= slot) / `source_uri`. Conflict resolution\noperates on the synthesized node name; the auto-increment suffix\ngoes on the slot half so the persona half stays readable\n(`shi.mailbox` → `shi.mailbox-1`)."
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::WorkflowEntry",
+      "kind": "struct",
+      "docs": "Workflow section entry — mirrors the shape consumed by\n`wire_workflow_register` so the bundle installer is a thin\ncomposition over the existing use case."
+    },
+    {
+      "path": "persona_wire_core::application::bundle_install::install_bundle",
+      "kind": "function",
+      "docs": "Install the entities declared in `bundle.body` into the storage's\nregistries under the supplied [`ConflictMode`]. The bundle row itself\nis **not** modified; install history is appended to `bundle_installs`."
+    },
+    {
+      "path": "persona_wire_core::application::bundle_registry",
+      "kind": "module",
+      "docs": "Bundle registry — PoEAA Registry pattern (Fowler PoEAA Ch.18) for\nnamed [`Bundle`] lookup, mirroring the\n[`crate::application::spec_registry::SpecRegistry`] /\n[`crate::application::projection_registry::ProjectionRegistry`] stance.\n\n# Pattern selection (SoT)\n\n- **PoEAA Registry** — application-layer service that provides named\n  access to well-known objects. `BundleRegistry::register / get / list\n  / delete` is the typed lookup surface; CLI / MCP / use cases reach a\n  `Bundle` through this Registry, never by reaching into\n  `SqliteStorage` directly. **This is the chosen pattern.**\n- **DDD Repository** — not adopted, same rationale as Projection\n  (collapses the application service into a pass-through).\n\n# Scope (v1)\n\n`BundleRegistry` owns **CRUD** only:\n- `register`  — upsert by name (`-1` / `-2` ... auto-increment lives in\n  the install use case, not here; `register` itself overwrites on\n  same-name to match `SpecRegistry::register` semantics).\n- `get` / `get_by_id` — name- or id-based lookup.\n- `list` — name-ascending summary.\n- `delete` — by name or id; install history (`bundle_installs`) is\n  intentionally preserved across bundle deletion for the future\n  History UI.\n\nBundle **install** (TOML parse → name resolution → dispatch to\nSpec/Projection/Wiring/Workflow registries) is a separate use case\nthat consumes `BundleRegistry::get`. It is intentionally not a\n`register` post-hook because (a) a bundle may be registered, then\ninstalled multiple times under different `ConflictMode`s, and (b)\nparse-time errors should not block bundle registration."
+    },
+    {
+      "path": "persona_wire_core::application::bundle_registry::BundleRegistry",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor",
+      "kind": "module",
+      "docs": "wire_doctor module — Finding-driven 2-axis (graph / workflow) health\ndiagnostic. Each Probe emits Severity-tagged Finding(s); [`run`] aggregates\na verdict (HEALTHY / DEGRADED / BROKEN) and renders a Markdown report.\nTwo modes: Full (`persona_id = None`) / Persona-scoped (`Some(id)`).\n\nEntry: [`run`] is a thin transport. Internally it drives the probe\nregistry → FindingSink → render pipeline."
+    },
+    {
+      "path": "persona_wire_core::application::doctor::finding",
+      "kind": "module",
+      "docs": "Finding — wire_doctor が emit する 1 件の NG 観察。\n\ndesign.md §4 / §5 / §6 / §7 に対応する core types。\nKind は内部 closed Enum (新 kind 追加で variant + Probe 同時編集を強制)。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::finding::Axis",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::finding::Finding",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::finding::Kind",
+      "kind": "enum",
+      "docs": "`kind` enum: closed set. 1 variant = 1 Probe が default。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::finding::Location",
+      "kind": "struct",
+      "docs": "発生場所 — 固有名詞で指差すための field bundle。 全 Optional。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::finding::Severity",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probe",
+      "kind": "module",
+      "docs": "Probe trait — wire_doctor の検査素子。\n\n1 Probe = 1 kind が default、 1 Probe で複数 kind emit も許容。\n全 Probe は default で registry に埋め込まれる (registry::default)。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probe::FindingSink",
+      "kind": "struct",
+      "docs": "Finding の蓄積先。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probe::Probe",
+      "kind": "trait",
+      "docs": "検査素子。 doctor は registry から Vec<Box<dyn Probe>> を取り順次 scan を呼ぶ。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probe::ProbeCtx",
+      "kind": "struct",
+      "docs": "Probe 走査時の context。 `persona_filter` が Some なら persona-scoped mode。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes",
+      "kind": "module",
+      "docs": "Individual Probe implementations。 1 file = 1 kind が default。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::graph_dangling_edge",
+      "kind": "module",
+      "docs": "graph.dangling_edge — edge target に該当 node が存在しない (error)。\n\ndesign.md §6 entry。 storage 側は FK NOT-NULL + `wire_node_delete` cascade\nで dangling 状態を作らないため、 本 Probe は **defensive sensor** として\n振る舞う (external DB drift / migration corruption / 直 SQL writes 等の\n異常経路で混入した dangling edge を doctor の next scan で flag する)。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::graph_dangling_edge::GraphDanglingEdge",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::graph_edges_zero",
+      "kind": "module",
+      "docs": "# graph.edges_zero\n\nDetects the \"fresh database\" anomaly: a graph with zero edges has not\nhad its wire layer provisioned yet. Emitted as [`Severity::Error`] in\nFull mode only.\n\n## Persona-scoped mode skip (Phase A)\n\nWhen [`ProbeCtx::persona_filter`] is `Some`, [`GraphEdgesZero::scan`]\nreturns immediately without emitting any finding. In Phase A a single\npersona is **not** the edge-based target of the graph axis — its\noperation is closed over the persona-pack overlay, [Wiring entries],\nand [Workflow triggers] — so reporting `edges=0` as a hard failure\nfor one persona is a design mismatch (cf. issue `9f70b493`).\n\n## Lifting the Phase A skip (Phase β path)\n\nWhen persona-to-persona graph wiring is formalised, the early return\nin [`GraphEdgesZero::scan`] should be removed. Phase β prerequisites:\n\n1. A persona-to-persona edge type (e.g. `routes_to_persona`) is\n   registered in `type_registry`.\n2. `persona-pack` declares an opt-in flag (under `[extra.persona_wire]`\n   or its successor) for \"subject to graph-axis health checks\".\n3. A migration issue lands that removes the\n   `ctx.persona_filter.is_some()` early-return.\n\n## `workflow_def` exclusion (phase-invariant)\n\n[`workflow_def`] Nodes are excluded from the edge tally below. A\nWorkflow Entity completes its lifecycle via trigger/action and never\nparticipates in edge-based wiring; counting its (always-zero) edges\nwould mask real \"wire not provisioned\" signals once a single workflow\nis registered. This exclusion is invariant across Phase A/β.\n\n[`workflow_def`]: crate::application::workflow_mapper::WORKFLOW_TYPE\n[Wiring entries]: crate::application::wiring_mapper\n[Workflow triggers]: crate::domain::entity::workflow"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::graph_edges_zero::GraphEdgesZero",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::graph_orphan_node",
+      "kind": "module",
+      "docs": "graph.orphan_node — in/out edge ゼロ + 自己参照なしの node を warn で emit。\n\ndesign.md §6 entry。 既存 `use_cases::graph_scan_summary` の orphan 判定\nロジック (`is_self_attached_wiring`) を node 単位で再走査する。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::graph_orphan_node::GraphOrphanNode",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_disabled",
+      "kind": "module",
+      "docs": "workflow.disabled — `enabled=false` の workflow を info で emit。\n\ndesign.md §7 entry。 意図確認用 (不要なら wire_workflow_delete)。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_disabled::WorkflowDisabled",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_duplicate_trigger",
+      "kind": "module",
+      "docs": "workflow.duplicate_trigger — 同 persona × 同 trigger.event の重複検出 (warn)。\n\ndesign.md §7 entry。 統合 or 1 本に削減すべき状態。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_duplicate_trigger::WorkflowDuplicateTrigger",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_emit_target_unregistered",
+      "kind": "module",
+      "docs": "workflow.emit_target_unregistered — `action.projection_names` slot を\nruntime と同じ name derive rule で `<persona>.section.<slot>` に format\nしてから `ProjectionRegistry` を引き、 未登録なら error finding。\n\ndesign.md §7 entry。 emit しても受け手不在 = 永久空撃ち を検出する。\n\n`action.projection_names` の各 entry は literal name ではなく **slot 名**\n(= use_cases::wire_prompt_context が `projection_naming::workflow_emit_projection_name`\nで resolve する rule と同じ SoT を共有)。 旧実装はこの derive を行わず、\nliteral name を ProjectionRegistry に直接突き合わせて false positive を\n量産していた (origin: 2026-06-19 外形検証)。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_emit_target_unregistered::WorkflowEmitTargetUnregistered",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_persona_no_workflow",
+      "kind": "module",
+      "docs": "workflow.persona_no_workflow — persona に紐づく workflow が 1 件もない (warn)。\n\ndesign.md §7 entry。 session_close 等の lifecycle hook 不在で更新が回らない。\n\nNOTE: 全 persona 列挙は `metadata.persona` を持つ node を横串で収集。\npersona registry が別途 SoT で確定するなら将来 carry で置換可。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_persona_no_workflow::WorkflowPersonaNoWorkflow",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_trigger_infra_missing",
+      "kind": "module",
+      "docs": "workflow.trigger_infra_missing — trigger.kind=cron で cron 指定なし、\nまたは kind=on_event で event 文字列なし (error)。\n\ndesign.md §7 entry。 「受け手不在 / 永遠未 fire」 の構造的検出。\nNOTE: `on_event` の hook 実在検査 (agent-profiles 側の登録) は本 Probe\nscope 外、 将来 carry。 ここでは event 文字列の完備性のみ。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::probes::workflow_trigger_infra_missing::WorkflowTriggerInfraMissing",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::registry",
+      "kind": "module",
+      "docs": "Probe registry — default 全埋め込み。\n\n新 Probe 追加時はここに 1 行 push する。 wire_doctor 本体 / lib.rs MCP 経路は触らない。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::registry::default",
+      "kind": "function",
+      "docs": "default 全埋め込み。 順序は最終 Markdown 出力順 (Graph 軸 → Workflow 軸)。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::render",
+      "kind": "module",
+      "docs": "Finding → Markdown render + verdict 集約。\n\ndesign.md §5 (verdict) / §8 (output 形式) に対応。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::render::Verdict",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::render::aggregate_verdict",
+      "kind": "function",
+      "docs": "design §5: error >= 1 → BROKEN / warn >= 1 → DEGRADED / 全 PASS → HEALTHY。"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::render::to_markdown",
+      "kind": "function"
+    },
+    {
+      "path": "persona_wire_core::application::doctor::run",
+      "kind": "function",
+      "docs": "design §3: Full mode (`persona_id = None`) / Persona-scoped mode (`Some(id)`)。\n戻り値は Markdown report (design §8 layout)。"
+    },
+    {
+      "path": "persona_wire_core::application::merger",
+      "kind": "module",
+      "docs": "Template Merger Strategy。\n\npersona-pack の Overlay (= `[extra.persona_wire.projections.<slot>]`) を base\ntemplate (wire DB の動的 register or `BUILTIN_PROJECTIONS`) と merge する戦略を\n明示的に持つ。 完全 replace だけでなく append / prepend / partial section\n上書きを persona-pack 側で指定可能にする = engineering\n規律で組む base infra。\n\n```toml\n[extra.persona_wire.projections.active]\nstrategy = \"append\"   # default = \"replace\"\ntemplate = \"...emote / register 上乗せ...\"\ntarget   = \"markdown\"\n```"
+    },
+    {
+      "path": "persona_wire_core::application::merger::MergeStrategy",
+      "kind": "enum",
+      "docs": "Overlay と base template を merge するときの戦略。"
+    },
+    {
+      "path": "persona_wire_core::application::plugin_registry",
+      "kind": "module",
+      "docs": "PluginRegistry — 3 軸 Plugin (Adapter / TemplateEngine / Projection) を統合管理。\n\nserver boot 時に register、 runtime mutation なし (= immutable after `build()`)。\nPlugin の物理境界は外部 crate (例: `wire-adapter-pg` / `wire-template-jinja` /\n`wire-projection-llm`)、 boot 側 (`persona-wire-mcp` / `persona-wire` bin) で\n`PluginRegistry::builder()` に流し込んで構築する。\n\n## boot 例\n\n```ignore\nuse persona_wire_core::application::plugin_registry::PluginRegistry;\nuse persona_wire_core::infrastructure::adapter::FileAdapter;\nuse persona_wire_core::infrastructure::template::HandlebarsEngine;\nuse persona_wire_core::infrastructure::projection::StaticProjection;\nuse persona_wire_adapter_mini_app::MiniAppAdapter;\n\nlet registry = PluginRegistry::default_builder_for_wire()\n    .with_adapter(MiniAppAdapter)\n    .build()\n    .expect(\"plugin registry build\");\n```\n\nP3a stage: registry skeleton + builder + lookup surface のみ。 use_cases.rs\n側の dispatch 配線 (registry を引数で受け取って fetch / render を引く form)\nは P3a 後段で順次差し替え (現状は free fn `fetch_via_adapter` + `rendering::render`\n直呼びを維持、 後方互換)。"
+    },
+    {
+      "path": "persona_wire_core::application::plugin_registry::PluginRegistry",
+      "kind": "struct",
+      "docs": "3 軸 Plugin を統合管理する immutable registry。\n\nbuild 後の mutation 不可。 dispatch は scheme / id / kind 文字列引きで O(1)。"
+    },
+    {
+      "path": "persona_wire_core::application::plugin_registry::PluginRegistryBuilder",
+      "kind": "struct",
+      "docs": "builder。 同一 scheme / id / kind の重複登録は `build()` 時に fail-fast。"
+    },
+    {
+      "path": "persona_wire_core::application::projection_mapper",
+      "kind": "module",
+      "docs": "Mapper boundary: [`Projection`] Domain Entity ↔ `projections` table row.\n\nFowler PoEAA Data Mapper (Ch.10) — `NamedProjection` is the\npersistence-shape DTO (anemic row mirror), [`Projection`] is the Domain\nEntity carrying VO and cross-field invariants. This module is the\n**single SoT** for translating between the two shapes;\n[`ProjectionRegistry`](super::projection_registry::ProjectionRegistry)\nand any future projection consumer route through here instead of\ntouching the DTO struct directly.\n\n# Pattern selection (SoT)\n\nPersona-wire takes the **narrow** reading of Data Mapper: the Registry\n(PoEAA Ch.18) acts as the Mapper bridge through this module, instead of\nintroducing an independent `Mapper<Dto, Entity>` trait. See\n[`projection_registry`](super::projection_registry) module docs for the\nPoEAA Registry vs DDD Repository decision recorded in code.\n\nPromoting this to a literal Fowler Mapper trait is a carry that fires\nonly when a second parallel Mapper (Spec Mapper / overlay Mapper)\narrives and the inherent helpers start duplicating shape — until then,\nthe free functions below are intentionally not behind a trait.\n\nSibling of [`wiring_mapper`](super::wiring_mapper) and\n[`workflow_mapper`](super::workflow_mapper). The three together complete\nthe Data Mapper land for the entity layer.\n\nStorage form (cf. `domain/entity/projection.rs` module docs):\n\n```text\nRow {\n  name:               String,\n  spec_ref:           String,\n  template:           String,\n  target_form:        \"prompt\" | \"markdown\" | \"ascii\" | ...,\n  template_engine:    Option<String>,\n  projection_kind:    Option<String>,\n  projection_config:  Option<Value>,   // JSON\n}\n```\n\n`PluginDispatch` is flattened to the three optional columns at the DTO\nboundary; the Entity carries the discriminated `Default | Custom { .. }`\nshape so application code never sees the loose `Option` triple.\n\nRound-trip property: `dto_to_projection(projection_to_dto(p))? == p` for\nany [`Projection`] constructed through its `from_parts` constructor."
+    },
+    {
+      "path": "persona_wire_core::application::projection_mapper::NamedProjection",
+      "kind": "struct",
+      "docs": "Persistence DTO. Anemic by design — invariants live in [`Projection`].\n\nKept `pub` only because a few legacy callsites (doctor probes / tests)\nstill hand-build rows; new code should construct [`Projection`] and let\nthe mapper handle the DTO conversion."
+    },
+    {
+      "path": "persona_wire_core::application::projection_mapper::dto_to_projection",
+      "kind": "function",
+      "docs": "DTO → Domain Entity. Runs all VO validations and rejects illegal\n`PluginDispatch` combinations at the mapper boundary."
+    },
+    {
+      "path": "persona_wire_core::application::projection_mapper::projection_to_dto",
+      "kind": "function",
+      "docs": "Domain Entity → DTO. Total (no failure path) — Entity invariants are\nstrictly stronger than DTO shape, so projection is always defined."
+    },
+    {
+      "path": "persona_wire_core::application::projection_naming",
+      "kind": "module",
+      "docs": "Projection name derivation — single SoT for `(persona_id, slot)` → registered\nNamedProjection name mapping.\n\nConsumers:\n- `wire_prompt_context` (use_cases.rs) at runtime resolve\n- `WorkflowEmitTargetUnregistered` doctor Probe at check time\n\nKeeping this rule in one place prevents the doctor Probe from\nre-implementing (and getting wrong) the format the use case actually\napplies — origin of the false-positive in `workflow.emit_target_unregistered`."
+    },
+    {
+      "path": "persona_wire_core::application::projection_naming::workflow_emit_projection_name",
+      "kind": "function",
+      "docs": "Compute the NamedProjection name that the runtime looks up in\n`ProjectionRegistry` for a given persona + emit slot.\n\nWorkflow `action.projection_names` entries are **slot names**, not\nliteral projection names; the runtime derives `<persona>.section.<slot>`\nbefore hitting the registry."
+    },
+    {
+      "path": "persona_wire_core::application::projection_overlay",
+      "kind": "module",
+      "docs": "Projection Overlay — Wire の domain 型 (上流 SoT 非依存)。\n\n`wire_prompt_context` Phase 0 で各 slot の base template に被せる Overlay 情報。\n取得経路は `PluginRegistry::route(\"<scheme>://<persona_id>/projections\")` 経由の\nAdapter dispatch (= ACL Facade、 上流 SDK 固有の TOML field / Type を Wire に漏らさない)。\n\nWire 定義の return JSON shape (Adapter が返す側の契約):\n\n```json\n{\n  \"scheme\": \"<adapter-scheme>\",\n  \"persona_id\": \"<id>\",\n  \"projections\": {\n    \"<slot>\": {\n      \"template\": \"<string>\",\n      \"target_form\": \"markdown\" | \"json\" | \"text\" | \"ascii\",\n      \"merge_strategy\": \"replace\" | \"append\" | \"prepend\" | \"section\"\n    }\n  }\n}\n```\n\n`target_form` / `merge_strategy` の値は文字列で受け取り、 Wire の typed enum\n(`TargetForm` / `MergeStrategy`) に parse する。 未知値は default (markdown / replace)。"
+    },
+    {
+      "path": "persona_wire_core::application::projection_overlay::ProjectionOverlay",
+      "kind": "struct",
+      "docs": "1 slot 分の Overlay 解決結果 (Wire domain 型)。"
+    },
+    {
+      "path": "persona_wire_core::application::projection_overlay::parse_overlay_response",
+      "kind": "function",
+      "docs": "Adapter return JSON を `BTreeMap<slot, ProjectionOverlay>` に翻訳する。\n\nbest-effort: `projections` 不在 / 形不正は空 map (= 「overlay 無し」 として扱う)。\nWire domain enum の parse fail は default 値に倒す (本 module 内で挙動を吸収)。"
+    },
+    {
+      "path": "persona_wire_core::application::projection_registry",
+      "kind": "module",
+      "docs": "Projection registry — PoEAA Registry pattern (Fowler PoEAA Ch.18) for\nnamed [`Projection`] lookup, routing through the Data Mapper boundary\nat [`projection_mapper`](super::projection_mapper).\n\n# Pattern selection (SoT)\n\n- **PoEAA Registry** (Fowler PoEAA Ch.18) — application-layer service\n  that provides named access to well-known objects, a structured\n  alternative to global access. `ProjectionRegistry::register / get /\n  list` is the typed lookup surface; the persona-wire CLI / MCP / use\n  cases consume `Projection` through this Registry, never by reaching\n  into `SqliteStorage` directly. **This is the chosen pattern.**\n- **DDD Repository** (Evans DDD Ch.6 / Vernon IDDD Ch.12) — a Domain\n  Port (trait) that abstracts Aggregate persistence so the Domain\n  depends only on the abstraction. **Not adopted.** Replacing the\n  Registry with a Repository trait would move persistence vocabulary\n  into `domain/port/` and collapse the application service into a\n  pass-through, breaking the PoEAA-narrow stance recorded below.\n\nFowler PoEAA's Data Mapper (Ch.10) requires *some* mapper to translate\nbetween persistence shape and Domain shape. The literal pattern has an\nindependent Mapper class; persona-wire takes the **narrow** reading and\nlets the Registry own that bridge through the\n[`projection_mapper`](super::projection_mapper) module. That keeps one application-layer entry point for everything\n`name`-addressable about a Projection: lookup, persistence, and DTO\ntranslation are co-located rather than spread across an artificial\nRepository / Mapper / Registry trio.\n\n# Layering\n\n```text\nCLI / MCP / use_cases.rs\n        │\n        ▼\nProjectionRegistry          ← PoEAA Registry (this module)\n        │\n        ▼\nprojection_mapper           ← Data Mapper boundary (DTO ↔ Entity)\n        │\n        ▼\nSqliteStorage               ← Infrastructure (column tuple primitives)\n```\n\nThe DTO (`NamedProjection`) + Entity round-trip lives in\n[`projection_mapper`](super::projection_mapper). This module owns only\nthe SQLite column tuple ↔ DTO translation (`upsert_dto` / `get_dto`)\nand the `register / get / list` flow surface. A follow-up carry pushes\nthe column-tuple half down to `projection_mapper` as well, leaving the\nRegistry as a pure named-lookup facade.\n\n# Sibling consumers\n\n[`wiring_mapper`](super::wiring_mapper) /\n[`workflow_mapper`](super::workflow_mapper) are sibling Data Mappers\ninvoked directly from `use_cases.rs` against the Math backend Node\nRepository — Wiring / Workflow do **not** have a Registry counterpart\nbecause they are persisted as graph nodes, not as a separately-named\ntable. The Registry layer is Projection-specific by design."
+    },
+    {
+      "path": "persona_wire_core::application::projection_registry::ProjectionRegistry",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::projection_registry::ProjectionRow",
+      "kind": "struct",
+      "docs": "Full registry row read surface for `wire_projection_get` /\n`wire_projection_list` — carries `spec_ref` / `template` / `target_form`\nas raw persistence fields (no `PluginDispatch` decode) alongside id / name\n/ timestamps, mirroring `bundle_registry::Bundle` returning raw fields."
+    },
+    {
+      "path": "persona_wire_core::application::spec_registry",
+      "kind": "module",
+      "docs": "Specification registry — store dynamic / composable Specifications by name.\n\nBacked by the storage layer (`specifications` table). Each entry is the\nJSON-serialised form of a `Specification`. Domain-neutral: callers register\narbitrary Specifications (BP: Specification pattern)."
+    },
+    {
+      "path": "persona_wire_core::application::spec_registry::SpecRegistry",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::spec_registry::SpecRow",
+      "kind": "struct",
+      "docs": "Full registry row read surface for `wire_spec_get` / `wire_spec_list` —\ncarries the raw `json` body (undecoded) alongside id / name / timestamps,\nmirroring `bundle_registry::Bundle` returning the raw TOML `body`."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases",
+      "kind": "module",
+      "docs": "Use cases — orchestration of Domain + Infrastructure for wire_* flows."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::GraphScanSummary",
+      "kind": "struct",
+      "docs": "Shared graph health summary used by `wire_close` (persona-scoped report)\nand `wire_doctor` (orphan-only diagnostic)."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::RenderedProjection",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::ResolvedFire",
+      "kind": "struct",
+      "docs": "A workflow resolved for firing, with its action descriptor surfaced so the\ncaller (= MCP layer or external orchestrator) can dispatch the side\neffect. P5-a keeps action invocation out of core to avoid the\nasync/Arc<Mutex> coupling — `emit_projection` is dispatched by calling\n`wire_prompt_context` from the caller using `action_emit_projection_names`."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireBatchOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireCloseInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireCloseOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireContextGetInput",
+      "kind": "struct",
+      "docs": "Input for `wire_context_get`. Just the persona scope."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireContextGetOutput",
+      "kind": "struct",
+      "docs": "1-call read view of a `ContextWiring` (per-persona Aggregate boundary).\n\nReturns the persona's `Wiring` set + `Workflow` set as application-layer\nsummary DTOs. This is the structured counterpart of\n`wire_prompt_context` (which returns rendered string instead of raw\naggregate). Use it when an orchestrator needs the persona's complete\nwiring topology in one call — e.g. to plan a reset, to inspect routing,\nor as the pre-render snapshot consumed by future write-side use cases."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireDeleteInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireDeleteOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireDoctorOutput",
+      "kind": "struct",
+      "docs": "Finding-driven 2-axis (graph / workflow) health diagnostic output."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireEdgesCreateBatchInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireInitInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireInitOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireNodeUpdateInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireNodeUpdateMode",
+      "kind": "enum",
+      "docs": "Merge strategy for `wire_node_update`. Mirrors RFC 7396 shallow merge for\n`Merge` and a full replacement for `Replace`."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireNodeUpdateOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireNodesCreateBatchInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WirePromptContextInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WirePromptContextOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireQueryInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireQueryNode",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireQueryOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireRenderInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireRenderOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireWorkflowFireInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireWorkflowFireOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireWorkflowListInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireWorkflowListOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireWorkflowRegisterInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireWorkflowRegisterOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WiringSummary",
+      "kind": "struct",
+      "docs": "Application-layer summary of one `Wiring`. Carries only the fields a\ncaller (MCP / CLI / orchestrator) needs to make routing decisions —\nthe typed `Wiring` Domain Entity stays internal to the entity layer."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WorkflowSummary",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::graph_scan_summary",
+      "kind": "function",
+      "docs": "Walk every node type and tally totals + orphan count. A node is counted as\nan orphan only when it has no in- or out-edges **and** is not a\nself-attached wiring entry (see `is_self_attached_wiring`). Shared scan\nprimitive for `wire_close` / `wire_doctor`; P3 daemon will extend this with\nstale / asymmetric / high-fanout checks.\n\n`workflow_def` Node は graph axis 検知対象集合に含まれない (issue\n`f3bb100e` — Workflow Entity は trigger / action で動作完結、 edge を\n持たないのが正常) ため、 本集計でも除外する。 さもなくば `wire_close`\n経路でも workflow node を orphan として false-positive 算入していた。"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_close",
+      "kind": "function",
+      "docs": "Minimal lifecycle scan for the `/work-close` auto-call. P1 reports orphan\nnodes (no in- or out-edges) and graph totals. P3 will expand this to\nstale / asymmetric / high-fanout scan + Daily report emit."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_context_get",
+      "kind": "function",
+      "docs": "Walk one persona's consistency boundary and return a structured\nsnapshot. Wiring nodes whose metadata cannot be parsed (drift) are\nskipped silently — the doctor probes are the surface that flag them.\n\nLayering: the `ContextWiring` Aggregate Root stays an identity marker\nin `domain::entity`; this use case owns the Repository traversal so the\ndomain layer keeps no dependency on `application` / `infrastructure`."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_doctor",
+      "kind": "function",
+      "docs": "Finding-driven 2-axis (graph / workflow) health diagnostic (design §3-§8).\n\n`persona_id = None` → Full mode (全 persona 横串)。\n`persona_id = Some(id)` → Persona-scoped mode (当該 persona に紐づく\nFinding のみ列挙、 main thread context を汚さない用)。\n\n内部は [`crate::application::doctor::run`] (Probe registry) に完全委譲、\nFinding 列挙 + verdict 集約形式の Markdown を返す (design §5 / §8)。\n数値カウントが必要なら [`graph_scan_summary`] を別途呼ぶ。"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_edge_delete",
+      "kind": "function",
+      "docs": "Delete an edge by id."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_edges_create_batch",
+      "kind": "function",
+      "docs": "Insert a batch of edges by iterating `insert_edge` 1 row at a time. Same\nnon-atomic semantics as `wire_nodes_create_batch`."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_init",
+      "kind": "function",
+      "docs": "Run every registered NamedProjection against the current graph and return\nthe rendered context bundle. **P1 互換 (sync)** = wire 内 graph の data 本体\nを render する旧 path。 新規 `wire_prompt_context` (async + Adapter 経由) で\nLayer 6 Adapter fresh fetch 経路に置き換える前提、 本 fn は P1 contract / test\n維持のため sync で残す。"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_node_delete",
+      "kind": "function",
+      "docs": "Delete a node by id. Edges referencing the node (as src or tgt) are\n**cascade-deleted in the same storage transaction** — edges table FK is\nNOT-NULL (`REFERENCES nodes(id)`) so dangling state is not representable\nin normal operation. The `graph.dangling_edge` Probe is retained as a\ndefensive sensor against external DB drift / migration corruption /\ndirect SQL writes that bypass this transaction."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_node_update",
+      "kind": "function",
+      "docs": "Update a node's `metadata` in place.\n\n`mode = Merge`: shallow top-level merge over the existing metadata\n(RFC 7396); `null` values in the patch delete the matching key.\n`mode = Replace`: full replacement of the node metadata with `metadata_patch`.\n\nOther node fields (`type` / `sot_ref` / lifecycle timestamps) are NOT\ntouched on this path — the UC backing this surface is wiring-entry tuning\n(`source_uri` / `axis` / `maintained_by`), which is metadata-only. To\nchange the node type or lifecycle fields, delete + re-create.\n\nErrors:\n- `metadata_patch` is not a JSON object\n- `id` does not match any existing node row (returns `WireError::NotFound`)"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_nodes_create_batch",
+      "kind": "function",
+      "docs": "Insert a batch of nodes by iterating `insert_node` 1 row at a time. Stops\non the first failure (non-atomic), reports counts so the caller can\ndecide whether to retry / patch / rollback. P2c scope: minimal bulk\nsurface; atomic SQLite Tx wrap is carried until usage observation."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_projection_delete",
+      "kind": "function",
+      "docs": "Delete a NamedProjection by ULID id or name."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_prompt_context",
+      "kind": "function",
+      "docs": "全 builtin slot (or projection_names で subset) を iterate し、 各 slot の\n**配線 (source_uri)** を **wire DB の wiring entry `<persona>.<slot>`** から取得、\n**template** を 3 段優先 (1: persona-pack overlay × `MergeStrategy.merge` / 2: wire\nDB の動的 register projection `<persona>.section.<slot>` / 3: `BUILTIN_PROJECTIONS`)\nで解決して Adapter で fresh fetch + render し、 全 slot を concat した\n**PromptContext** を 1 call で return する `/wake` 用 entry。\n\n設計確定 (2026-06-16 reframe):\n- 配線 SoT = **wire DB wiring entry**。 persona-pack には書かない (= 二重管理 drift 防止)\n- persona-pack `[extra.persona_wire.projections.<slot>]` は **Projection template の\n  Overlay only** (persona 固有 emote / register 等を `MergeStrategy` 指定で被せる)\n- `projection_names: Some([...])` で subset 指定可能 (= 動的 Selection)"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_query",
+      "kind": "function",
+      "docs": "Ad-hoc query: evaluate `spec` (inline or by registered name) against the\nwhole graph and return matched nodes in a slim form (id + type + metadata\nonly). Field-level output filtering is a separate concern carried to a\nfuture \"output values filter\" surface (mirrors mini-app's `output_fields`)."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_render",
+      "kind": "function",
+      "docs": "Render a single registered NamedProjection by name. Counterpart to\n`wire_init` (which renders every projection at once): use `wire_render`\nwhen you want exactly one rendered context, identified by name.\n\nAd-hoc inline rendering (spec + template + target_form passed inline,\nwithout registration) is carried to a follow-up surface — see\n`docs/wire-query-spec.md` §8 Future expansion."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_spec_delete",
+      "kind": "function",
+      "docs": "Delete a Specification by ULID id or name. Projections referencing it via\nspec_ref will start returning dangling-spec errors at render time\n(existing wire_render contract)."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_workflow_fire",
+      "kind": "function",
+      "docs": "Resolve the workflows that would fire for the given input. **Does not**\ninvoke the action itself in P5-a; the returned `ResolvedFire` describes\nwhat should happen so the caller can dispatch (= keeps core sync, keeps\nemit_projection's async machinery at the MCP layer)."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_workflow_list",
+      "kind": "function",
+      "docs": "List registered Workflows (= Nodes of type `workflow_def`), with optional\n`persona_id` / `trigger.kind` / enabled filtering applied in-memory."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_workflow_register",
+      "kind": "function",
+      "docs": "Register a Workflow as a `workflow_def` Node. Routes through the\n[`Workflow`] Domain Entity for all invariant checks (trigger / action\nshape, P5-a kind subset) and through [`workflow_mapper`] for the\nEntity ↔ Node mapping; this function is now a thin orchestrator over\nthe mapper boundary so observability via `wire_query({TypeIs:\n\"workflow_def\"})` continues to work out of the box.\n\ndesign §7.3 Phase 5 — `register / fire / delete` lifecycle invariants\nare owned by the Entity (`Workflow::new` + `Trigger::on_event` +\n`Action::emit_projection` constructors); use cases are pure orchestration."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper",
+      "kind": "module",
+      "docs": "Mapper boundary: [`Wiring`] Domain Entity ↔ wiring [`Node`].\n\nFowler PoEAA Data Mapper — `Node.metadata` JSON is the persistence form\n(storage column-equivalent), [`Wiring`] is the Domain Entity carrying\ninvariants. This module is the **single SoT** for translating between\nthe two shapes; `wire_init` / `wire_render` / `wire_prompt_context` and\nthe doctor probes route through here instead of inlining\n`metadata.get(\"axis\")` / `metadata.get(\"source_uri\")` string surgery.\n\nStorage form (cf. `domain/entity/wiring.rs` module docs):\n\n```text\nNode {\n  id: \"<persona>.<slot>\",        // natural composite key\n  type: \"outline_node\",\n  metadata: {\n    \"persona\":     String,\n    \"axis\":        String,       // legacy storage key for Slot name\n    \"source_uri\":  String,\n    \"maintenance_exempt\"?: bool, // self-attach signal (orphan suppression)\n    ...other passthrough fields...\n  },\n}\n```\n\nThe legacy `metadata[\"axis\"]` key carries the [`Slot`] name (see\n`domain/entity/slot.rs` docs for the axis → Slot vocabulary split). The\nstorage rename to `metadata[\"slot\"]` is a separate persistence migration;\nuntil then this module is the only place where the legacy key is read /\nwritten, so callsites in `use_cases.rs` / doctor probes / tests are free\nof the bare `\"axis\"` literal.\n\nRound-trip property: `node_to_wiring(wiring_to_node(w, opts)?)? == w`\nfor any [`Wiring`] constructed through this module's parsers (modulo the\n`projection_ref` carry, which is stored separately at the\n`ProjectionRegistry` boundary, not on the wiring Node)."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::META_MAINTENANCE_EXEMPT",
+      "kind": "constant",
+      "docs": "`metadata.maintenance_exempt` key — opt-out flag for session-cyclic\nmaintenance (used by `is_self_attached_wiring`)."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::META_PERSONA",
+      "kind": "constant",
+      "docs": "`metadata.persona` key (PersonaId, natural composite key part 1)."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::META_SLOT",
+      "kind": "constant",
+      "docs": "`metadata.axis` key — legacy storage name for the [`Slot`] (natural\ncomposite key part 2). The external Domain vocabulary is `Slot`; this\n`axis` key is the **only** place where the legacy jargon lives, pending\nthe storage rename."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::META_SOURCE_URI",
+      "kind": "constant",
+      "docs": "`metadata.source_uri` key ([`Source`] URI)."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::WIRING_TYPE",
+      "kind": "constant",
+      "docs": "Storage `Node.r#type` literal for a Wiring entry. Single SoT — internal\nuse-case code and tests reference this constant instead of re-typing the\nstring."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::extract_maintenance_exempt",
+      "kind": "function",
+      "docs": "Read the `maintenance_exempt` flag, defaulting to `false` when missing\nor not a boolean."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::extract_persona",
+      "kind": "function",
+      "docs": "Borrow the `persona` field as `&str` if present and a string."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::extract_slot",
+      "kind": "function",
+      "docs": "Borrow the slot field (legacy key `axis`) as `&str` if present and a\nstring. Returns the slot name without applying the [`Slot`] non-empty /\nno-dot invariants — for typed extraction use [`extract_slot_typed`]."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::extract_slot_typed",
+      "kind": "function",
+      "docs": "Validate-and-extract the slot as a typed [`Slot`] VO. Returns `Ok(None)`\nwhen the key is missing; `Err(DomainError::InvalidMetadata)` when the\nvalue is present but violates [`Slot`] invariants."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::extract_source_uri",
+      "kind": "function",
+      "docs": "Borrow the `source_uri` field as `&str` if present and a string."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::node_to_wiring",
+      "kind": "function",
+      "docs": "Strict mapper: build a typed [`Wiring`] from a wiring [`Node`].\n\n`projection_ref` is supplied by the caller because the wiring Node does\n**not** persist the projection ref — that lives at the\n`ProjectionRegistry` boundary, looked up via `projection_naming` rules.\nPass `None` when the projection ref is not (yet) known.\n\nErrors with `DomainError::InvalidMetadata` when required keys\n(`persona` / `axis` / `source_uri`) are missing or violate the VO\ninvariants of [`PersonaId`] / [`Slot`] / [`Source`]."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::wiring_metadata_object",
+      "kind": "function",
+      "docs": "Build a wiring `Node.metadata` object from the natural composite key\nparts. `extras` is merged shallowly on top (later keys win), allowing\ncallers to attach `maintenance_exempt` or arbitrary passthrough fields\nwithout re-typing the canonical key names."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper",
+      "kind": "module",
+      "docs": "Mapper boundary: [`Workflow`] Domain Entity ↔ `workflow_def` [`Node`].\n\nFowler PoEAA Data Mapper — Node JSON metadata is the persistence form\n(storage column-equivalent), [`Workflow`] is the Domain Entity carrying\ninvariants. This module is the **single SoT** for translating between\nthe two shapes; `wire_workflow_register` / `wire_workflow_list` (and any\nfuture workflow use case) route through here instead of inlining\n`metadata[\"trigger\"][\"kind\"]` / `metadata[\"action\"][\"projection_names\"]`\nstring surgery.\n\nStorage form (cf. `domain/entity/workflow.rs` module docs):\n\n```text\nNode {\n  id: \"<workflow_id>\",\n  type: \"workflow_def\",\n  metadata: {\n    \"persona\":  Option<String>,\n    \"trigger\":  { \"kind\": \"on_demand\" | \"on_event\", \"event\"?: String },\n    \"action\":   { \"kind\": \"no_op\" | \"emit_projection\",\n                  \"projection_names\"?: [<slot>] },\n    \"enabled\":  bool,\n  },\n}\n```\n\nRound-trip property: `node_to_workflow(workflow_to_node(w))? == w` for\nany [`Workflow`] constructed through this module's parsers."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::META_ACTION",
+      "kind": "constant",
+      "docs": "`metadata.action` key — action descriptor JSON."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::META_ENABLED",
+      "kind": "constant",
+      "docs": "`metadata.enabled` key — enable flag (defaults to `true` on missing)."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::META_PERSONA",
+      "kind": "constant",
+      "docs": "`metadata.persona` key — owning persona (optional). Single SoT for the\nmetadata key name so callers do not re-type the bare literal."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::META_TRIGGER",
+      "kind": "constant",
+      "docs": "`metadata.trigger` key — trigger descriptor JSON."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::WORKFLOW_TYPE",
+      "kind": "constant",
+      "docs": "Storage `Node.r#type` literal for a Workflow. Single SoT — internal\nuse-case code and tests reference this constant instead of re-typing the\nstring."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::action_to_json",
+      "kind": "function",
+      "docs": "Render an [`Action`] to the persistence JSON shape."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::extract_action_value",
+      "kind": "function",
+      "docs": "Borrow the `action` descriptor JSON; returns a Null borrow when missing."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::extract_enabled",
+      "kind": "function",
+      "docs": "Read the `enabled` flag, defaulting to `true` when missing or non-boolean\n(matches existing tolerant-listing semantics of `wire_workflow_list`)."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::extract_persona",
+      "kind": "function",
+      "docs": "Borrow the optional `persona` field as `&str`."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::extract_trigger_value",
+      "kind": "function",
+      "docs": "Borrow the `trigger` descriptor JSON; returns a Null borrow when missing."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::node_to_workflow",
+      "kind": "function",
+      "docs": "Translate a persisted [`Node`] back into a [`Workflow`] Entity. Surfaces\nstructured `DomainError::InvalidSpec` when the metadata shape is not a\nvalid workflow (= the Node was not produced by [`workflow_to_node`] or\nhas been corrupted)."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::parse_action",
+      "kind": "function",
+      "docs": "Parse a JSON action descriptor into a typed [`Action`]. Surfaces a\nstructured `DomainError::InvalidSpec` on missing `kind` / unsupported\nkind / missing or empty `projection_names` for `emit_projection`."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::parse_trigger",
+      "kind": "function",
+      "docs": "Parse a JSON trigger descriptor into a typed [`Trigger`]. Surfaces a\nstructured `DomainError::InvalidSpec` on missing `kind` / unsupported\nkind / missing `event` for `on_event`."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::trigger_to_json",
+      "kind": "function",
+      "docs": "Render a [`Trigger`] to the persistence JSON shape."
+    },
+    {
+      "path": "persona_wire_core::application::workflow_mapper::workflow_to_node",
+      "kind": "function",
+      "docs": "Translate a [`Workflow`] Entity into the persistence [`Node`] (Math\nbackend `workflow_def` shape)."
+    },
+    {
+      "path": "persona_wire_core::domain",
+      "kind": "module",
+      "docs": "Domain layer — pure entities, value objects, and business rules.\n\n## Sub-layers\n\n- [`graph`] — Math backend Graph (open-vocabulary primitives: Node / Edge /\n  Severity / CRUD / Compute / Constraint / AutoVersion / Repository /\n  Specification). Persona-agnostic. Used as a backend SDK by the Domain\n  Entity layer.\n- [`entity`] — Domain Entity layer (`PersonaId` / `Slot` / `Source` /\n  `Wiring` / `Workflow` / `Projection`). Owns persona-wire vocabulary,\n  invariants, and behavior.\n- [`error`] — `WireError` / `WireResult` shared across the crate.\n\nSee the crate-level \"Three-layer split\" rationale in [`crate`] docs for\nthe design intent behind the split.\n\nBackward-compatible re-exports below keep `domain::specification`,\n`domain::crud` etc. resolvable for existing call sites."
+    },
+    {
+      "path": "persona_wire_core::domain::entity",
+      "kind": "module",
+      "docs": "Domain Entity Layer — persona-wire vocabulary as first-class entities.\n\nSits on top of [`crate::domain::graph`] (Math backend SDK, the\ntenant-agnostic graph primitives) and below the application layer.\n\n# Layer split\n\n- **Math backend** (`crate::domain::graph`) — open-vocabulary graph\n  primitives (Node / Edge / Specification / CRUD / Compute / Constraint /\n  AutoVersion / Repository). Tenant-agnostic, persona-agnostic. Owns no\n  domain knowledge of personas, slots, sources, or projections.\n- **Domain Entity** (this module) — persona-wire's first-class vocabulary\n  (Persona / Slot / Source / Projection / Wiring / Workflow). Uses the\n  Math backend as a persistence SDK; the backend stays unaware of these\n  entities.\n\n# Composition\n\n```text\nProjection (Aggregate Root)\n  — rendering intent (template + spec_ref + plugin dispatch).\n  — the Wire's external OUT surface.\n\nWiring (Entity)\n  ├ persona_id: PersonaId      (natural composite key)\n  ├ slot:       Slot           (natural composite key)\n  ├ source:     Source         (directly owned)\n  └ projection_ref: Option<ProjectionName>  (identity ref, Vernon Rule 3)\n\nWorkflow (Entity)\n  ├ id:         WorkflowId     (surrogate)\n  ├ persona_id: Option<PersonaId>\n  ├ trigger:    Trigger        (OnDemand | OnEvent)\n  ├ action:     Action         (NoOp | EmitProjection { slots: Vec<Slot> })\n  └ enabled:    bool\n```\n\n# Surface policy: Wire's OUT is `Projection`\n\n`Projection` is the only rendering surface exposed to application /\nMCP callers. `Wiring` and `Workflow` are **internal vocabulary** —\nthey are not re-exported at this module root. Application code reading\nraw `Wiring` / `Workflow` would bypass the rendering layer, so direct\naccess goes through the fully qualified\n`crate::domain::entity::{wiring, workflow}` paths and is reserved for\nentity-internal composition or a future Aggregate Root.\n\n# Persistence\n\n`Wiring` and `Workflow` are persisted through the existing Math backend\nRepository (`Node` CRUD via [`crate::domain::graph`]). They do **not**\nintroduce a dedicated Registry / DTO / table. The Projection-specific\n`ProjectionRegistry` (separate table + DTO + Mapper) is intentional —\nProjection is the externally referenced rendering Aggregate Root, while\nWiring / Workflow live behind it as configuration data the Repository\npattern already handles."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle",
+      "kind": "module",
+      "docs": "`Bundle` Domain Entity — scaffolding template that bundles\nSpec / Projection / Wiring / Workflow (+ optional Node / Edge) into a\nsingle TOML document for one-shot install.\n\nAggregate Root identified by [`BundleName`]. The body is the literal TOML\npayload — parsing happens at install time, not at register time, so a\nmalformed bundle can be registered, inspected, then discarded without\ncorrupting the registry.\n\n## Persistence pattern (SoT)\n\nSame PoEAA Registry stance as `Projection`: the application-layer\n[`crate::application::bundle_registry::BundleRegistry`] is the single\nlookup surface. Persistence lives in the `bundles` SQLite table (one row\nper bundle, `name` unique). Install history lives in `bundle_installs`\n(one row per `install` use-case invocation) and feeds the future\nHistory / Force / Undo carry.\n\n## Invariants\n\n- [`BundleName`] / [`BundleVersion`] — non-empty.\n- `body` — non-empty TOML literal. Schema validity is **not** enforced\n  at construction; the install use case parses and reports per-entity\n  errors at dispatch time."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::Bundle",
+      "kind": "struct",
+      "docs": "Registry-shaped Bundle row. `body` carries the literal TOML payload."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::BundleId",
+      "kind": "type_alias"
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::BundleInstallReport",
+      "kind": "struct",
+      "docs": "Result of one bundle install. Always written to the `bundle_installs`\ntable verbatim alongside the bundle id and mode."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::BundleName",
+      "kind": "struct",
+      "docs": "Bundle identifier Value Object. Non-empty.\n\nName conflicts on `register` are resolved by auto-increment (`-1`, `-2`,\n... suffix) at the use-case layer; the entity itself only enforces\nnon-empty."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::BundleRef",
+      "kind": "enum",
+      "docs": "Lookup key for bundle CRUD use cases.\n\nMCP / CLI callers pass a single string; the use case parses it as ULID\nfirst (Crockford base32, 26 chars) and falls back to `BundleName` on\nparse failure."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::BundleVersion",
+      "kind": "struct",
+      "docs": "Bundle version Value Object. Non-empty. SemVer comparison logic is v2\ncarry — v1 stores the literal string and round-trips it untouched."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::ConflictMode",
+      "kind": "enum",
+      "docs": "Conflict resolution mode for `wire_bundle_install`.\n\n- [`ConflictMode::Increment`] (default) — entity name auto-increments on\n  collision (`name` → `name-1` → `name-2` ...). Non-destructive; safe\n  to re-install. The id (ULID) is always newly minted, so the registry\n  never collides on id.\n- [`ConflictMode::Skip`] — leave the existing entity untouched and record\n  the collision in the install report. Idempotent for fixed-name\n  bundles.\n- [`ConflictMode::Error`] — abort the entire install on the first\n  collision. Nothing is written. Strict mode for scaffold-into-empty\n  environments.\n\nForce / override is v2 carry — requires History view + install log\n(`bundle_installs` table is already provisioned)."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::ErrorItem",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::InstalledItem",
+      "kind": "struct",
+      "docs": "Per-entity outcome of one bundle install."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::bundle::SkippedItem",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::domain::entity::context_wiring",
+      "kind": "module",
+      "docs": "`ContextWiring` — per-persona Composition Root (Aggregate Root identity).\n\nMarks the consistency boundary for one persona's context (its\n[`crate::domain::entity::wiring::Wiring`] set and\n[`crate::domain::entity::workflow::Workflow`] set). The boundary is\nrepresented by [`PersonaId`] alone — there is exactly one\n`ContextWiring` per persona, no surrogate id.\n\n# Skinny by design\n\n`ContextWiring` does **not** hold `Vec<Wiring>` / `Vec<Workflow>` in\nmemory. The wirings and workflows that belong to a persona live in the\nMath backend graph (`Node` rows of type `outline_node` / `workflow_def`)\nand are reached through the Repository (`crate::domain::graph`) when a\ncaller actually needs them. The Aggregate Root only carries the identity\nthat says \"these are the rows that move together as one consistency\nunit\".\n\nThe persona-scoped **read view** lives in\n[`wire_context_get`](crate::application::use_cases::wire_context_get):\nthe application use case takes a `ContextWiring` (or its persona id),\nwalks the consistency boundary via the Math backend repository, and\nreturns a summary snapshot. Multi-`Wiring` atomic write boundaries\n(reset / replication / migration) are deliberately not modelled yet;\nuntil a real use case appears, batch writes stay non-atomic at the\napplication surface and the Aggregate Root keeps no in-memory collection\nstate.\n\nKeeping the traversal in the application layer preserves the standard\nDDD layering (`domain → ⊥`, no inbound dependency on application or\ninfrastructure) — the same discipline the rest of `domain::entity`\nfollows.\n\n# Surface\n\nNot re-exported at the entity module root. The Wire's external surface\nis [`Projection`]; the Aggregate Root is internal vocabulary, used by\nentity-layer composition (today) and by future application code that\nneeds an explicit consistency-boundary handle.\n\n[`PersonaId`]: crate::domain::entity::persona_id::PersonaId\n[`Projection`]: crate::domain::entity::projection::Projection"
+    },
+    {
+      "path": "persona_wire_core::domain::entity::context_wiring::ContextWiring",
+      "kind": "struct",
+      "docs": "Per-persona Composition Root.\n\nIdentity-only Aggregate Root. See the [module docs](self) for why it\ndoes not hold an in-memory `Vec<Wiring>` / `Vec<Workflow>`."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::persona_id",
+      "kind": "module",
+      "docs": "`PersonaId` — owner identity Value Object.\n\nWraps a non-empty `String` that names a persona registered in the external\n`persona-pack` SoT. The persona's full identity (name / role / overlays)\nlives in `persona-pack`; `ContextWiring` only carries the id by reference.\n\n## Invariants\n\n- **non-empty** — `PersonaId::new(\"\")` returns `DomainError::InvalidPersonaId`.\n\nCharacter set / length bounds are persona-pack's responsibility (external\nSoT). Domain Entity layer keeps the contract minimal so id values coming\nfrom any persona-pack revision remain compatible."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::persona_id::PersonaId",
+      "kind": "struct",
+      "docs": "Persona identifier Value Object.\n\nSee [module docs](self) for invariants and SoT split with `persona-pack`."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection",
+      "kind": "module",
+      "docs": "`Projection` Domain Entity — rendering intent for a `Wiring`.\n\nAggregate Root identified by [`ProjectionName`]. Carries the rendering\nintent (which Specification to evaluate + which template / form / plugin\nto render with). Persisted via the application-layer\n[`crate::application::projection_registry::ProjectionRegistry`] using the\nData Mapper pattern (Fowler PoEAA Ch.10).\n\n## Persistence pattern (SoT)\n\n- **PoEAA Registry** ([`crate::application::projection_registry`]) —\n  named application-layer lookup surface (`register / get / list`).\n  This is the only entry point CLI / MCP / use cases use to reach a\n  `Projection`.\n- **PoEAA Data Mapper** ([`crate::application::projection_mapper`]) —\n  shape translation between the [`Projection`] Entity (this module)\n  and `NamedProjection` (the SQLite row mirror DTO). The Registry\n  owns the Mapper bridge — persona-wire takes the **narrow** reading\n  of Fowler's Mapper class and does not split out a separate\n  `Mapper<Dto, Entity>` trait until a second parallel mapper exists.\n- **DDD Repository** — **not adopted.** A Domain Port trait would\n  collapse the application-layer Registry into a pass-through; the\n  PoEAA Registry stance is intentional. See\n  [`crate::application::projection_registry`] module docs for the\n  recorded decision.\n\n## Invariants\n\n- [`ProjectionName`] / [`SpecName`] / [`ProjectionTemplate`] — non-empty.\n- [`TargetForm`] — value domain enforced by the enum itself.\n- [`PluginDispatch`] — `Default` (= framework defaults) or `Custom { engine,\n  kind, config }` with non-empty `engine` / `kind`. The 3 Optional-field\n  shape used at the persistence boundary collapses to these two states;\n  illegal combinations (engine only / kind only) are rejected at the\n  mapper boundary.\n\nCross-aggregate referential integrity (the [`SpecName`] actually resolving\nagainst a `SpecRegistry` row) is **not** enforced here — that is a\nsoft reference handled by `wire_render` / `wire_doctor` at use-case time.\n\n## Vernon IDDD Rule 3 (Identity-by-Name)\n\n[`SpecName`] is the Identity Value Object that lets `Projection` reference\nthe `Specification` aggregate by name only (no aggregate-to-aggregate\npointer). The legacy type alias [`SpecRef`] is preserved as a re-export\nfor back-compat — new code should prefer `SpecName`."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::PluginDispatch",
+      "kind": "enum",
+      "docs": "Plugin dispatch hints, modelled to eliminate illegal states at the type\nlevel (Yaron Minsky / Jane Street, \"Make Illegal States Unrepresentable\").\n\nThe persistence shape carries 3 Optional fields (`template_engine` /\n`projection_kind` / `projection_config`); only two combinations have\nmeaning — all-`None` (framework defaults) and engine+kind both set\n(explicit Custom dispatch). The remaining 6 combinations are illegal\nand rejected at the mapper boundary."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::Projection",
+      "kind": "struct",
+      "docs": "Domain Entity for a registered persona-wire projection.\n\nConstructed via [`Projection::new`] (typed VO args) or\n[`Projection::from_parts`] (raw string args, applies all VO validations).\nImmutable — updates are expressed by constructing a new instance and\nupserting through `ProjectionRegistry`."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::ProjectionId",
+      "kind": "type_alias"
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::ProjectionName",
+      "kind": "struct",
+      "docs": "Projection identifier Value Object. Non-empty."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::ProjectionTemplate",
+      "kind": "struct",
+      "docs": "Render template body Value Object. Non-empty.\n\nTemplate grammar (mustache-like / handlebars) is owned by the\ninfrastructure rendering layer; this VO only enforces non-emptiness."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::SpecName",
+      "kind": "struct",
+      "docs": "Identity Value Object for a registered `Specification`. Non-empty.\n\nVernon IDDD Rule 3 (Reference Other Aggregates by Identity Only) — the\n`Projection` aggregate references the `Specification` aggregate solely by\nthis typed name. The `SpecRegistry` lookup happens at use-case time; this\nVO only carries the typed name and its non-empty invariant.\n\nThe legacy alias [`SpecRef`] is preserved as a `pub type` re-export for\nback-compat — new code should prefer `SpecName`."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::SpecRef",
+      "kind": "type_alias",
+      "docs": "Back-compat alias for [`SpecName`]. Kept so external crates (and the\n`spec_ref` wire/SQL field name) can refer to the same VO without churn.\nNew code should use `SpecName` directly."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::SpecificationId",
+      "kind": "type_alias"
+    },
+    {
+      "path": "persona_wire_core::domain::entity::projection::TargetForm",
+      "kind": "enum",
+      "docs": "Render output form. Domain vocabulary — moved from `application` so\n`Projection` Entity has no application-layer dependency."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::slot",
+      "kind": "module",
+      "docs": "`Slot` Value Object — 1 binding name within a persona's context.\n\nA `Slot` identifies a single [`crate::domain::entity::wiring::Wiring`]\ninside one persona. Concrete values seen in production are `mailbox` /\n`mail` / `news` / `priorities` etc. — each is **one binding name**, not\nan orthogonal axis. The legacy storage shape (and several application\ncallsites) carries this same concept under the field name `axis`; that\nis a jargon symptom from before the entity layer existed — `mailbox` and\n`mail` are not direction-of-variance \"axes\", they are sibling slots in\none persona's context. `Slot` is the proper Domain vocabulary.\n\n# Invariants\n\n- **non-empty**\n- **no `.`** — the natural composite key with `PersonaId` is rendered as\n  `format!(\"{persona_id}.{slot}\")` at the storage boundary (`Node.id`).\n  Allowing `.` inside a slot name would make the concatenation ambiguous.\n\nCharacter set / length bounds beyond the above are intentionally left to\nthe persistence boundary so future storage rename / id scheme migrations\nstay local."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::slot::Slot",
+      "kind": "struct",
+      "docs": "Wiring slot name Value Object.\n\nSee [module docs](self) for invariants and the Slot ↔ legacy `axis`\nvocabulary split."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::source",
+      "kind": "module",
+      "docs": "`Source` Entity — SoT location (URI) that a `Wiring` points at.\n\nWraps a URI string with minimal Domain-side invariants. The detailed parse\n(typed scheme / host / path / query view) lives in the infrastructure layer\n([`crate::infrastructure::wire_uri::WireUri`]) and is used by the adapter\ndispatcher (`PluginRegistry::route`). Domain Entity layer intentionally\navoids depending on infrastructure types.\n\n## Invariants\n\n- **non-empty**\n- **scheme prefix present** — value matches `<scheme>:<rest>` where\n  `<scheme>` is non-empty.\n\nStrict scheme grammar validation (ALPHA-first, ALPHA/DIGIT/`+-.`) is the\ninfrastructure layer's concern; surfacing it on construction belongs to\nthe adapter route step, not to the Domain Entity. This keeps Source\ncheap to construct and free from infra coupling.\n\nOwned by [`crate::domain::entity::wiring::Wiring`] (Step C land carry)."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::source::Source",
+      "kind": "struct",
+      "docs": "Source URI Value Object.\n\nSee [module docs](self) for invariants and the rationale behind the\nminimal Domain-side validation.\n\n`scheme_len` caches the byte length of the scheme prefix (the substring\nbefore `:`). Computed once at construction and reused by [`Source::scheme`]\nso the accessor stays `panic!` / `expect` free by construction — no\nruntime re-parse, no `expect(\"invariant\")` on a method that is called\nafter deserialization."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::wiring",
+      "kind": "module",
+      "docs": "`Wiring` Entity — 1 slot binding within one persona's context.\n\nA `Wiring` carries the natural composite key `(PersonaId, Slot)`, owns a\n[`Source`] directly, and refers to a registered\n[`crate::domain::entity::projection::Projection`] by identity\n([`ProjectionName`]) — Vernon IDDD Rule 3 (cross-aggregate reference by\nidentity).\n\n`Wiring` is **internal** to the entity layer: the Wire's external surface\nis `Projection`, and reading raw `Wiring` data from the application would\nbypass the rendering boundary. See the module-level \"Surface policy\" in\n[`crate::domain::entity`] for details.\n\n# Vocabulary (Slot vs. legacy `axis`)\n\nSeveral legacy callsites and the storage shape carry the slot concept\nunder the field name `axis` (`Node.metadata[\"axis\"]`,\n`application::projection_naming::workflow_emit_projection_name`,\n`<persona>.section.<axis>` derive). That name is a jargon placeholder:\n`mailbox` / `mail` / `news` are not orthogonal axes, they are sibling\nslot names inside one persona's context (see\n[`crate::domain::entity::slot`] module docs). The entity carries\n[`Slot`]; the mapper boundary translates `Slot ↔ metadata[\"axis\"]` until\nthe storage rename is performed.\n\n# Identity\n\nIdentity is the **natural composite key** `(PersonaId, Slot)`. The\nexisting graph storage keys wiring nodes by `format!(\"{persona}.{slot}\")`,\nand [`Wiring::storage_node_id`] exposes that legacy node-id form as the\nbridge. A surrogate key (UUID) shape is plausible long-term but is a\nseparate persistence migration; the entity layer itself does not commit\nto surrogate keys.\n\n# Invariants\n\n- `persona_id` + `slot` are validated through their VO constructors.\n- `source` carries the SoT URI ([`Source`] enforces non-empty + scheme).\n- `projection_ref` is optional — a wiring may exist before its renderer\n  projection is registered. The runtime treats a missing projection as a\n  skip + warning rather than a hard error.\n\n# Persistence\n\nPersisted through the existing Math backend Repository (`Node` CRUD via\n[`crate::domain::graph`]). No dedicated Registry / DTO / table — see the\n\"Persistence\" section in [`crate::domain::entity`] for the rationale."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::wiring::Wiring",
+      "kind": "struct",
+      "docs": "Wiring Domain Entity.\n\nConstructed via [`Wiring::new`] (typed VO args) or [`Wiring::from_parts`]\n(raw string args, applies all VO validations). Immutable — updates are\nexpressed by constructing a new instance and re-persisting through the\n(future) Wiring mapper."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::workflow",
+      "kind": "module",
+      "docs": "`Workflow` Entity — trigger-driven autonomous binding within a persona's\ncontext.\n\nSibling of [`crate::domain::entity::wiring::Wiring`]. Both are persisted\nthrough the existing Math backend Repository (`Node` CRUD) and live\nbehind the Wire's external rendering surface ([`Projection`]); neither\nis re-exported at the entity-module root. See the module-level \"Surface\npolicy\" / \"Persistence\" sections in [`crate::domain::entity`].\n\n[`Projection`]: crate::domain::entity::projection::Projection\n\n# Storage form (legacy bridge)\n\nPersisted as a `Node` with `type = \"workflow_def\"` and metadata:\n\n```text\nNode {\n  id: \"<workflow_id>\",\n  type: \"workflow_def\",\n  metadata: {\n    \"persona\":  Option<String>,\n    \"trigger\":  { \"kind\": \"on_demand\" | \"on_event\", \"event\"?: String },\n    \"action\":   { \"kind\": \"no_op\" | \"emit_projection\", \"projection_names\"?: [<slot>] },\n    \"enabled\":  bool,\n  },\n}\n```\n\nThe mapper boundary (application use cases that build / read this Node)\nis responsible for translating `Vec<Slot>` ↔ `metadata[\"projection_names\"]`.\n\n# Trigger / Action vocabulary\n\n- Triggers: `OnDemand`, `OnEvent { event }`\n- Actions:  `NoOp`, `EmitProjection { slots: Vec<Slot> }`\n\nThe entity holds [`Slot`] directly for the action target. Some legacy\ncallsites still describe the same field as an \"axis name\" — that is the\njargon predating the entity layer (see [`crate::domain::entity::slot`]\nmodule docs); the entity converges on `Slot`, and the mapper layer\nreconciles the wire-format `Vec<String>` until the storage rename is\nperformed.\n\nFuture-only variants (e.g. cron / metadata_changed triggers, set_metadata\n/ fire_mailbox actions) are intentionally **not** added until they have\nan actual use case."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::workflow::Action",
+      "kind": "enum",
+      "docs": "Workflow action — what the workflow does when it fires.\n\n`EmitProjection.slots` carries `Vec<Slot>` (Domain vocabulary). The\nlegacy storage shape `metadata[\"action\"][\"projection_names\"]` is a\n`Vec<String>` of slot names; the mapper boundary translates between\nthe two until the storage rename land."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::workflow::Trigger",
+      "kind": "enum",
+      "docs": "Workflow trigger — what causes the workflow to fire.\n\nYaron Minsky \"Make Illegal States Unrepresentable\" pattern: the legacy\n`{\"kind\": ..., \"event\"?: ...}` JSON shape is rebuilt as a sum type so\nthat `OnEvent` without an `event` payload is unconstructible."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::workflow::Workflow",
+      "kind": "struct",
+      "docs": "Workflow Domain Entity.\n\nImmutable once constructed. `enabled` is reflected by reconstructing the\nEntity; the Math backend Repository (`Node` CRUD) handles persistence."
+    },
+    {
+      "path": "persona_wire_core::domain::entity::workflow::WorkflowId",
+      "kind": "struct",
+      "docs": "Workflow surrogate identifier Value Object. Non-empty.\n\nUnlike `Wiring` (natural composite key `(PersonaId, Slot)`), `Workflow`\nuses a caller-supplied surrogate string id. Multiple workflows on the\nsame persona / trigger are explicitly allowed by the existing API; the\n`WorkflowDuplicateTrigger` doctor probe surfaces such cases as advisory\nfindings rather than rejecting them at construction."
+    },
+    {
+      "path": "persona_wire_core::domain::error",
+      "kind": "module",
+      "docs": "Error types layered by responsibility.\n\n- [`DomainError`] — pure domain failures (invalid entity construction,\n  constraint violations, unresolved references). Step C carry: every\n  `domain::entity::*` constructor returns `Result<_, DomainError>`.\n- [`WireError`] — top-level facade that wraps `DomainError` via `From`\n  plus residual infrastructure / catch-all variants (`Storage` / `Other`).\n  Application + Infrastructure layers may surface either layer's error.\n\nFuture split (Application / Infrastructure dedicated enums) is carry —\ncurrent scope keeps `Storage` / `Other` flat under `WireError`."
+    },
+    {
+      "path": "persona_wire_core::domain::error::DomainError",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::domain::error::WireError",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::domain::error::WireResult",
+      "kind": "type_alias"
+    },
+    {
+      "path": "persona_wire_core::domain::graph",
+      "kind": "module",
+      "docs": "Math backend Graph — open-vocabulary graph primitives.\n\nPure graph primitives (Node / Edge / Severity / CRUD / Compute / Constraint /\nAutoVersion / Repository / Specification). Tenant-agnostic, persona-agnostic.\n\nDomain knowledge (persona-wire vocabulary) lives in `domain::entity` and uses\nthis module as a backend SDK. See the crate-level \"Three-layer split\"\nrationale in [`crate`] docs."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::autoversion",
+      "kind": "module",
+      "docs": "AutoVersion primitive — append-only version chain with diff/rollback.\n\nEvery update to a node/edge inserts a new row with incremented `version`\nand `prev_id` pointing to the previous version. Latest row wins for default\nreads; historical rows kept for diff/rollback."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::autoversion::VersionRecord",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::autoversion::VersionTargetKind",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::compute",
+      "kind": "module",
+      "docs": "Compute primitive — traversal + execution + constraint eval.\n\nHandles 3 axes within one primitive:\n1. Traversal     — BFS graph walk bounded by `max_depth` (P1: 1 hop default)\n2. Execution     — workflow run / step transition (P5 carry)\n3. Constraint    — bulk eval of constraint-kind edges (P3 carry)"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::compute::TraversalResult",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::compute::traverse",
+      "kind": "function",
+      "docs": "BFS traverse from `start`, visiting each reachable node up to `max_depth`\nhops via `repo.list_edges_from`. Each visited node is run through\n`spec.is_satisfied_by` and collected if it matches.\n\nEdges are followed in source→target direction only (1-direction reachability).\n`Specification::Reachable` variants inside `spec` evaluate to `false` here\nbecause predicate-level eval cannot recurse; compose `spec` with\n`TypeIs` / `MetadataEq` instead."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::constraint",
+      "kind": "module",
+      "docs": "Constraint primitive — evaluate edges of `kind=\"constraint\"` against current graph state."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::constraint::ConstraintViolation",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::constraint::evaluate",
+      "kind": "function"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::crud",
+      "kind": "module",
+      "docs": "CRUD primitive — node/edge level commands routed to the storage port."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::crud::CrudCommand",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node",
+      "kind": "module",
+      "docs": "Graph primitive — Node + Edge entities (open vocabulary type system).\n\nIdentity model (v0.7):\n- `id` (= `NodeId` / `EdgeId`) is a ULID generated by the server — opaque,\n  immutable, primary key, the slot that `prev_id` chains follow.\n- `name` is a human-readable label (no uniqueness constraint). Optional on\n  `Edge` for backward compatibility with workflow id-as-name callers.\n- At MCP boundaries: `wire_*_create` accepts `name` only and server mints\n  the ULID; subsequent ops accept `id_or_name` and resolve internally\n  (ULID parse → fall back to name lookup → error on multiple hits)."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node::Edge",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node::EdgeId",
+      "kind": "type_alias"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node::Node",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node::NodeId",
+      "kind": "type_alias"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node::Severity",
+      "kind": "enum"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node::TypeName",
+      "kind": "type_alias"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::node::ulid_from_seed",
+      "kind": "function",
+      "docs": "Derive a deterministic `Ulid` from a seed string. Used by tests, the\nbundle TOML loader, and the manual migration path that needs stable ids\nacross runs (e.g. share an id between `Node.id` and `Edge.src_node`).\n\nNot for production identity — server-side row creation uses `Ulid::new()`\nso the timestamp half stays monotonic."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::repository",
+      "kind": "module",
+      "docs": "Repository port — abstract graph persistence operations.\n\nImplemented by `infrastructure::storage::SqliteStorage`, and can be\nmocked for in-memory tests of Domain Core / Application use cases."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::repository::Repository",
+      "kind": "trait"
+    },
+    {
+      "path": "persona_wire_core::domain::graph::specification",
+      "kind": "module",
+      "docs": "Specification primitive — first-class composable query object.\n\nBP reference: Specification pattern (Evans / Fowler / Greg Young).\n`Specification` is the **domain object** representing a query predicate;\nApplication layer holds a registry that stores composed Specifications by name."
+    },
+    {
+      "path": "persona_wire_core::domain::graph::specification::Specification",
+      "kind": "enum",
+      "docs": "Specification — composable query predicate over the graph."
+    },
+    {
+      "path": "persona_wire_core::domain::port",
+      "kind": "module",
+      "docs": "Domain Ports — outbound (Driven) trait contracts owned by the Domain.\n\nHexagonal Architecture (Cockburn 2005) では「出力の方向性 (= 何をどう外に出すか)」\nを Domain が宣言し、 技術依存の実装は Adapter (Infrastructure) が担う。 本 module\nはその Driven Port を集約する。\n\nAdapter (impl) は [`crate::infrastructure`] 配下、 default 同梱 adapter は\n[`crate::infrastructure::projection`]。"
+    },
+    {
+      "path": "persona_wire_core::domain::port::projection_renderer",
+      "kind": "module",
+      "docs": "`ProjectionRenderer` — Driven Port for projection rendering.\n\nDomain が宣言する「Projection (= Wire の OUT 表面) をどう render するか」 の\n契約 IF。 default static path は [`crate::infrastructure::projection::StaticProjection`]\nが実装し、 MCP / その他の OUT 経路は同 trait を impl する別 Adapter が担う。\n\n## なぜ Domain Port なのか\n\nProjection 自体が Domain Entity ([`crate::domain::entity::projection::Projection`])\nであり、 「どの Source から取った data を どう render するか」 の方向性は\nDomain Logic に属する。 したがって render 契約も Domain が握り、 具象実装は\nAdapter (Infrastructure) が hexagonal の OUT 側で差し込む。\n\n## Hole-1 解消: `TemplateEngine` 依存の排除\n\n以前は [`ProjectionInput`] が `&dyn TemplateEngine` を持ち、 Port が Infrastructure\n型へ依存していた (Domain → Infrastructure 違反)。 Adapter 側で `TemplateEngine` を\nhold する形に signature を改修し、 Port 入力からは engine を排除した。"
+    },
+    {
+      "path": "persona_wire_core::domain::port::projection_renderer::ProjectionInput",
+      "kind": "struct",
+      "docs": "Projection への入力束。 borrowed view で渡し、 lifetime 1 つで圧縮。\n\nInfrastructure 型 (`TemplateEngine` 等) への参照は持たない — Domain Port の\n入力束として技術依存ゼロを保つ (Hole-1 解消)。"
+    },
+    {
+      "path": "persona_wire_core::domain::port::projection_renderer::ProjectionRenderer",
+      "kind": "trait",
+      "docs": "`ProjectionRenderer` Plugin。 render 動作の種別 (`static` / `mcp_tool` 等) を Plugin 化。\n\ndyn-compatible にするため `#[async_trait]` で `Pin<Box<Future>>` 化。"
+    },
+    {
+      "path": "persona_wire_core::infrastructure",
+      "kind": "module",
+      "docs": "Infrastructure layer — drives Storage and Rendering as adapters.\n\n- [`storage`]   — SQLite (rusqlite) adapter implementing graph persistence\n- [`rendering`] — Prompt / Markdown / JSON / ASCII rendering adapter (thin wrapper over `template`)\n- [`template`]  — Template Engine Plugin trait (`HandlebarsEngine` default impl)\n- [`adapter`]   — Layer 6 SoT Adapter Plugin trait (`FileAdapter`; mini-app は外部 crate `persona-wire-adapter-mini-app`)"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::adapter",
+      "kind": "module",
+      "docs": "Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.\n\nThe core keeps only the Adapter trait and the bundled `FileAdapter`. Each\nwiring entry node's `metadata.source_uri` is dispatched by scheme — plugin\naxis 1 of 3.\n\nBundled scheme:\n- `file://<absolute-or-tilde-path>` — reads the raw contents via\n  std::fs::read (json/toml parsing is a future extension; currently the\n  contents are returned as a string).\n\n  Query param extensions (R5):\n  - `?tail=last_section` — the trailing section (split at markdown `## `\n    h2 boundaries; returns everything from the last h2 onward)\n  - `?tail_n=<N>` — the last N lines (line-based; capped at\n    [`TAIL_N_MAX`] = 1000 lines as a context size guard)\n  - no query param → fetch the whole file (backward-compat)\n  - unknown / unparsable values → graceful fail = whole-file fetch\n\n  Metadata (R4):\n  - `size_bytes` — size of the whole file in bytes (the original file\n    size, not the post-tail body size)\n  - `modified_at` — last modified time (Unix epoch seconds, u64)\n  - `metadata` — nested metadata object (`filename` / `full_path` /\n    `last_modified` / `size_bytes` / `age_days`)\n\nProvided by external crates (split out in P3b):\n- `mini-app://<table>...` → `persona-wire-adapter-mini-app` crate (`MiniAppAdapter`)\n\nThe outline / persona-pack / journal schemes are carried by external\nadapter crates.\n\n## Adapter authoring guide (conventions for adding a new scheme)\n\nAdd one crate per scheme, named `persona-wire-adapter-<scheme>`, to the\nworkspace. The canonical reference is `persona-wire-adapter-rss` (minimal,\nstateless, direct SDK integration).\n\n- **Three-function split**: `parse_<scheme>_uri` ([`WireUri`] → Spec struct),\n  transport fetch (no domain knowledge), and `normalize_<scheme>`\n  (raw response → Wire JSON shape). HTTP transport is provided by the\n  shared `persona-wire-transport-http` crate (promoted 2026-07-07);\n  HTTP-backed adapters use its `HttpClient` instead of hand-rolling\n  `reqwest` calls.\n- **Guard constants**: declare item caps / timeouts / text truncation as\n  `pub const` (rss example: `DEFAULT_LIMIT=20` / `FETCH_TIMEOUT=30s` /\n  `SUMMARY_MAX_CHARS=500`). Align timeouts with existing adapters\n  (`DEFAULT_RPC_TIMEOUT` in the mcp adapter).\n- **Error / query conventions**: missing or invalid required components\n  (empty host, `limit=0`, ...) fail loud with [`WireError::Storage`].\n  Unknown query keys are silently ignored (forward-compat convention).\n  Missing output fields are `null`; timestamps are RFC3339. A missing\n  source is graceful (`FileAdapter` in this file: non-existent path →\n  `body: null` with `Ok`).\n- **Docs**: `#![warn(missing_docs)]` plus a crate-root `//!` header with\n  three sections: Architecture / URI grammar / Output shape.\n- **Tests**: parse / normalize are offline unit tests over inline\n  fixtures. Never add tests that depend on live network access.\n- **Registration**: add one `.with_adapter(XxxAdapter)` line to the\n  `PluginRegistry::default_builder_for_wire()` chain on the boot side\n  (`persona-wire-mcp/src/lib.rs`). Scheme collisions fail fast at\n  registry build time.\n- **Pagination**: adapters that support `?limit=N` where `N` can exceed a\n  single upstream page MUST drive the pagination loop internally inside\n  `Adapter::fetch` and emit a truthful `has_more` field distinguishing\n  truncated-at-limit from upstream-exhausted. Cursor form (Link header,\n  NextToken, offset, ...) is a private implementation detail — the wire\n  layer never sees it. Adapters that ignore `?limit` (single-shot fetches\n  such as `FileAdapter`) simply return their canonical shape.\n\n## External service integration policy (decided 2026-07-07)\n\n- When a service exposes a public SDK / API, call it **directly** from the\n  adapter. Do not relay through an MCP integration (this is a core benefit\n  of the Rust + Adapter pattern).\n- UX first: never make the user repeat authentication. Receive credentials\n  via environment variables and never embed secrets in `source_uri`.\n  Choose the auth mechanism per SDK on a case-by-case basis.\n- Adapter expansion targets coverage (including minor services), not\n  demand-ranked prioritization. The only exclusion criterion is that the\n  service has been discontinued."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::adapter::Adapter",
+      "kind": "trait",
+      "docs": "Adapter trait — plugin axis 1 of 3 (SoT Adapter).\n\nUses `#[async_trait]` (`Pin<Box<Future>>`) to stay dyn-compatible; the\nPluginRegistry holds multiple impls uniformly as `Arc<dyn Adapter>`.\n\nResponsibilities as an ACL Facade:\n- URI grammar parsing is centralized on the registry side\n  (`WireUri::parse`). An Adapter receives the parsed `WireUri` and handles\n  scheme-specific semantic interpretation, external SDK calls, and\n  translation into Wire definition JSON.\n- Existing adapters with internal parsers may keep extracting the full URI\n  string via `uri.as_raw()` for now (carry); new adapters should use typed\n  access (`host()` / `query()` etc.)."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::adapter::FileAdapter",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::adapter::TAIL_N_MAX",
+      "kind": "constant",
+      "docs": "Upper bound for `N` in `?tail_n=<N>` (context size guard).\nValues above this are clamped before taking the tail lines."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::projection",
+      "kind": "module",
+      "docs": "Projection Adapters — concrete [`ProjectionRenderer`] implementations.\n\nDefault 同梱 = [`StaticProjection`] (`TemplateEngine` 委譲のみ)。 LLM /\nMCP tool 等の OUT は別 crate の Adapter で同 trait を impl して差し込む。\n\n[`ProjectionRenderer`]: crate::domain::port::ProjectionRenderer"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::projection::static",
+      "kind": "module",
+      "docs": "`StaticProjection` — core 同梱 default Adapter for [`ProjectionRenderer`].\n\n`TemplateEngine` で render するだけの「静的」 form。 `wire_init` / `wire_render` /\n`wire_prompt_context` の既存 path と挙動 1:1 等価。\n\n## Hole-1 解消後の構造\n\n以前は呼び出し側が [`ProjectionInput::template_engine`] で engine 参照を毎回\n渡していたが、 Port 化に伴い `ProjectionInput` から engine field を除去した。\nAdapter は constructor で `Arc<dyn TemplateEngine>` を hold し、 `render` 内で\n自前の engine を使う。\n\n[`ProjectionInput::template_engine`]: crate::domain::port::ProjectionInput"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::projection::static::StaticProjection",
+      "kind": "struct",
+      "docs": "Core 同梱 default projection。\n\n構築時に `Arc<dyn TemplateEngine>` を hold し、 `render` でその engine に\n`template` + `spec_result` を流すだけ。"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::rendering",
+      "kind": "module",
+      "docs": "Rendering adapter — render extracted graph subsets into output forms.\n\nEngine: `handlebars` (Mustache superset) — supports section iteration\n(`{{#each list}}…{{/each}}`), conditionals (`{{#if cond}}…{{/if}}`),\ndotted path lookup (`{{a.b.c}}`), and the existing scalar substitution\nsyntax (backward-compatible with the P1 minimal engine).\n\nHTML-escape is **disabled** globally: wire emits markdown / prompt /\njson / ascii, none of which want HTML entity encoding (`<` → `&lt;`)."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::rendering::render",
+      "kind": "function",
+      "docs": "Render `template` against `data` using a handlebars engine.\n\n# Deprecated (P3a Phase 2 (b))\n\nThe use_case layer now resolves the engine via\n[`PluginRegistry`](crate::application::plugin_registry::PluginRegistry).\nNew callers should obtain `registry.engine(\"handlebars\")` and call\n`engine.render(template, data)` instead of going through this free function.\nKept for backward compat with external callers; will be removed at the end\nof P3a (after Phase 3 external crate animation proof).\n\nBehaviour (unchanged):\n- Scalar substitution: `{{key.path}}` looks up dotted JSON paths.\n- Section iteration: `{{#each list}}{{this.field}}{{/each}}` walks arrays.\n- Conditionals: `{{#if cond}}…{{/if}}` evaluates truthiness.\n- Missing paths render as the empty string (handlebars default).\n- HTML escape is OFF (markdown/prompt/json/ascii outputs preserved verbatim).\n- On template parse / render error, returns a `{{render-error: <msg>}}`\n  prefix followed by the raw template literal so callers can diagnose\n  syntax issues at-a-glance (never panics).\n- `target_form` is currently informational; future variants (e.g. JSON-array\n  wrapping) will dispatch on this."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::storage",
+      "kind": "module",
+      "docs": "SQLite storage adapter.\n\nP1 scope: type_registry / nodes / edges / versions schema + CRUD primitive.\nspecifications / projections / workflow_runs tables are P2+ carry."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::storage::ProjectionFullRow",
+      "kind": "type_alias",
+      "docs": "Row tuple returned by `get_projection_full_*` / `list_projections_full`:\n`(id, name, spec_ref, template, target_form, created_at, updated_at)`."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::storage::SpecificationFullRow",
+      "kind": "type_alias",
+      "docs": "Row tuple returned by `get_specification_full_*` / `list_specifications_full`:\n`(id, name, expr_json, created_at, updated_at)`."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::storage::SqliteStorage",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::storage::default_db_path",
+      "kind": "function",
+      "docs": "Resolve the default DB path for persona-wire. Follows the persona-x family\nconvention (= persona-work `store-sqlite/src/lib.rs:96-109`):\n\n1. `$XDG_DATA_HOME/persona-wire/store.db` if `XDG_DATA_HOME` is set\n2. `$HOME/.persona-wire/store.db` otherwise\n\nEnv override (`PERSONA_WIRE_DB`) and CLI `--db` override are the caller's\nresponsibility (the CLI / MCP wrapper applies that precedence before\nfalling back to this helper)."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::template",
+      "kind": "module",
+      "docs": "Template Engine Plugin trait — Plugin 軸 2 / 3。\n\nhandlebars 既存実装を `HandlebarsEngine` として trait 実装に再パッケージし、\n外部 crate (例: `wire-template-jinja` / `wire-template-tera`) が同じ surface で\n差し込めるようにする。\n\n既存 `rendering::render` free fn は本 trait の薄い `HandlebarsEngine` 委譲に\n移行済 (call site 維持、 後方互換)。\n\n## Plugin author 視点\n\n```ignore\nuse persona_wire_core::infrastructure::template::TemplateEngine;\nuse persona_wire_core::domain::error::WireResult;\n\npub struct JinjaEngine { /* ... */ }\n\nimpl TemplateEngine for JinjaEngine {\n    fn id(&self) -> &'static str { \"jinja\" }\n    fn render(&self, template: &str, context: &serde_json::Value) -> WireResult<String> {\n        // minijinja::Environment で render\n        todo!()\n    }\n}\n```"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::template::HandlebarsEngine",
+      "kind": "struct",
+      "docs": "Core 同梱 default engine。 handlebars (Mustache superset) を薄くラップ。\n\nbehaviour:\n- Scalar substitution: `{{key.path}}`\n- Section iteration: `{{#each list}}…{{/each}}`\n- Conditionals: `{{#if cond}}…{{/if}}`\n- Missing paths: empty string (strict_mode=false)\n- HTML escape: OFF (markdown/prompt/json/ascii 出力で `<` → `&lt;` 化を避ける)\n- 解析/render error は `{{render-error: <msg>}} <template>` 形式で返す (panic しない)"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::template::TemplateEngine",
+      "kind": "trait",
+      "docs": "Template Engine Plugin。 1 engine = 1 impl (`handlebars` / `jinja` / `tera` 等)。\n\nNamedProjection 側に登録される `template_engine` field と `id()` を突き合わせて\n`PluginRegistry` が dispatch する (P3a では `id()` 登録のみ、 dispatch 配線は\nuse_cases 移行と並走で P3a 後段で実施)。"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::wire_uri",
+      "kind": "module",
+      "docs": "WireUri — Wire 内で扱う URI の typed view (Layer 6 Adapter dispatch の共通入力)。\n\n目的:\n- URI grammar parse を **registry 一手に集約** (各 Adapter が strip_prefix を重複実装する\n  drift を構造除去)。\n- Adapter は `scheme()` / `host()` / `path()` / `query()` の typed access か、 互換のための\n  `as_raw()` (full URI 文字列) のどちらかを選んで使う。\n\n適用範囲 (RFC 3986 minimal subset):\n- `scheme:[//authority]path[?query][#fragment]`\n- authority は host 1 要素のみ (userinfo / port は parse しない、 必要になったら拡張)\n- query は `key=value&key=value` flat form のみ (multi-value は最初の 1 個を採用)\n\nACL Facade 観点:\n- URI 形式の定義責任は **Wire 側** (本 module + `PluginRegistry::route`)。\n- 外部 SDK (persona-pack / mini-app / sqlite / file 等) の固有 grammar は Adapter 内に閉じる。"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::wire_uri::WireUri",
+      "kind": "struct",
+      "docs": "Parsed view of a `<scheme>://<host>/<path>?<query>#<fragment>` style URI。"
+    }
+  ]
+}

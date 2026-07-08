@@ -1,0 +1,36 @@
+{
+  "crate": "persona-wire-adapter-slack",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_slack::API_BASE",
+      "kind": "constant",
+      "docs": "Slack Web API base URL."
+    },
+    {
+      "path": "persona_wire_adapter_slack::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `items` cap when `?limit=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_slack::FETCH_TIMEOUT",
+      "kind": "constant",
+      "docs": "Per-request HTTP timeout (connect + body), matching\n`persona-wire-adapter-notion::FETCH_TIMEOUT`."
+    },
+    {
+      "path": "persona_wire_adapter_slack::MAX_LIMIT",
+      "kind": "constant",
+      "docs": "Maximum allowed `?limit=` value (Slack's own `conversations.list` /\n`conversations.history` page-size ceiling)."
+    },
+    {
+      "path": "persona_wire_adapter_slack::SlackAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for Slack (`slack://` scheme)."
+    },
+    {
+      "path": "persona_wire_adapter_slack::TEXT_MAX_CHARS",
+      "kind": "constant",
+      "docs": "Max message `text` length in `char`s before truncation (context size\nguard)."
+    }
+  ]
+}

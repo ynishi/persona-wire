@@ -24,3 +24,14 @@ dist-plan:
 # additions) from being clobbered.
 dist-generate:
     dist generate --mode=ci
+
+# Generate LLM-facing doc artifacts (llms.txt / per-crate narrative md /
+# API JSON) into docs/aidoc/ via cargo-aidoc.
+# Prerequisites: `rustup toolchain install nightly` +
+# `cargo install cargo-aidoc` (or use local dev build from ../cargo-aidoc).
+aidoc:
+    cargo aidoc
+
+# CI-friendly drift check: exit 2 if generated artifacts differ from disk.
+aidoc-check:
+    cargo aidoc --check --strict

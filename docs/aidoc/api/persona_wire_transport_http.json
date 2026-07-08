@@ -1,0 +1,16 @@
+{
+  "crate": "persona-wire-transport-http",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_transport_http::DEFAULT_TIMEOUT",
+      "kind": "constant",
+      "docs": "Default per-request timeout (connect + body) when\n[`HttpClient::with_timeout`] is not called."
+    },
+    {
+      "path": "persona_wire_transport_http::HttpClient",
+      "kind": "struct",
+      "docs": "Builder-style shared HTTP client for persona-wire Adapters.\n\nEvery setter consumes `self` and returns `Self` (chainable). A fresh\n`reqwest::Client` is built per call (stateless; Adapters call this at most\na handful of times per `fetch`, so connection pooling across calls is not\nworth the added lifetime complexity here)."
+    }
+  ]
+}

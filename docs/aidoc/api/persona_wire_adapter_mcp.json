@@ -1,0 +1,41 @@
+{
+  "crate": "persona-wire-adapter-mcp",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_mcp::DEFAULT_RPC_TIMEOUT",
+      "kind": "constant",
+      "docs": "Default per-call RPC timeout. Matches `agent-block::mcp_client::DEFAULT_RPC_TIMEOUT`."
+    },
+    {
+      "path": "persona_wire_adapter_mcp::MCP_SERVER_NODE_TYPE",
+      "kind": "constant",
+      "docs": "Node `type` literal that identifies an MCP server endpoint in the graph.\n\nShared between [`SqliteEndpointResolver`] (consumer) and callers that\nregister endpoint nodes via `wire_node_create(type = \"mcp_server\", ...)`.\n`workflow_def` の `WORKFLOW_TYPE` 定数と同じ運用 — vocabulary 登録 layer は\n存在せず、 literal 一致と `maintenance_exempt: true` で orphan 判定を抑制する。"
+    },
+    {
+      "path": "persona_wire_adapter_mcp::META_ENDPOINT",
+      "kind": "constant",
+      "docs": "`metadata.endpoint` key holding the serialized [`ServerEndpoint`] payload."
+    },
+    {
+      "path": "persona_wire_adapter_mcp::McpAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for MCP servers (`mcp://` scheme)."
+    },
+    {
+      "path": "persona_wire_adapter_mcp::McpEndpointResolver",
+      "kind": "trait",
+      "docs": "Resolve a server alias to a [`ServerEndpoint`] connectable by the adapter.\n\nProduction implementation: [`SqliteEndpointResolver`] reads `mcp_server`\nnodes from the Wire graph. Test implementations typically use a static\n`BTreeMap`-backed resolver so unit tests do not need a live storage.\n\nErrors are returned with a hint about *why* resolution failed (alias\nunknown, node type mismatch, metadata malformed) — callers do not need to\nsecond-guess."
+    },
+    {
+      "path": "persona_wire_adapter_mcp::ServerEndpoint",
+      "kind": "enum",
+      "docs": "Resolved endpoint for a server alias.\n\nCaller (Wire runtime / `persona-wire-mcp` registry) supplies the\n[`McpEndpointResolver`] that produces these values; for the production\ngraph-based path see [`SqliteEndpointResolver`]."
+    },
+    {
+      "path": "persona_wire_adapter_mcp::SqliteEndpointResolver",
+      "kind": "struct",
+      "docs": "Graph-backed resolver: looks up a node with `type = \"mcp_server\"` and\nreturns its `metadata.endpoint` deserialized as a [`ServerEndpoint`].\n\nThe shared `Arc<Mutex<SqliteStorage>>` is the same handle held by\n`WireServer` — so endpoint changes go live the moment they are committed\nvia `wire_node_create` / `wire_node_update`."
+    }
+  ]
+}

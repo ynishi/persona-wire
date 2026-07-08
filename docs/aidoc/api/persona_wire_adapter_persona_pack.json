@@ -1,0 +1,11 @@
+{
+  "crate": "persona-wire-adapter-persona-pack",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_persona_pack::PersonaPackAdapter",
+      "kind": "struct",
+      "docs": "persona-pack SDK 経由で persona Pack の `[extra.persona_wire.projections.<axis>]`\noverlay table を取得し、 Wire 定義 JSON shape で返す Adapter。\n\nインスタンス化は `PersonaPackAdapter::new(root)` または env-resolved\n`PersonaPackAdapter::from_env()`。 root は persona-pack の root dir\n(e.g. `~/persona-pack`)。"
+    }
+  ]
+}

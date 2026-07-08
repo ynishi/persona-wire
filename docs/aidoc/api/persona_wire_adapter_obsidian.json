@@ -1,0 +1,11 @@
+{
+  "crate": "persona-wire-adapter-obsidian",
+  "version": "0.12.0",
+  "items": [
+    {
+      "path": "persona_wire_adapter_obsidian::ObsidianAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for Obsidian vault directories.\n\nscheme literal: `\"obsidian\"`."
+    }
+  ]
+}
