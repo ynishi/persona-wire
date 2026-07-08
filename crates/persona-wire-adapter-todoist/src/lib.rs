@@ -35,8 +35,10 @@
 //! - For `kind=projects`, `project_id` and `filter` are unknown query keys
 //!   (silently ignored, not even read).
 //! - `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
-//!   A non-numeric, zero, or out-of-range (> [`MAX_LIMIT`], the API's own
-//!   `1..=200` constraint) value fails loud.
+//!   A non-numeric or zero value fails loud; there is no upper bound at
+//!   parse time — [`MAX_LIMIT`] (the API's own `1..=200` constraint) is now
+//!   a `Pageable`-only concept (see "Pagination" below), not a parse-time
+//!   gate.
 //! - Unknown query keys are silently ignored (same forward-compatible
 //!   convention as `persona-wire-adapter-rss` / `-github`).
 //! - The `filter` value is percent-decoded once at parse time (it commonly
@@ -100,10 +102,11 @@
 //! [`Cursor::NextToken`] extracted from the response body's `next_cursor`
 //! field (a nullable string; `null` signals end-of-data) across repeated
 //! requests instead of the single capped fetch `Adapter::fetch` performs.
-//! `parse_todoist_uri`'s `limit` parsing still rejects `limit > MAX_LIMIT`
-//! at parse time (module docs "URI grammar" above) — relaxing that guard is
-//! a follow-up decision for after all three Layer 3b adapters (todoist /
-//! notion / slack) have `Pageable` impls, not part of this layer.
+//! `parse_todoist_uri`'s `limit` parsing accepts any positive integer — the
+//! parse-time `limit > MAX_LIMIT` gate was removed once all three Layer 3b
+//! adapters (todoist / notion / slack) had `Pageable` impls (GH #1);
+//! [`MAX_LIMIT`] now solely defines [`Pageable::max_page_size`], not a
+//! parse-time bound.
 //! `limit <= MAX_LIMIT` is unaffected — it stays on the existing
 //! single-request fast path.
 
@@ -432,11 +435,6 @@ fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
                     "todoist adapter: invalid limit '{raw}' (must be > 0)"
                 )));
             }
-            if n > MAX_LIMIT {
-                return Err(WireError::Storage(format!(
-                    "todoist adapter: invalid limit '{raw}' (must be <= {MAX_LIMIT})"
-                )));
-            }
             Ok(n)
         }
         None => Ok(DEFAULT_LIMIT),
@@ -674,10 +672,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_todoist_uri_limit_201_fails_loud() {
-        let err = parse("todoist://tasks?limit=201").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+    fn parse_todoist_uri_limit_above_max_ok() {
+        let spec = parse("todoist://tasks?limit=500").unwrap();
+        assert_eq!(spec.limit, 500);
     }
 
     #[test]

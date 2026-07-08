@@ -43,10 +43,11 @@
 //!   to pick from explicitly (a database can have multiple typed data
 //!   sources since the 2025-09-03 multi-source-database API change).
 //! - `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
-//!   A non-numeric, zero, or out-of-range (> [`MAX_LIMIT`], Notion's own
-//!   `page_size` ceiling) value fails loud. It is always sent explicitly to
-//!   the Notion API (the default behavior for an absent `page_size` is
-//!   undocumented).
+//!   A non-numeric or zero value fails loud; there is no upper bound at
+//!   parse time — [`MAX_LIMIT`] (Notion's own `page_size` ceiling) is now a
+//!   `Pageable`-only concept (see "Pagination" below), not a parse-time
+//!   gate. It is always sent explicitly to the Notion API (the default
+//!   behavior for an absent `page_size` is undocumented).
 //! - Unknown query keys are silently ignored (same forward-compatible
 //!   convention as `persona-wire-adapter-rss` / `-github` / `-todoist`); for
 //!   `kind=database` / `-data-source` / `-page`, `query` / `object` are
@@ -140,12 +141,12 @@
 //! source on every page (an extra `GET /databases/{id}` round trip per
 //! page loop iteration), since that resolution is a lookup, not a
 //! paginated operation, and this keeps the adapter stateless.
-//! `parse_notion_uri`'s `limit` parsing still rejects `limit > MAX_LIMIT`
-//! at parse time (module docs "URI grammar" above) — relaxing that guard
-//! is a follow-up decision for after all three Layer 3b adapters
-//! (todoist / notion / slack) have `Pageable` impls, not part of this
-//! layer. `limit <= MAX_LIMIT` is unaffected — it stays on the existing
-//! single-request fast path.
+//! `parse_notion_uri`'s `limit` parsing accepts any positive integer — the
+//! parse-time `limit > MAX_LIMIT` gate was removed once all three Layer 3b
+//! adapters (todoist / notion / slack) had `Pageable` impls (GH #1);
+//! [`MAX_LIMIT`] now solely defines [`Pageable::max_page_size`], not a
+//! parse-time bound. `limit <= MAX_LIMIT` is unaffected — it stays on the
+//! existing single-request fast path.
 //!
 //! `Pageable::wrap_items` preserves each kind's canonical output shape
 //! (see "Output shape" above) with `has_more: false` on the pagination
@@ -394,11 +395,6 @@ fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
             if n == 0 {
                 return Err(WireError::Storage(format!(
                     "notion adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            if n > MAX_LIMIT {
-                return Err(WireError::Storage(format!(
-                    "notion adapter: invalid limit '{raw}' (must be <= {MAX_LIMIT})"
                 )));
             }
             Ok(n)
@@ -1022,10 +1018,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_notion_uri_limit_101_fails_loud() {
-        let err = parse("notion://search?limit=101").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+    fn parse_notion_uri_limit_above_max_ok() {
+        let spec = parse("notion://search?limit=500").unwrap();
+        assert_eq!(spec.limit, 500);
     }
 
     #[test]

@@ -46,9 +46,10 @@
 //!   keys for `kind=channels` / `kind=user` (not even read) (module docs
 //!   "URI grammar").
 //! - `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
-//!   A non-numeric, zero, or out-of-range (> [`MAX_LIMIT`], Slack's own
-//!   `conversations.list` / `conversations.history` page-size ceiling)
-//!   value fails loud.
+//!   A non-numeric or zero value fails loud; there is no upper bound at
+//!   parse time — [`MAX_LIMIT`] (Slack's own `conversations.list` /
+//!   `conversations.history` page-size ceiling) is now a `Pageable`-only
+//!   concept (see "Pagination" below), not a parse-time gate.
 //! - Unknown query keys are silently ignored (same forward-compatible
 //!   convention as `persona-wire-adapter-rss` / `-github` / `-todoist` /
 //!   `-notion`).
@@ -187,12 +188,12 @@
 //! `slack://user/<id>?limit=<N>` via the wire-layer pagination path is
 //! misusing a single-object fetch, and should use `Adapter::fetch` instead.
 //!
-//! `parse_slack_uri`'s `limit` parsing still rejects `limit > MAX_LIMIT` at
-//! parse time (module docs "URI grammar" above) — relaxing that guard is a
-//! follow-up decision for after all three Layer 3b adapters (todoist /
-//! notion / slack) have `Pageable` impls, not part of this layer.
-//! `limit <= MAX_LIMIT` is unaffected — it stays on the existing
-//! single-request fast path.
+//! `parse_slack_uri`'s `limit` parsing accepts any positive integer — the
+//! parse-time `limit > MAX_LIMIT` gate was removed once all three Layer 3b
+//! adapters (todoist / notion / slack) had `Pageable` impls (GH #1);
+//! [`MAX_LIMIT`] now solely defines [`Pageable::max_page_size`], not a
+//! parse-time bound. `limit <= MAX_LIMIT` is unaffected — it stays on the
+//! existing single-request fast path.
 //!
 //! `Pageable::wrap_items` preserves each paginatable kind's canonical output
 //! shape (see "Output shape" above) with `has_more: false` on the pagination
@@ -425,11 +426,6 @@ fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
             if n == 0 {
                 return Err(WireError::Storage(format!(
                     "slack adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            if n > MAX_LIMIT {
-                return Err(WireError::Storage(format!(
-                    "slack adapter: invalid limit '{raw}' (must be <= {MAX_LIMIT})"
                 )));
             }
             Ok(n)
@@ -1030,10 +1026,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_slack_uri_limit_1000_fails_loud() {
-        let err = parse("slack://channels?limit=1000").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+    fn parse_slack_uri_limit_above_max_ok() {
+        let spec = parse("slack://channels?limit=1500").unwrap();
+        assert_eq!(spec.limit, 1500);
     }
 
     #[test]
