@@ -166,12 +166,49 @@
 //! scope, or the user has none set — Slack omits the field rather than
 //! sending an explicit `null` in that case, and the missing-field path
 //! yields the same `null` here).
+//!
+//! ## Pagination (Layer 3b-slack of GH #1)
+//!
+//! `SlackAdapter` implements [`Pageable`] for `kind=channels` and
+//! `kind=history`: when a caller requests `?limit=N` with `N` greater than
+//! [`MAX_LIMIT`] (999), the wire-layer driver
+//! (`persona_wire_core::application::use_cases`) threads a
+//! [`Cursor::NextToken`] extracted from the response body's
+//! `response_metadata.next_cursor` field across repeated requests instead of
+//! the single capped fetch `Adapter::fetch` performs. Slack often sends an
+//! **empty string** (rather than omitting the field or sending `null`) when
+//! there are no more pages — this adapter treats an empty `next_cursor` the
+//! same as an absent one (`None`, end-of-data).
+//!
+//! `kind=user` is **not paginated** — `users.info` returns a single object,
+//! not a list. `Pageable::fetch_page` (and, defensively,
+//! `Pageable::wrap_items`) fails loud for this kind rather than silently
+//! returning a single-item "page"; a caller hitting
+//! `slack://user/<id>?limit=<N>` via the wire-layer pagination path is
+//! misusing a single-object fetch, and should use `Adapter::fetch` instead.
+//!
+//! `parse_slack_uri`'s `limit` parsing still rejects `limit > MAX_LIMIT` at
+//! parse time (module docs "URI grammar" above) — relaxing that guard is a
+//! follow-up decision for after all three Layer 3b adapters (todoist /
+//! notion / slack) have `Pageable` impls, not part of this layer.
+//! `limit <= MAX_LIMIT` is unaffected — it stays on the existing
+//! single-request fast path.
+//!
+//! `Pageable::wrap_items` preserves each paginatable kind's canonical output
+//! shape (see "Output shape" above) with `has_more: false` on the pagination
+//! path — a caller who requested `limit > MAX_LIMIT` via the Pageable path
+//! got exactly what they asked for, and the fast-path `has_more` semantic
+//! ("upstream still has more") does not naturally extend to a completed
+//! pagination loop.
 
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
+use persona_wire_core::infrastructure::{
+    adapter::{Adapter, Cursor, Pageable},
+    wire_uri::WireUri,
+};
 use persona_wire_core::{WireError, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
@@ -212,20 +249,7 @@ impl Adapter for SlackAdapter {
     /// URI grammar, auth resolution, error handling, and output shape.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_slack_uri(uri)?;
-
-        // Auth is resolved per-fetch (not at boot); see module docs "Auth".
-        // Slack has no unauthenticated access mode, so a missing token
-        // fails loud here.
-        let token = Credentials::default_chain().get("slack")?.ok_or_else(|| {
-            WireError::Storage(
-                "slack adapter: no token found for 'slack' (set PERSONA_WIRE_TOKEN_SLACK / SLACK_BOT_TOKEN, or run 'persona-wire token set slack')"
-                    .to_string(),
-            )
-        })?;
-
-        let client = HttpClient::new("slack adapter")
-            .with_timeout(FETCH_TIMEOUT)
-            .with_bearer(token);
+        let client = slack_http_client()?;
 
         match &spec.kind {
             SlackKind::Channels => {
@@ -247,6 +271,31 @@ impl Adapter for SlackAdapter {
             }
         }
     }
+
+    /// Opts into the wire-layer pagination driver (Layer 3b-slack of GH
+    /// #1). See the module docs "Pagination" section.
+    fn as_pageable(&self) -> Option<&dyn Pageable> {
+        Some(self)
+    }
+}
+
+/// Builds a fresh, Slack-configured `HttpClient` (auth resolved per-call,
+/// not at boot; see module docs "Auth"). Shared by `Adapter::fetch` and
+/// `Pageable::fetch_page` so every path stays in sync on
+/// headers/timeout/bearer token.
+fn slack_http_client() -> WireResult<HttpClient> {
+    // Auth is resolved per-fetch (not at boot); see module docs "Auth".
+    // Slack has no unauthenticated access mode, so a missing token fails
+    // loud here.
+    let token = Credentials::default_chain().get("slack")?.ok_or_else(|| {
+        WireError::Storage(
+            "slack adapter: no token found for 'slack' (set PERSONA_WIRE_TOKEN_SLACK / SLACK_BOT_TOKEN, or run 'persona-wire token set slack')"
+                .to_string(),
+        )
+    })?;
+    Ok(HttpClient::new("slack adapter")
+        .with_timeout(FETCH_TIMEOUT)
+        .with_bearer(token))
 }
 
 /// The three Slack endpoint kinds this adapter can target, selected via the
@@ -459,10 +508,187 @@ fn build_history_url(channel_id: &str, spec: &SlackUriSpec) -> String {
     url
 }
 
+/// Builds the `GET /conversations.list` request URL for the wire-layer
+/// pagination path (`Pageable::fetch_page`), with an optional `?cursor=`
+/// query param appended. `cursor = None` is byte-identical to
+/// [`build_channels_url`] (kept as a separate function rather than adding a
+/// `cursor` parameter to `build_channels_url` itself, so its existing call
+/// site in `Adapter::fetch` and its tests stay untouched). Slack's cursor is
+/// documented as already URL-safe, but it is percent-encoded here anyway
+/// (via the existing [`encode_query`]) to stay defensive — over-encoding is
+/// harmless (module docs on `encode_query`).
+fn build_channels_url_with_cursor(spec: &SlackUriSpec, cursor: Option<&str>) -> String {
+    let mut url = build_channels_url(spec);
+    if let Some(token) = cursor {
+        url.push_str(&format!("&cursor={}", encode_query(token)));
+    }
+    url
+}
+
+/// Builds the `GET /conversations.history` request URL for the wire-layer
+/// pagination path (`Pageable::fetch_page`), with an optional `?cursor=`
+/// query param appended. `cursor = None` is byte-identical to
+/// [`build_history_url`] (same rationale as
+/// [`build_channels_url_with_cursor`]).
+fn build_history_url_with_cursor(
+    channel_id: &str,
+    spec: &SlackUriSpec,
+    cursor: Option<&str>,
+) -> String {
+    let mut url = build_history_url(channel_id, spec);
+    if let Some(token) = cursor {
+        url.push_str(&format!("&cursor={}", encode_query(token)));
+    }
+    url
+}
+
 /// Builds the `GET /users.info` request URL for `user_id`
 /// (`spec.kind == User(user_id)`).
 fn build_user_url(user_id: &str) -> String {
     format!("{API_BASE}/users.info?user={}", encode_query(user_id))
+}
+
+/// Extracts the opaque cursor token from a `Pageable::fetch_page` `cursor`
+/// argument. `None` (first page) yields `Ok(None)`; only
+/// `Cursor::NextToken` is a valid non-`None` variant — Slack's cursor is
+/// always an opaque string (matches the `NextToken` variant's canonical
+/// semantics from the `Cursor` enum docs). Any other variant fails loud
+/// (module docs "Cursor variant discipline").
+fn slack_cursor_token(cursor: &Option<Cursor>) -> WireResult<Option<&str>> {
+    match cursor {
+        None => Ok(None),
+        Some(Cursor::NextToken(token)) => Ok(Some(token.as_str())),
+        Some(other) => Err(WireError::Storage(format!(
+            "slack adapter: unsupported cursor variant for pagination: {other:?}"
+        ))),
+    }
+}
+
+/// Extracts the pagination cursor from a Slack API response body's
+/// `response_metadata.next_cursor` field. Slack often sends an empty string
+/// (rather than omitting the field or sending `null`) when there are no
+/// more pages — treated as `None` here (module docs "Empty-string
+/// next_cursor").
+fn slack_next_cursor_from_response(raw: &serde_json::Value) -> Option<Cursor> {
+    raw.get("response_metadata")
+        .and_then(|m| m.get("next_cursor"))
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| Cursor::NextToken(s.to_string()))
+}
+
+/// `Pageable::fetch_page` for `SlackKind::Channels`.
+async fn fetch_page_for_channels(
+    spec: &SlackUriSpec,
+    cursor: Option<&str>,
+) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
+    let client = slack_http_client()?;
+    let raw = client
+        .get_json(&build_channels_url_with_cursor(spec, cursor))
+        .await?;
+    check_ok(&raw)?;
+    let channels = raw.get("channels").and_then(|v| v.as_array()).ok_or_else(|| {
+        WireError::Storage(
+            "slack adapter: unexpected response shape for channels: expected an object with a 'channels' array"
+                .to_string(),
+        )
+    })?;
+    let items: Vec<serde_json::Value> = channels.iter().map(normalize_channel_item).collect();
+    Ok((items, slack_next_cursor_from_response(&raw)))
+}
+
+/// `Pageable::fetch_page` for `SlackKind::History`.
+async fn fetch_page_for_history(
+    channel_id: &str,
+    spec: &SlackUriSpec,
+    cursor: Option<&str>,
+) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
+    let client = slack_http_client()?;
+    let raw = client
+        .get_json(&build_history_url_with_cursor(channel_id, spec, cursor))
+        .await?;
+    check_ok(&raw)?;
+    let messages = raw.get("messages").and_then(|v| v.as_array()).ok_or_else(|| {
+        WireError::Storage(format!(
+            "slack adapter: unexpected response shape for channel '{channel_id}' history: expected an object with a 'messages' array"
+        ))
+    })?;
+    let items: Vec<serde_json::Value> = messages.iter().map(normalize_message).collect();
+    Ok((items, slack_next_cursor_from_response(&raw)))
+}
+
+#[async_trait]
+impl Pageable for SlackAdapter {
+    /// Slack API's own `conversations.list` / `conversations.history`
+    /// page-size ceiling (matches [`MAX_LIMIT`]; see module docs "URI
+    /// grammar").
+    fn max_page_size(&self) -> usize {
+        MAX_LIMIT
+    }
+
+    /// Fetches one page (dispatching by kind) and normalizes it the same
+    /// way `Adapter::fetch`'s per-kind branch does, without truncating to
+    /// `limit` — the wire-layer driver truncates across accumulated pages.
+    /// `SlackKind::User` is **not paginated** (`users.info` returns a
+    /// single object, not a list) and fails loud here — a caller hitting
+    /// `slack://user/<id>?limit=<N>` via the wire-layer pagination path is
+    /// misusing a single-object fetch as if it were paginatable; use
+    /// `Adapter::fetch` instead. Rejects any cursor variant other than
+    /// `None` / `Some(Cursor::NextToken(_))` (module docs "Cursor variant
+    /// discipline").
+    async fn fetch_page(
+        &self,
+        uri: &WireUri,
+        cursor: Option<Cursor>,
+    ) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
+        let spec = parse_slack_uri(uri)?;
+        let token = slack_cursor_token(&cursor)?;
+
+        match &spec.kind {
+            SlackKind::Channels => fetch_page_for_channels(&spec, token).await,
+            SlackKind::History(channel_id) => {
+                fetch_page_for_history(channel_id, &spec, token).await
+            }
+            SlackKind::User(_) => Err(WireError::Storage(
+                "slack adapter: kind='user' does not support pagination (returns a single object). Use Adapter::fetch instead, or drop the ?limit=<N> query."
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Preserves each kind's canonical output shape (module docs "Output
+    /// shape") across the pagination path, with `has_more: false` (the
+    /// wire-layer driver may terminate mid-stream; the field's fast-path
+    /// semantic doesn't extend cleanly, same rationale as
+    /// `persona-wire-adapter-notion`). `SlackKind::User` fails loud here
+    /// too, defensively — `fetch_page` already rejects `User` before any
+    /// items reach `wrap_items`, so this branch should not be reachable in
+    /// practice, but is kept for API consistency (module docs "wrap_items
+    /// design").
+    fn wrap_items(
+        &self,
+        items: Vec<serde_json::Value>,
+        uri: &WireUri,
+    ) -> WireResult<serde_json::Value> {
+        let spec = parse_slack_uri(uri)?;
+        match &spec.kind {
+            SlackKind::Channels => Ok(serde_json::json!({
+                "kind": "channels",
+                "items": items,
+                "has_more": false,
+            })),
+            SlackKind::History(channel_id) => Ok(serde_json::json!({
+                "kind": "history",
+                "channel_id": channel_id,
+                "items": items,
+                "has_more": false,
+            })),
+            SlackKind::User(_) => Err(WireError::Storage(
+                "slack adapter: kind='user' does not support pagination (returns a single object). Use Adapter::fetch instead, or drop the ?limit=<N> query."
+                    .to_string(),
+            )),
+        }
+    }
 }
 
 /// Inspects a Slack Web API response's `{"ok": bool, ...}` envelope (see
@@ -1112,6 +1338,179 @@ mod tests {
         let msg = format!("{err}");
         assert!(
             msg.contains("expected an object with a 'user' field"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // ---- Pageable (Layer 3b-slack of GH #1) ----
+    //
+    // Same no-live-HTTP rationale as `persona-wire-adapter-github` /
+    // `persona-wire-adapter-todoist` / `persona-wire-adapter-notion` (see
+    // those crates' test module docs): `fetch_page` / `Adapter::fetch` both
+    // perform live HTTP via `HttpClient` (a concrete struct, not behind a
+    // mockable trait), and this workspace has no wiremock / hand-rolled
+    // mock-server pattern. The cursor→token decision (`slack_cursor_token`),
+    // the URL builders (`build_channels_url_with_cursor` /
+    // `build_history_url_with_cursor`), and the shape-building
+    // (`wrap_items`) are tested directly as the pure functions they are.
+    // `slack_fetch_page_user_kind_fails_loud` is the one exception: the
+    // `User` kind's `fetch_page` branch fails loud *before* any HTTP call is
+    // made, so invoking it directly via `#[tokio::test]` performs no
+    // network I/O.
+
+    #[test]
+    fn slack_pageable_max_page_size_is_999() {
+        let adapter = SlackAdapter;
+        assert_eq!(adapter.max_page_size(), MAX_LIMIT);
+    }
+
+    #[test]
+    fn slack_as_pageable_returns_some() {
+        let adapter = SlackAdapter;
+        let pageable = adapter.as_pageable();
+        assert!(pageable.is_some(), "override should return Some(self)");
+        assert_eq!(pageable.unwrap().max_page_size(), MAX_LIMIT);
+    }
+
+    #[test]
+    fn slack_fetch_page_rejects_other_cursor_variants() {
+        for cursor in [
+            Cursor::PageNumber(2),
+            Cursor::LinkHeader("https://example.com".to_string()),
+            Cursor::Offset(10),
+        ] {
+            let err = slack_cursor_token(&Some(cursor)).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("unsupported cursor variant"),
+                "unexpected error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn slack_cursor_token_none_and_next_token() {
+        assert_eq!(slack_cursor_token(&None).unwrap(), None);
+        assert_eq!(
+            slack_cursor_token(&Some(Cursor::NextToken("abc123".to_string()))).unwrap(),
+            Some("abc123")
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_fetch_page_user_kind_fails_loud() {
+        // No HTTP call is made on this path — the `User` kind fails loud
+        // before any client is built (module docs "Pagination").
+        let adapter = SlackAdapter;
+        let uri = WireUri::parse("slack://user/U061F7AUR").unwrap();
+        let err = adapter.fetch_page(&uri, None).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does not support pagination"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn slack_channels_url_with_cursor() {
+        let spec = parse("slack://channels").unwrap();
+        let url = build_channels_url_with_cursor(&spec, Some("bmV4dF9jdXJzb3I"));
+        assert!(
+            url.contains("&cursor=bmV4dF9jdXJzb3I"),
+            "unexpected url: {url}"
+        );
+    }
+
+    #[test]
+    fn slack_channels_url_without_cursor_matches_fast_path() {
+        let spec = parse("slack://channels").unwrap();
+        let with_none = build_channels_url_with_cursor(&spec, None);
+        let fast_path = build_channels_url(&spec);
+        assert_eq!(with_none, fast_path);
+        assert!(!with_none.contains("cursor="));
+    }
+
+    #[test]
+    fn slack_history_url_with_cursor() {
+        let spec = parse("slack://history/C1").unwrap();
+        let url = build_history_url_with_cursor("C1", &spec, Some("bmV4dF90czoxNTEy"));
+        assert!(
+            url.contains("&cursor=bmV4dF90czoxNTEy"),
+            "unexpected url: {url}"
+        );
+    }
+
+    #[test]
+    fn slack_history_url_without_cursor_matches_fast_path() {
+        let spec = parse("slack://history/C1").unwrap();
+        let with_none = build_history_url_with_cursor("C1", &spec, None);
+        let fast_path = build_history_url("C1", &spec);
+        assert_eq!(with_none, fast_path);
+        assert!(!with_none.contains("cursor="));
+    }
+
+    #[test]
+    fn slack_next_cursor_empty_string_is_none() {
+        let raw = serde_json::json!({
+            "ok": true,
+            "channels": [],
+            "response_metadata": { "next_cursor": "" }
+        });
+        assert_eq!(slack_next_cursor_from_response(&raw), None);
+    }
+
+    #[test]
+    fn slack_next_cursor_non_empty_is_some() {
+        let raw = serde_json::json!({
+            "ok": true,
+            "channels": [],
+            "response_metadata": { "next_cursor": "bmV4dF9jdXJzb3I" }
+        });
+        assert_eq!(
+            slack_next_cursor_from_response(&raw),
+            Some(Cursor::NextToken("bmV4dF9jdXJzb3I".to_string()))
+        );
+    }
+
+    #[test]
+    fn slack_wrap_items_channels_shape() {
+        let adapter = SlackAdapter;
+        let uri = WireUri::parse("slack://channels").unwrap();
+        let items = vec![serde_json::json!({"id": "C1"})];
+
+        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
+
+        assert_eq!(wrapped["kind"].as_str().unwrap(), "channels");
+        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
+        assert!(!wrapped["has_more"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn slack_wrap_items_history_shape() {
+        let adapter = SlackAdapter;
+        let uri = WireUri::parse("slack://history/C012AB3CD").unwrap();
+        let items = vec![serde_json::json!({"ts": "1.0"})];
+
+        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
+
+        assert_eq!(wrapped["kind"].as_str().unwrap(), "history");
+        assert_eq!(wrapped["channel_id"].as_str().unwrap(), "C012AB3CD");
+        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
+        assert!(!wrapped["has_more"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn slack_wrap_items_user_kind_fails_loud() {
+        // Defensive: `fetch_page` already fails loud for `User` before any
+        // items reach `wrap_items`, so this branch should not be reachable
+        // in practice — tested anyway for API consistency (module docs
+        // "wrap_items design").
+        let adapter = SlackAdapter;
+        let uri = WireUri::parse("slack://user/U061F7AUR").unwrap();
+        let err = adapter.wrap_items(vec![], &uri).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does not support pagination"),
             "unexpected error: {msg}"
         );
     }
