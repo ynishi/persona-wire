@@ -24,3 +24,6 @@ url.workspace = true
 async-trait.workspace = true
 ulid.workspace = true
 
+[dev-dependencies]
+tracing-subscriber.workspace = true
+

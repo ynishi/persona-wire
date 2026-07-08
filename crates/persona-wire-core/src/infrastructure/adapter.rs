@@ -111,6 +111,21 @@ pub trait Adapter: Send + Sync {
     /// Interprets the parsed `WireUri` per scheme and returns fresh data as a
     /// `serde_json::Value`.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value>;
+
+    /// Capability accessor for the wire-layer pagination driver (Layer 2 of
+    /// GH #1). Override to opt into wire-layer pagination by returning
+    /// `Some(self)` once the adapter also implements [`Pageable`].
+    ///
+    /// Default returns `None` — existing adapters keep working with zero
+    /// changes. Rust trait objects don't support cross-trait downcasting
+    /// without `Any + 'static` bounds, so this companion accessor is the
+    /// idiomatic pattern (mirrors `std::error::Error::source`). The wire
+    /// layer (`application::use_cases::fetch_with_pagination_awareness`)
+    /// calls this to decide whether to drive a [`Pageable::fetch_page`] loop
+    /// or fall back to a plain capped `fetch` with a WARN.
+    fn as_pageable(&self) -> Option<&dyn Pageable> {
+        None
+    }
 }
 
 /// Opaque pagination cursor. Each adapter picks the variant matching its
@@ -128,6 +143,17 @@ pub enum Cursor {
     Offset(u64),
 }
 
+/// Wire-layer heuristic threshold used when a caller requests `limit` items
+/// from an adapter that does **not** implement [`Pageable`] (Layer 2 of GH
+/// #1). This is not a per-adapter contract — adapters that want proper
+/// pagination should implement [`Pageable`] and override
+/// [`Adapter::as_pageable`]; this constant only decides when the wire layer
+/// should emit a WARN before falling back to a plain capped `fetch`.
+///
+/// Value: `100`, matching GitHub's REST list API `per_page` cap — a
+/// de-facto industry norm for this class of API.
+pub const NON_PAGEABLE_MAX_HINT: usize = 100;
+
 /// Capability trait: an adapter that can paginate its upstream API.
 ///
 /// The wire-layer fetch driver checks whether an adapter implements
@@ -138,8 +164,8 @@ pub enum Cursor {
 ///
 /// Adapters that do not implement `Pageable` are called through the plain
 /// `Adapter::fetch` path; the wire layer emits a WARN log when a caller
-/// requests `limit > max_page_size` from such an adapter (see Layer 2
-/// follow-up subtask).
+/// requests `limit > NON_PAGEABLE_MAX_HINT` from such an adapter (see Layer
+/// 2 follow-up subtask).
 #[async_trait]
 pub trait Pageable: Send + Sync {
     /// Maximum items returned in a single upstream request. When the caller
@@ -852,5 +878,38 @@ mod tests {
         let (second_items, next2) = adapter.fetch_page(&uri, next).await.unwrap();
         assert_eq!(second_items.len(), 1);
         assert_eq!(next2, None);
+    }
+
+    // ---- Adapter::as_pageable (Layer 2) ----
+
+    #[async_trait]
+    impl Adapter for MockPageableAdapter {
+        fn scheme(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn fetch(&self, _uri: &WireUri) -> WireResult<serde_json::Value> {
+            Ok(serde_json::json!({"scheme": "mock", "count": 0, "items": []}))
+        }
+
+        fn as_pageable(&self) -> Option<&dyn Pageable> {
+            Some(self)
+        }
+    }
+
+    #[test]
+    fn as_pageable_default_returns_none() {
+        // FileAdapter implements Adapter without overriding as_pageable —
+        // the default impl must return None (backward-compat).
+        let a = FileAdapter;
+        assert!(a.as_pageable().is_none());
+    }
+
+    #[test]
+    fn as_pageable_override_returns_some() {
+        let a = MockPageableAdapter;
+        let pageable = a.as_pageable();
+        assert!(pageable.is_some(), "override should return Some(self)");
+        assert_eq!(pageable.unwrap().max_page_size(), 2);
     }
 }
