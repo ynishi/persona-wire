@@ -166,6 +166,10 @@ pub const NON_PAGEABLE_MAX_HINT: usize = 100;
 /// `Adapter::fetch` path; the wire layer emits a WARN log when a caller
 /// requests `limit > NON_PAGEABLE_MAX_HINT` from such an adapter (see Layer
 /// 2 follow-up subtask).
+///
+/// Once the loop finishes (or the caller's `limit` is satisfied), the driver
+/// hands the collected items to [`Pageable::wrap_items`] to assemble the
+/// final response (Layer 3a of GH #1).
 #[async_trait]
 pub trait Pageable: Send + Sync {
     /// Maximum items returned in a single upstream request. When the caller
@@ -185,6 +189,27 @@ pub trait Pageable: Send + Sync {
         uri: &WireUri,
         cursor: Option<Cursor>,
     ) -> WireResult<(Vec<Value>, Option<Cursor>)>;
+
+    /// Wraps the items collected across a completed pagination loop into the
+    /// final wire-compatible `serde_json::Value` returned to the caller.
+    ///
+    /// Without this hook, the wire-layer driver would have to guess a
+    /// generic response shape, which would silently diverge from the shape
+    /// `Adapter::fetch` produces on the non-paginated fast path (e.g.
+    /// GitHub's `{repo, kind, items}`). Overriding `wrap_items` lets each
+    /// `Pageable` adapter preserve its canonical shape across both paths.
+    ///
+    /// Sync (not `async`): building the wrapper JSON is pure, no I/O.
+    ///
+    /// Default produces the generic `{"count": items.len(), "items": items}`
+    /// shape (no `scheme` — assembling that is `Adapter`'s business, and this
+    /// generic default has no scheme knowledge).
+    fn wrap_items(&self, items: Vec<Value>, _uri: &WireUri) -> WireResult<Value> {
+        Ok(serde_json::json!({
+            "count": items.len(),
+            "items": items,
+        }))
+    }
 }
 
 // ---- file adapter (std::fs) ----
@@ -878,6 +903,24 @@ mod tests {
         let (second_items, next2) = adapter.fetch_page(&uri, next).await.unwrap();
         assert_eq!(second_items.len(), 1);
         assert_eq!(next2, None);
+    }
+
+    #[test]
+    fn mock_pageable_adapter_wrap_items_default_shape() {
+        // MockPageableAdapter does not override `wrap_items` — it must fall
+        // back to the trait's default `{count, items}` shape (no `scheme`).
+        let adapter = MockPageableAdapter;
+        let uri = WireUri::parse("mock://items").unwrap();
+        let items = vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})];
+
+        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
+
+        assert_eq!(wrapped["count"], 2);
+        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
+        assert!(
+            wrapped.get("scheme").is_none(),
+            "default wrap_items must not add a `scheme` field: {wrapped}"
+        );
     }
 
     // ---- Adapter::as_pageable (Layer 2) ----

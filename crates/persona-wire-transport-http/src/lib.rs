@@ -149,6 +149,37 @@ impl HttpClient {
         serde_json::from_slice(&bytes).map_err(|e| json_parse_err(self.ctx, url, &e))
     }
 
+    /// HTTP GET, parsing the response body as JSON and also extracting the
+    /// `rel="next"` URL from an RFC 5988 `Link` response header (the
+    /// pagination convention used by GitHub's REST API and others).
+    ///
+    /// Returns `(body, None)` when the response has no `Link` header, or the
+    /// header has no `rel="next"` entry — this is the common case (most API
+    /// responses aren't the last page of *and* don't paginate at all), so
+    /// it is not treated as an error.
+    pub async fn get_json_with_next_link(
+        &self,
+        url: &str,
+    ) -> WireResult<(serde_json::Value, Option<String>)> {
+        let client = self.build_client()?;
+        let req = self.apply_headers(client.get(url));
+        let resp = self.send(req, url).await?;
+        // Headers borrow from `resp`, so extract the (owned) next-link value
+        // before `resp.bytes()` consumes it.
+        let next = resp
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_link_next);
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| body_err(self.ctx, url, &e))?;
+        let value =
+            serde_json::from_slice(&bytes).map_err(|e| json_parse_err(self.ctx, url, &e))?;
+        Ok((value, next))
+    }
+
     /// HTTP POST with a JSON body, parsing the response body as JSON.
     pub async fn post_json(
         &self,
@@ -193,6 +224,43 @@ fn client_build_err(ctx: &str, err: impl std::fmt::Display) -> WireError {
 
 fn json_parse_err(ctx: &str, url: &str, err: impl std::fmt::Display) -> WireError {
     WireError::Storage(format!("{ctx}: response json parse from '{url}': {err}"))
+}
+
+/// Extracts the `rel="next"` URL from an RFC 5988 `Link` header value, e.g.:
+///
+/// ```text
+/// <https://api.github.com/repos/x/y/issues?page=2>; rel="next", <...>; rel="last"
+/// ```
+///
+/// A free function (not a method) so it is unit-testable offline over
+/// literal header-value fixtures, matching this module's convention for the
+/// `*_err` helpers above — no live HTTP round-trip needed to exercise the
+/// parsing logic.
+///
+/// - Splits on `,` for multiple link entries, then on `;` within an entry.
+/// - Matches both quoted (`rel="next"`) and unquoted (`rel=next`) forms.
+/// - Returns `None` when no entry has `rel="next"` (including malformed
+///   entries — this never panics; a broken `Link` header just degrades to
+///   "no next page" rather than an error).
+fn parse_link_next(header_value: &str) -> Option<String> {
+    for entry in header_value.split(',') {
+        let mut url: Option<String> = None;
+        let mut is_next = false;
+        for part in entry.split(';') {
+            let part = part.trim();
+            if let Some(inner) = part.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+                url = Some(inner.to_string());
+            } else if let Some(rel) = part.strip_prefix("rel=") {
+                if rel.trim_matches('"') == "next" {
+                    is_next = true;
+                }
+            }
+        }
+        if is_next {
+            return url;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -302,5 +370,67 @@ mod tests {
                 ("X-Custom".to_string(), "1".to_string()),
             ]
         );
+    }
+
+    // ---- parse_link_next (RFC 5988 Link header, Layer 3a of GH #1) ----
+    //
+    // These test the extraction logic directly over literal header-value
+    // fixtures rather than through a live (or wiremock'd) HTTP round-trip:
+    // neither `wiremock` nor a hand-rolled mock server is used anywhere in
+    // this workspace yet (checked at implementation time — no existing
+    // pattern to extend), and `adapter.rs`'s crate-root docs establish the
+    // repo-wide convention that Adapter-adjacent tests are offline unit
+    // tests over inline fixtures, never live network access. Factoring the
+    // parsing out to a free function (mirroring the `*_err` helpers above)
+    // gets full coverage of the new logic without adding a new dependency
+    // or a live listener for a single header-parsing feature.
+
+    #[test]
+    fn parse_link_next_extracts_rel_next_url() {
+        let header = r#"<https://api.github.com/repos/x/y/issues?page=2>; rel="next""#;
+        assert_eq!(
+            parse_link_next(header),
+            Some("https://api.github.com/repos/x/y/issues?page=2".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_link_next_multiple_entries_returns_next_only() {
+        let header = concat!(
+            r#"<https://api.github.com/repos/x/y/issues?page=2>; rel="next", "#,
+            r#"<https://api.github.com/repos/x/y/issues?page=1>; rel="prev", "#,
+            r#"<https://api.github.com/repos/x/y/issues?page=5>; rel="last""#,
+        );
+        assert_eq!(
+            parse_link_next(header),
+            Some("https://api.github.com/repos/x/y/issues?page=2".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_link_next_rel_last_only_returns_none() {
+        let header = r#"<https://api.github.com/repos/x/y/issues?page=5>; rel="last""#;
+        assert_eq!(parse_link_next(header), None);
+    }
+
+    #[test]
+    fn parse_link_next_unquoted_rel_matches() {
+        let header = "<https://api.example.com/next>; rel=next";
+        assert_eq!(
+            parse_link_next(header),
+            Some("https://api.example.com/next".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_link_next_empty_string_returns_none() {
+        assert_eq!(parse_link_next(""), None);
+    }
+
+    #[test]
+    fn parse_link_next_malformed_entry_does_not_panic() {
+        // No `<...>` URL, no `rel=` param — degrades to "no next page".
+        let header = "garbage, also garbage";
+        assert_eq!(parse_link_next(header), None);
     }
 }

@@ -513,7 +513,7 @@ async fn fetch_with_pagination_awareness(
 
     match adapter.as_pageable() {
         Some(pageable) if limit > pageable.max_page_size() => {
-            drive_pageable_loop(adapter.scheme(), pageable, uri, limit).await
+            drive_pageable_loop(pageable, uri, limit).await
         }
         Some(_) => adapter.fetch(uri).await,
         None if limit > NON_PAGEABLE_MAX_HINT => {
@@ -536,12 +536,12 @@ async fn fetch_with_pagination_awareness(
 /// end-of-data (`next_cursor = None`). Propagates `fetch_page` errors
 /// as-is (no partial-result swallowing).
 ///
-/// Splices the collected items into a wire-compatible `serde_json::Value`
-/// matching the single-page shape `Adapter::fetch` returns (top-level
-/// `items` array + `count`), truncating the final page when it overshoots
-/// `limit`.
+/// Truncates the final page when it overshoots `limit`, then delegates
+/// assembling the final response to [`Pageable::wrap_items`] (Layer 3a of
+/// GH #1) — letting each `Pageable` adapter preserve its canonical shape
+/// (e.g. GitHub's `{repo, kind, items}`) instead of the driver guessing a
+/// generic one.
 async fn drive_pageable_loop(
-    scheme: &str,
     pageable: &dyn Pageable,
     uri: &WireUri,
     limit: usize,
@@ -560,11 +560,7 @@ async fn drive_pageable_loop(
         }
     }
     items.truncate(limit);
-    Ok(serde_json::json!({
-        "scheme": scheme,
-        "count": items.len(),
-        "items": items,
-    }))
+    pageable.wrap_items(items, uri)
 }
 
 /// Phase 2 per-slot async fetch + render — Adapter dispatch で fresh fetch、
@@ -3242,6 +3238,10 @@ mod tests {
             "result truncated to exactly the requested limit"
         );
         assert_eq!(result["count"], 3);
+        assert!(
+            result.get("scheme").is_none(),
+            "default wrap_items shape has no `scheme` field: {result}"
+        );
         assert_eq!(
             concrete.calls(),
             2,
@@ -3267,5 +3267,9 @@ mod tests {
             "loop stops gracefully on next_cursor=None and returns whatever was fetched"
         );
         assert_eq!(result["count"], 3);
+        assert!(
+            result.get("scheme").is_none(),
+            "default wrap_items shape has no `scheme` field: {result}"
+        );
     }
 }

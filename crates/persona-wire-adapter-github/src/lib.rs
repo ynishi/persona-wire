@@ -93,11 +93,28 @@
 //! entry that carries a `pull_request` key); `kind=issues` filters those out
 //! before normalizing, so the returned `items` count can be lower than the
 //! requested `limit`.
+//!
+//! ## Pagination (Layer 3a of GH #1)
+//!
+//! `GithubAdapter` implements [`Pageable`]: when a caller requests
+//! `?limit=N` with `N` greater than [`GITHUB_PER_PAGE_MAX`] (100), the
+//! wire-layer driver (`persona_wire_core::application::use_cases`) threads a
+//! [`Cursor::LinkHeader`] extracted from GitHub's RFC 5988 `Link` response
+//! header across repeated requests instead of the single capped fetch
+//! `Adapter::fetch` performs. `parse_github_uri`'s `limit` parsing already
+//! accepted values above 100 before this adapter had any pagination
+//! support (the parser never validated an upper bound); those requests now
+//! actually retrieve more than one page instead of being silently capped
+//! by the first `per_page` request. `limit <= 100` is unaffected — it stays
+//! on the existing single-request fast path.
 
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
-use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
+use persona_wire_core::infrastructure::{
+    adapter::{Adapter, Cursor, Pageable},
+    wire_uri::WireUri,
+};
 use persona_wire_core::{WireError, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
@@ -133,22 +150,33 @@ impl Adapter for GithubAdapter {
     /// output shape.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_github_uri(uri)?;
-
-        // Auth is resolved per-fetch (not at boot); see module docs "Auth".
-        let token = Credentials::default_chain().get("github")?;
-        let mut client = HttpClient::new("github adapter")
-            .with_timeout(FETCH_TIMEOUT)
-            .with_header("Accept", "application/vnd.github+json")
-            .with_header("X-GitHub-Api-Version", "2022-11-28")
-            // GitHub's REST API rejects requests without a User-Agent (403).
-            .with_header("User-Agent", "persona-wire");
-        if let Some(token) = token {
-            client = client.with_bearer(token);
-        }
-
+        let client = github_http_client()?;
         let raw = client.get_json(&spec.endpoint_url()).await?;
         normalize_github(&spec, &raw)
     }
+
+    /// Opts into the wire-layer pagination driver (Layer 3a of GH #1). See
+    /// the module docs "Pagination" section.
+    fn as_pageable(&self) -> Option<&dyn Pageable> {
+        Some(self)
+    }
+}
+
+/// Builds a fresh, GitHub-configured `HttpClient` (auth resolved per-call,
+/// not at boot; see module docs "Auth"). Shared by `Adapter::fetch` and
+/// `Pageable::fetch_page` so both paths stay in sync on headers/timeout.
+fn github_http_client() -> WireResult<HttpClient> {
+    let token = Credentials::default_chain().get("github")?;
+    let mut client = HttpClient::new("github adapter")
+        .with_timeout(FETCH_TIMEOUT)
+        .with_header("Accept", "application/vnd.github+json")
+        .with_header("X-GitHub-Api-Version", "2022-11-28")
+        // GitHub's REST API rejects requests without a User-Agent (403).
+        .with_header("User-Agent", "persona-wire");
+    if let Some(token) = token {
+        client = client.with_bearer(token);
+    }
+    Ok(client)
 }
 
 /// The three GitHub REST endpoints this adapter can target, selected via the
@@ -218,6 +246,109 @@ impl GithubUriSpec {
                 )
             }
         }
+    }
+
+    /// Builds the request URL for the *first page* of the wire-layer
+    /// pagination loop (Layer 3a of GH #1, `Pageable::fetch_page` with
+    /// `cursor = None`).
+    ///
+    /// Unlike [`Self::endpoint_url`] (which scales `per_page` to the
+    /// caller's requested `limit`, including the 4× over-fetch heuristic for
+    /// `issues`), this always requests `per_page = `[`GITHUB_PER_PAGE_MAX`]
+    /// — the wire-layer driver caps the total item count by breaking the
+    /// loop early once enough items accumulate across pages, so there is no
+    /// `limit`-based over-fetch heuristic to apply here.
+    fn endpoint_url_for_first_page(&self) -> String {
+        match self.kind {
+            GithubKind::Issues => {
+                let state = self.state.as_deref().unwrap_or("open");
+                format!(
+                    "{API_BASE}/repos/{}/{}/issues?state={state}&per_page={GITHUB_PER_PAGE_MAX}",
+                    self.owner, self.repo,
+                )
+            }
+            GithubKind::Pulls => {
+                let state = self.state.as_deref().unwrap_or("open");
+                format!(
+                    "{API_BASE}/repos/{}/{}/pulls?state={state}&per_page={GITHUB_PER_PAGE_MAX}",
+                    self.owner, self.repo,
+                )
+            }
+            GithubKind::Releases => {
+                format!(
+                    "{API_BASE}/repos/{}/{}/releases?per_page={GITHUB_PER_PAGE_MAX}",
+                    self.owner, self.repo,
+                )
+            }
+        }
+    }
+}
+
+/// Resolves the request URL for one `Pageable::fetch_page` call from the
+/// pagination `Cursor`.
+///
+/// - `cursor = None` → the first-page endpoint ([`GithubUriSpec::endpoint_url_for_first_page`]).
+/// - `Some(Cursor::LinkHeader(url))` → that URL, used literally (GitHub's
+///   `Link` header already carries the full next-page URL including query
+///   params — no rebuild needed).
+/// - Any other `Cursor` variant → fails loud with [`WireError::Storage`].
+///   GitHub only ever produces `LinkHeader` cursors, so seeing another
+///   variant here means caller confusion (e.g. threading a cursor from a
+///   different adapter), not a legitimate pagination state.
+///
+/// A free function (not inlined into `fetch_page`) so the cursor→URL
+/// decision is unit-testable offline without a live HTTP round-trip.
+fn resolve_fetch_page_url(spec: &GithubUriSpec, cursor: &Option<Cursor>) -> WireResult<String> {
+    match cursor {
+        None => Ok(spec.endpoint_url_for_first_page()),
+        Some(Cursor::LinkHeader(url)) => Ok(url.clone()),
+        Some(other) => Err(WireError::Storage(format!(
+            "github adapter: unsupported cursor variant for pagination: {other:?}"
+        ))),
+    }
+}
+
+#[async_trait]
+impl Pageable for GithubAdapter {
+    /// GitHub's REST list API `per_page` ceiling.
+    fn max_page_size(&self) -> usize {
+        GITHUB_PER_PAGE_MAX
+    }
+
+    /// Fetches one page (see [`resolve_fetch_page_url`] for the cursor→URL
+    /// decision) and normalizes it the same way [`normalize_github`] does
+    /// (same PR-filter for `kind=issues`), without truncating to `limit` —
+    /// the wire-layer driver truncates across accumulated pages.
+    async fn fetch_page(
+        &self,
+        uri: &WireUri,
+        cursor: Option<Cursor>,
+    ) -> WireResult<(Vec<serde_json::Value>, Option<Cursor>)> {
+        let spec = parse_github_uri(uri)?;
+        let url = resolve_fetch_page_url(&spec, &cursor)?;
+
+        let client = github_http_client()?;
+        let (raw, next_link) = client.get_json_with_next_link(&url).await?;
+
+        let arr = response_array(&spec.owner, &spec.repo, spec.kind, &raw)?;
+        let items = normalize_items(spec.kind, arr);
+        let next_cursor = next_link.map(Cursor::LinkHeader);
+        Ok((items, next_cursor))
+    }
+
+    /// Preserves `Adapter::fetch`'s `{repo, kind, items}` output shape across
+    /// the pagination path (see module docs "Pagination").
+    fn wrap_items(
+        &self,
+        items: Vec<serde_json::Value>,
+        uri: &WireUri,
+    ) -> WireResult<serde_json::Value> {
+        let spec = parse_github_uri(uri)?;
+        Ok(serde_json::json!({
+            "repo": { "owner": spec.owner, "name": spec.repo },
+            "kind": spec.kind.as_str(),
+            "items": items,
+        }))
     }
 }
 
@@ -313,37 +444,54 @@ fn normalize_github(
     spec: &GithubUriSpec,
     raw: &serde_json::Value,
 ) -> WireResult<serde_json::Value> {
-    let arr = raw.as_array().ok_or_else(|| {
-        WireError::Storage(format!(
-            "github adapter: unexpected response shape for {}/{} ({}): expected a JSON array",
-            spec.owner,
-            spec.repo,
-            spec.kind.as_str()
-        ))
-    })?;
-
-    let items: Vec<serde_json::Value> = match spec.kind {
-        // GitHub's /issues endpoint mixes in pull requests (entries carrying
-        // a `pull_request` key) — filter those out, per module docs.
-        GithubKind::Issues => arr
-            .iter()
-            .filter(|v| v.get("pull_request").is_none())
-            .take(spec.limit)
-            .map(normalize_issue_or_pull)
-            .collect(),
-        GithubKind::Pulls => arr
-            .iter()
-            .take(spec.limit)
-            .map(normalize_issue_or_pull)
-            .collect(),
-        GithubKind::Releases => arr.iter().take(spec.limit).map(normalize_release).collect(),
-    };
+    let arr = response_array(&spec.owner, &spec.repo, spec.kind, raw)?;
+    let items: Vec<serde_json::Value> = normalize_items(spec.kind, arr)
+        .into_iter()
+        .take(spec.limit)
+        .collect();
 
     Ok(serde_json::json!({
         "repo": { "owner": spec.owner, "name": spec.repo },
         "kind": spec.kind.as_str(),
         "items": items,
     }))
+}
+
+/// Extracts the raw JSON array from a GitHub REST API response, failing
+/// loud (naming the repo + kind) when the response isn't a JSON array.
+/// Shared by [`normalize_github`] and `Pageable::fetch_page`.
+fn response_array<'a>(
+    owner: &str,
+    repo: &str,
+    kind: GithubKind,
+    raw: &'a serde_json::Value,
+) -> WireResult<&'a Vec<serde_json::Value>> {
+    raw.as_array().ok_or_else(|| {
+        WireError::Storage(format!(
+            "github adapter: unexpected response shape for {owner}/{repo} ({}): expected a JSON array",
+            kind.as_str()
+        ))
+    })
+}
+
+/// Normalizes every entry in `arr` per `kind`, with no `limit` truncation
+/// (callers apply `.take(limit)` themselves — the pagination path
+/// (`Pageable::fetch_page`) normalizes a full page and lets the wire-layer
+/// driver truncate across accumulated pages instead).
+///
+/// GitHub's `/issues` endpoint mixes in pull requests (entries carrying a
+/// `pull_request` key); `kind=issues` filters those out first, per module
+/// docs "URI grammar" / "Pagination".
+fn normalize_items(kind: GithubKind, arr: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    match kind {
+        GithubKind::Issues => arr
+            .iter()
+            .filter(|v| v.get("pull_request").is_none())
+            .map(normalize_issue_or_pull)
+            .collect(),
+        GithubKind::Pulls => arr.iter().map(normalize_issue_or_pull).collect(),
+        GithubKind::Releases => arr.iter().map(normalize_release).collect(),
+    }
 }
 
 /// Normalize a single GitHub issue or pull-request JSON object (same shape
@@ -763,5 +911,102 @@ mod tests {
         let items = v["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["number"].as_u64().unwrap(), 1);
+    }
+
+    // ---- Pageable (Layer 3a of GH #1) ----
+    //
+    // `fetch_page` / `Adapter::fetch` both perform live HTTP via
+    // `HttpClient` (a concrete struct, not behind a mockable trait), and
+    // this workspace has no wiremock / hand-rolled mock-server pattern
+    // (checked `persona-wire-adapter-github`'s Cargo.toml and every other
+    // adapter crate at implementation time — neither is used anywhere).
+    // `adapter.rs`'s crate-root docs also establish the repo-wide
+    // convention that Adapter tests are offline unit tests over inline
+    // fixtures, never live network access. So the cursor→URL decision
+    // (`resolve_fetch_page_url`) and the shape-building (`wrap_items`) are
+    // tested directly as the pure functions they are, per the Done
+    // Criteria's "or verify via URL construction helper" allowance —
+    // mirroring the existing `endpoint_url_*` test pattern below.
+
+    #[test]
+    fn github_pageable_max_page_size_is_100() {
+        let adapter = GithubAdapter;
+        assert_eq!(adapter.max_page_size(), GITHUB_PER_PAGE_MAX);
+    }
+
+    #[test]
+    fn github_as_pageable_returns_some() {
+        let adapter = GithubAdapter;
+        let pageable = adapter.as_pageable();
+        assert!(pageable.is_some(), "override should return Some(self)");
+        assert_eq!(pageable.unwrap().max_page_size(), GITHUB_PER_PAGE_MAX);
+    }
+
+    #[test]
+    fn github_fetch_page_first_call_uses_kind_endpoint() {
+        // cursor = None routes through `endpoint_url_for_first_page`
+        // (per_page = 100 unconditionally), not the limit-scaled
+        // `endpoint_url` the non-paginated fast path uses.
+        let issues = parse("github://octocat/hello-world").unwrap();
+        assert_eq!(
+            resolve_fetch_page_url(&issues, &None).unwrap(),
+            "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=100"
+        );
+
+        let pulls = parse("github://octocat/hello-world?kind=pulls").unwrap();
+        assert_eq!(
+            resolve_fetch_page_url(&pulls, &None).unwrap(),
+            "https://api.github.com/repos/octocat/hello-world/pulls?state=open&per_page=100"
+        );
+
+        let releases = parse("github://octocat/hello-world?kind=releases").unwrap();
+        assert_eq!(
+            resolve_fetch_page_url(&releases, &None).unwrap(),
+            "https://api.github.com/repos/octocat/hello-world/releases?per_page=100"
+        );
+    }
+
+    #[test]
+    fn github_fetch_page_with_link_cursor_uses_url_directly() {
+        let spec = parse("github://octocat/hello-world").unwrap();
+        let cursor = Some(Cursor::LinkHeader(
+            "https://api.github.com/repositories/1/issues?page=2&state=open".to_string(),
+        ));
+        assert_eq!(
+            resolve_fetch_page_url(&spec, &cursor).unwrap(),
+            "https://api.github.com/repositories/1/issues?page=2&state=open",
+            "LinkHeader url used literally, no rebuild"
+        );
+    }
+
+    #[test]
+    fn github_fetch_page_rejects_other_cursor_variants() {
+        let spec = parse("github://octocat/hello-world").unwrap();
+        for cursor in [
+            Cursor::PageNumber(2),
+            Cursor::NextToken("abc123".to_string()),
+            Cursor::Offset(10),
+        ] {
+            let err = resolve_fetch_page_url(&spec, &Some(cursor)).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("unsupported cursor variant"),
+                "unexpected error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_wrap_items_produces_repo_kind_items_shape() {
+        let adapter = GithubAdapter;
+        let uri = WireUri::parse("github://octocat/hello-world?kind=pulls").unwrap();
+        let items = vec![serde_json::json!({"number": 1})];
+
+        let wrapped = adapter.wrap_items(items.clone(), &uri).unwrap();
+
+        assert_eq!(wrapped["repo"]["owner"].as_str().unwrap(), "octocat");
+        assert_eq!(wrapped["repo"]["name"].as_str().unwrap(), "hello-world");
+        assert_eq!(wrapped["kind"].as_str().unwrap(), "pulls");
+        assert_eq!(wrapped["items"], serde_json::Value::Array(items));
     }
 }
