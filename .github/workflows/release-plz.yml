@@ -3,6 +3,12 @@ name: Release-plz
 on:
   push:
     branches: [main]
+  # Manual trigger for recovery from a mid-release-cycle infra failure
+  # (e.g. the release PR merge run failed for a missing system dep and the
+  # follow-up fix push doesn't re-fire the publish path because release-plz
+  # only publishes off release-PR-merge commits). Run via `gh workflow run
+  # release-plz.yml --ref main` or the GH Actions UI.
+  workflow_dispatch:
 
 permissions: {}
 
