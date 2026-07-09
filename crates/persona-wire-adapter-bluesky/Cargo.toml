@@ -1,0 +1,28 @@
+[package]
+name = "persona-wire-adapter-bluesky"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for Bluesky (scheme `bluesky://`). Fetches an actor's author feed / profile / post thread over the public AT Protocol XRPC AppView (public.api.bsky.app), unauthenticated, and normalizes it to a compact JSON shape."
+
+[dependencies]
+persona-wire-core.workspace = true
+persona-wire-transport-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+# Query-string construction for the XRPC GET endpoints (percent-encodes the
+# `actor` / `uri` query values — DIDs contain `:` and at:// URIs contain `:`
+# and `/`, both of which must be escaped when embedded in a query string).
+# Matches persona-wire-adapter-todoist's `url::Url::query_pairs_mut` convention.
+url.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

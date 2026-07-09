@@ -12,6 +12,7 @@ members = [
     "crates/persona-wire-core",
     "crates/persona-wire-mcp",
     "crates/persona-wire",
+    "crates/persona-wire-adapter-activitypub",
     "crates/persona-wire-adapter-mini-app",
     "crates/persona-wire-adapter-persona-pack",
     "crates/persona-wire-adapter-sqlite-x",
@@ -24,6 +25,8 @@ members = [
     "crates/persona-wire-adapter-todoist",
     "crates/persona-wire-adapter-notion",
     "crates/persona-wire-adapter-slack",
+    "crates/persona-wire-adapter-apple-notes",
+    "crates/persona-wire-adapter-bluesky",
 ]
 
 [workspace.package]
@@ -48,6 +51,9 @@ tokio = { version = "1", features = ["full"] }
 
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# RFC3339 timestamp formatting (Core Data timestamp -> RFC3339, applenotes:// adapter macOS-only path)
+time = { version = "0.3", features = ["formatting"] }
 
 # MCP server
 rmcp = { version = "1", features = ["server", "transport-io"] }
@@ -93,6 +99,7 @@ rpassword = "7"
 
 # Intra-workspace
 persona-wire-core = { path = "crates/persona-wire-core", version = "0.12.0" }
+persona-wire-adapter-activitypub = { path = "crates/persona-wire-adapter-activitypub", version = "0.12.0" }
 persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.12.0" }
 persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.12.0" }
 persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.12.0" }
@@ -105,3 +112,5 @@ persona-wire-adapter-github = { path = "crates/persona-wire-adapter-github", ver
 persona-wire-adapter-todoist = { path = "crates/persona-wire-adapter-todoist", version = "0.12.0" }
 persona-wire-adapter-notion = { path = "crates/persona-wire-adapter-notion", version = "0.12.0" }
 persona-wire-adapter-slack = { path = "crates/persona-wire-adapter-slack", version = "0.12.0" }
+persona-wire-adapter-apple-notes = { path = "crates/persona-wire-adapter-apple-notes", version = "0.12.0" }
+persona-wire-adapter-bluesky = { path = "crates/persona-wire-adapter-bluesky", version = "0.12.0" }

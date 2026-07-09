@@ -12,6 +12,7 @@ description = "persona-wire MCP server library — exposes serve_stdio() for the
 
 [dependencies]
 persona-wire-core.workspace = true
+persona-wire-adapter-activitypub.workspace = true
 persona-wire-adapter-mini-app.workspace = true
 persona-wire-adapter-mcp.workspace = true
 persona-wire-adapter-obsidian.workspace = true
@@ -22,6 +23,8 @@ persona-wire-adapter-github.workspace = true
 persona-wire-adapter-todoist.workspace = true
 persona-wire-adapter-notion.workspace = true
 persona-wire-adapter-slack.workspace = true
+persona-wire-adapter-apple-notes.workspace = true
+persona-wire-adapter-bluesky.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true

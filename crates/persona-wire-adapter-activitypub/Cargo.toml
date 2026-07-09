@@ -1,0 +1,23 @@
+[package]
+name = "persona-wire-adapter-activitypub"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for the Fediverse (scheme `activitypub://`). Fetches a public ActivityPub actor's outbox or profile over HTTP(S), unauthenticated, and normalizes it to a compact JSON shape."
+
+[dependencies]
+persona-wire-core.workspace = true
+persona-wire-transport-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

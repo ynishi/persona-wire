@@ -1,0 +1,30 @@
+[package]
+name = "persona-wire-adapter-apple-notes"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for the local Notes.app database (scheme `applenotes://`). Read-only NoteStore.sqlite access via rusqlite; macOS only (compiles to an `unsupported platform` stub on other targets)."
+
+[dependencies]
+persona-wire-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+
+# NoteStore.sqlite only exists on macOS; gating rusqlite (and the RFC3339
+# formatter used for its Core Data timestamp columns) behind this target
+# skips the bundled SQLite build on non-macOS workspace members.
+[target.'cfg(target_os = "macos")'.dependencies]
+rusqlite.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tempfile = "3"

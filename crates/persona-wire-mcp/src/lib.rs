@@ -11,12 +11,12 @@
 //! [`WireServer::new`] constructs a persistent [`SqliteStorage`] +
 //! [`PluginRegistry`] pair once at startup. The registry combines
 //! core defaults (FileAdapter + HandlebarsEngine + StaticProjection)
-//! with the ten external adapter crates
+//! with the thirteen external adapter crates
 //! (`persona-wire-adapter-{mini-app, sqlite-x, obsidian,
-//! persona-pack, mcp, rss, github, todoist, notion, slack}`), so
-//! every scheme-tagged URI a caller passes to `wire_prompt_context`,
-//! `wire_render`, or `wire_workflow_fire` resolves through the same
-//! pipeline.
+//! persona-pack, mcp, rss, github, todoist, notion, slack,
+//! apple-notes, activitypub, bluesky}`), so every scheme-tagged URI a caller
+//! passes to `wire_prompt_context`, `wire_render`, or `wire_workflow_fire`
+//! resolves through the same pipeline.
 //!
 //! No CLI parsing / entry-point code lives here — the `persona-wire`
 //! binary in the sibling crate is the only intended caller, and its
@@ -31,6 +31,9 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use persona_wire_adapter_activitypub::ActivityPubAdapter;
+use persona_wire_adapter_apple_notes::AppleNotesAdapter;
+use persona_wire_adapter_bluesky::BlueskyAdapter;
 use persona_wire_adapter_github::GithubAdapter;
 use persona_wire_adapter_mcp::{McpAdapter, McpEndpointResolver, SqliteEndpointResolver};
 use persona_wire_adapter_mini_app::MiniAppAdapter;
@@ -102,6 +105,9 @@ impl WireServer {
                     .with_adapter(TodoistAdapter)
                     .with_adapter(NotionAdapter)
                     .with_adapter(SlackAdapter)
+                    .with_adapter(AppleNotesAdapter)
+                    .with_adapter(ActivityPubAdapter)
+                    .with_adapter(BlueskyAdapter)
                     .build()
                     .expect("default plugin registry build"),
             ),
