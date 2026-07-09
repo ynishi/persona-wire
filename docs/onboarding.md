@@ -146,6 +146,55 @@ always single-row.
   `[[wiki-link]]` references when `?links=edge` is set (default `off`).
   Returns `{ vault_path, note_path, frontmatter, body, wiki_links? }`.
   Example: `obsidian:////Users/me/vault/daily.md?frontmatter=on&links=edge`.
+- `sqlite://<path>[?query=<SQL>|?table=<name>][&limit=N]` — read-only
+  SQL against any SQLite file (mini-app schema convention 非依存).
+  `<path>` accepts `~/` expansion; `sqlite:///abs/path.db`,
+  `sqlite://./rel.db`, and `sqlite://~/store.db` all resolve. `?query=`
+  (URL-encoded `SELECT` / `PRAGMA`, primary form) and `?table=` (sugar
+  for `SELECT * FROM "<name>"`) are mutually exclusive. `?limit=N`
+  appends `LIMIT N` in the sugar form and caps row count in the primary
+  form (SQL body untouched). No credentials required (local file access).
+  Returns `{ scheme, path, count, rows: [...] }`; BLOB columns are
+  base64-encoded.
+- `applenotes://[folder]/?query=<substring>[&limit=N]` — read-only SQL
+  against the Notes.app `NoteStore.sqlite` on the local machine.
+  `folder` (URI host) is optional; empty = all folders. `?query=`
+  matches note titles case-insensitively as a substring (omit for all
+  notes). `?limit=N` default `50`. No credentials required (local file
+  access). Returns `{ folder, query, notes: [{ id, title, folder,
+  created, modified }] }`, sorted by `modified` descending.
+  **macOS only** — non-macOS hosts return
+  `WireError::Storage("apple-notes adapter: unsupported platform (macOS only)")`
+  without touching the fs. Note bodies are out of scope (the
+  `ZICNOTEDATA` column is gzip-protobuf; an AppleScript fallback is a
+  carry).
+- `persona-pack://<persona_id>/projections` — reads a persona-pack
+  Pack's `[extra.persona_wire.projections.<axis>]` overlay via the
+  local SDK. `host = <persona_id>` and `path = /projections` are both
+  required (single resource today; `?axis=<name>` subset selection is
+  a carry). Root is `PERSONA_PACK_ROOT` env → `~/persona-pack`
+  fallback. No credentials required. Returns
+  `{ scheme, persona_id, projections: { <axis>: { template, target_form, merge_strategy } } }`;
+  upstream TOML field names (`target` / `strategy` etc.) are absorbed
+  inside the adapter so drift stays inside the Facade. Best-effort:
+  missing persona / missing `[extra.persona_wire]` / read error return
+  `projections: {}` silently (matches the `wire_prompt_context` Phase 0
+  overlay fallback).
+- `mcp://<server>/tools/<tool_name>[?<args>]` /
+  `mcp://<server>/resources?uri=<resource_uri>` /
+  `mcp://<server>/resources/<passthrough>` — generic dispatch to any
+  MCP server via `rmcp` 1.x. `<server>` is a graph node alias with
+  `type = "mcp_server"` and
+  `metadata.endpoint = ServerEndpoint::{Stdio|Http}` registered via
+  `wire_node_create` (stateless connect → call → disconnect per fetch).
+  Tool arguments pass as scalar `?key=value` (all coerced to `String`)
+  or as a single JSON object via `?_args=<json>` (preserves numeric /
+  bool / nested types — required when the tool expects non-string
+  parameters). Credentials are not handled by the adapter; supply them
+  via the `env` map on the `ServerEndpoint::Stdio` variant. Returns
+  `serde_json::to_value(CallToolResult)` (or `ReadResourceResult`) —
+  the MCP response is passed through verbatim. Default RPC timeout
+  30 s.
 - `rss://<host>/<path>[?scheme=http][?limit=N]` — fetches an RSS 2.0 /
   RSS 1.0 / Atom / JSON Feed document (format auto-detected by
   `feed_rs`) and returns
@@ -193,6 +242,33 @@ always single-row.
   internal apps stay on the pre-2025 Tier 3 for `conversations.history`
   (50+ req/min) per Slack's 2025-06 clarification. `limit` is capped
   at 999.
+- `activitypub://<instance>/@<user>[?kind=profile|outbox][&limit=N]` —
+  reads public ActivityPub actors (Mastodon / Misskey / Pleroma /
+  Firefish / …) via the standard `application/activity+json` `Accept`
+  header. `instance` is a hostname, `path` is the Mastodon handle
+  `/@<user>` (resolved to the canonical actor URL
+  `https://<instance>/users/<user>` internally). `?kind=` default
+  `outbox` (recent public posts) or `profile` (actor metadata).
+  `?limit=N` default `20` (`outbox` only). No credentials required —
+  the adapter touches only the public unauthenticated surface (follow /
+  write / DM / private posts are out of scope). Returns
+  `{ kind, actor, posts: [{ id, content, published, url, attachments }] }`
+  (`outbox`) or
+  `{ kind, actor: { url, handle, name, summary, followers_url, following_url } }`
+  (`profile`). HTML in `content` / `summary` is passed through raw
+  (no decode / no sanitize).
+- `bluesky://<actor>[?kind=feed|profile|thread][&limit=N][&post=<rkey>]` —
+  reads the Bluesky public AppView (`public.api.bsky.app`) via XRPC.
+  `<actor>` accepts a handle (`alice.bsky.social`) or a DID
+  (`did:plc:xxx`). `?kind=` default `feed` (`getAuthorFeed`), or
+  `profile` (`getProfile`), or `thread` (`getPostThread`; requires
+  `?post=<rkey>`). `?limit=N` default `30`, hard-capped at `100` (the
+  `getAuthorFeed` API cap). No credentials required — home timeline /
+  DM / follow / write / OAuth endpoints are out of scope. Returns
+  `feed = { kind, actor, posts: [...] }` /
+  `profile = { kind, actor: { handle, did, displayName, description, followers_count, follows_count, posts_count } }` /
+  `thread = { kind, post, replies: [...] }` (single-level replies only;
+  nested trees drop after depth 1).
 
 Bulk-insert through `wire_nodes_create_batch` / `wire_edges_create_batch`
 when you have many axes at once.
