@@ -79,6 +79,29 @@
 //! - Adapter expansion targets coverage (including minor services), not
 //!   demand-ranked prioritization. The only exclusion criterion is that the
 //!   service has been discontinued.
+//!
+//! ### `?auth=<service_key>` query param convention (Phase 1, decided
+//! together with `application::auth`)
+//!
+//! Every HTTP-authenticated adapter honors an optional `?auth=<service_key>`
+//! query param on its `source_uri`:
+//!
+//! - `<service_key>` is a **credential reference key only** — never a
+//!   secret. It is looked up via
+//!   `persona_wire_credentials::Credentials::get(service_key)` (env var →
+//!   OS keyring), exactly like the adapter's own literal default service
+//!   name (e.g. `"github"`).
+//! - When present, `<service_key>` **overrides** the adapter's literal
+//!   default service name for that one fetch (e.g. `?auth=github-alt` looks
+//!   up the `github-alt` credential instead of `github`) — lets one wiring
+//!   entry authenticate as a different identity than another entry using
+//!   the same adapter/scheme.
+//! - When absent, behavior is unchanged: the adapter's literal default
+//!   service name is used (full backward compatibility).
+//! - This is an ordinary query key from every adapter's own URI-grammar
+//!   perspective — it follows the same "unknown query keys are silently
+//!   ignored" convention documented above, so adding `?auth=` never
+//!   conflicts with an adapter's own `?kind=` / `?limit=` / etc. params.
 
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;

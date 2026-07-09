@@ -46,6 +46,7 @@
 
 #![warn(missing_docs)]
 
+use persona_wire_core::application::auth::{AuthMaterial, AuthMethod, AuthResolver, AuthSpec};
 use persona_wire_core::{WireError, WireResult};
 use secrecy::SecretString;
 
@@ -344,6 +345,50 @@ impl Credentials {
     }
 }
 
+/// [`AuthResolver`] impl wrapping a [`Credentials`] chain — the concrete
+/// resolver `persona-wire-core`'s `application::auth::AuthResolver` trait is
+/// written against. `Default` wraps [`Credentials::default_chain`] (env →
+/// keyring), matching every adapter crate's existing `Credentials::` usage.
+pub struct CredentialsAuthResolver {
+    credentials: Credentials,
+}
+
+impl CredentialsAuthResolver {
+    /// Wrap an explicit [`Credentials`] chain (e.g. a test double built via
+    /// [`Credentials::with_providers`]).
+    pub fn new(credentials: Credentials) -> Self {
+        Self { credentials }
+    }
+}
+
+impl Default for CredentialsAuthResolver {
+    /// Wraps [`Credentials::default_chain`] (env var → OS keyring).
+    fn default() -> Self {
+        Self::new(Credentials::default_chain())
+    }
+}
+
+impl AuthResolver for CredentialsAuthResolver {
+    /// `AuthMethod::Bearer` resolves through [`Credentials::get`], mapped
+    /// into [`AuthMaterial::Bearer`]. Any other `AuthMethod` variant (none
+    /// exist yet — Phase 1 only ships `Bearer` — but `AuthMethod` is
+    /// `#[non_exhaustive]` so a later phase can add one) fails loud with a
+    /// structured [`WireError::Storage`] naming the unsupported method,
+    /// rather than silently resolving to `Ok(None)`.
+    fn resolve(&self, spec: &AuthSpec) -> WireResult<Option<AuthMaterial>> {
+        match spec.method {
+            AuthMethod::Bearer => Ok(self
+                .credentials
+                .get(&spec.service_key)?
+                .map(AuthMaterial::Bearer)),
+            other => Err(WireError::Storage(format!(
+                "credentials: unsupported auth method {other:?} for service '{}'",
+                spec.service_key
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +654,48 @@ mod tests {
     fn env_token_provider_is_read_only_by_trait_bound() {
         fn assert_read_only<P: TokenProvider>(_: &P) {}
         assert_read_only(&EnvTokenProvider);
+    }
+
+    // ---- CredentialsAuthResolver (application::auth::AuthResolver impl) ----
+    //
+    // Env provider only (no KeyringTokenProvider) — real OS keychain access
+    // is never exercised from this offline unit test path.
+
+    #[test]
+    fn credentials_auth_resolver_bearer_resolves_from_env() {
+        let service = "test-service-auth-resolver-delta";
+        let var = EnvTokenProvider::primary_var_name(service);
+        std::env::set_var(&var, "resolver-tok");
+        let resolver = CredentialsAuthResolver::new(Credentials::with_providers(vec![Box::new(
+            EnvTokenProvider,
+        )]));
+        let got = resolver.resolve(&AuthSpec::bearer(service)).unwrap();
+        std::env::remove_var(&var);
+        match got {
+            Some(AuthMaterial::Bearer(secret)) => {
+                assert_eq!(secret.expose_secret(), "resolver-tok")
+            }
+            other => panic!("expected Some(AuthMaterial::Bearer(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn credentials_auth_resolver_unset_key_returns_ok_none() {
+        let resolver = CredentialsAuthResolver::new(Credentials::with_providers(vec![Box::new(
+            EnvTokenProvider,
+        )]));
+        let got = resolver
+            .resolve(&AuthSpec::bearer(
+                "test-service-auth-resolver-epsilon-never-set",
+            ))
+            .unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn credentials_auth_resolver_default_wraps_default_chain() {
+        // Default() must not panic building the chain (env + keyring
+        // providers, no I/O performed at construction time).
+        let _resolver = CredentialsAuthResolver::default();
     }
 }

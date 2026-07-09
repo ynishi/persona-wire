@@ -58,6 +58,11 @@
 //! or store one in the OS keychain via `persona-wire token set todoist`. The
 //! token is found under Todoist Settings → Integrations → Developer.
 //!
+//! The literal `"todoist"` service key is overridable per-fetch via the
+//! URI's `?auth=<service_key>` query param (see `persona_wire_core::
+//! infrastructure::adapter`'s "External service integration policy" for the
+//! convention); absent, behavior is unchanged.
+//!
 //! Todoist enforces a rate limit of roughly 1,000 requests per 15 minutes
 //! per user; exceeding it returns HTTP 429, which surfaces as a normal fetch
 //! failure via `persona_wire_transport_http::HttpClient`.
@@ -149,7 +154,7 @@ impl Adapter for TodoistAdapter {
     /// resolution, and output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_todoist_uri(uri)?;
-        let client = todoist_http_client()?;
+        let client = todoist_http_client(uri)?;
         let mut items: Vec<serde_json::Value> = Vec::new();
         let mut cursor: Option<String> = None;
         let has_more = loop {
@@ -180,19 +185,36 @@ impl Adapter for TodoistAdapter {
 
 /// Builds a fresh, Todoist-configured `HttpClient` (auth resolved per-call,
 /// not at boot; see module docs "Auth").
-fn todoist_http_client() -> WireResult<HttpClient> {
+fn todoist_http_client(uri: &WireUri) -> WireResult<HttpClient> {
     // Auth is resolved per-fetch (not at boot); see module docs "Auth".
     // Todoist has no unauthenticated access mode, unlike the github
     // adapter, so a missing token fails loud here.
-    let token = Credentials::default_chain().get("todoist")?.ok_or_else(|| {
-        WireError::Storage(
-            "todoist adapter: no token found for 'todoist' (set PERSONA_WIRE_TOKEN_TODOIST / TODOIST_API_TOKEN, or run 'persona-wire token set todoist')"
-                .to_string(),
-        )
+    let service_key = resolve_service_key(uri, "todoist");
+    let token = Credentials::default_chain().get(service_key)?.ok_or_else(|| {
+        if service_key == "todoist" {
+            WireError::Storage(
+                "todoist adapter: no token found for 'todoist' (set PERSONA_WIRE_TOKEN_TODOIST / TODOIST_API_TOKEN, or run 'persona-wire token set todoist')"
+                    .to_string(),
+            )
+        } else {
+            WireError::Storage(format!(
+                "todoist adapter: no token found for '{service_key}' (set PERSONA_WIRE_TOKEN_<KEY> uppercased, or run 'persona-wire token set {service_key}')"
+            ))
+        }
     })?;
     Ok(HttpClient::new("todoist adapter")
         .with_timeout(FETCH_TIMEOUT)
         .with_bearer(token))
+}
+
+/// Resolves the credential service key for this fetch: the URI's
+/// `?auth=<service_key>` query param when present (reference key only,
+/// never a secret — see `persona_wire_core::infrastructure::adapter`'s
+/// "External service integration policy"), otherwise `default_key` (this
+/// adapter's literal `"todoist"` service name, preserving pre-existing
+/// behavior when the param is absent).
+fn resolve_service_key<'a>(uri: &'a WireUri, default_key: &'static str) -> &'a str {
+    uri.query_get("auth").unwrap_or(default_key)
 }
 
 /// The two Todoist endpoint kinds this adapter can target, selected via the
@@ -500,6 +522,20 @@ fn truncate_description(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- resolve_service_key (?auth= override, network-free) ----
+
+    #[test]
+    fn resolve_service_key_defaults_when_auth_param_absent() {
+        let uri = WireUri::parse("todoist://tasks").unwrap();
+        assert_eq!(resolve_service_key(&uri, "todoist"), "todoist");
+    }
+
+    #[test]
+    fn resolve_service_key_overrides_when_auth_param_present() {
+        let uri = WireUri::parse("todoist://tasks?auth=todoist-alt").unwrap();
+        assert_eq!(resolve_service_key(&uri, "todoist"), "todoist-alt");
+    }
 
     // ---- parse_todoist_uri ----
 

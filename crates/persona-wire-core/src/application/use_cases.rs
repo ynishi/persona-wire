@@ -8,6 +8,7 @@ use crate::domain::graph::Node;
 use crate::domain::port::ProjectionInput;
 use crate::domain::specification::Specification;
 use crate::infrastructure::storage::SqliteStorage;
+use crate::infrastructure::wire_uri::WireUri;
 
 /// Resolve a `TemplateEngine` from `registry` by id, falling back to the
 /// `"handlebars"` default when `hint` is `None`. Surfaces a structured
@@ -271,6 +272,11 @@ struct CollectedSlot {
     /// Projection 名 (= `<persona>.section.<slot>`)。 エラー / warning メッセージで
     /// projection を指し示すのに使う。
     projection_name: String,
+    /// Wiring entry's `metadata.auth` (credential reference key, never a
+    /// secret — see `application::auth` module docs). `None` when the entry
+    /// authenticates via the adapter's literal default service name.
+    /// Consumed by `render_collected_slot_async` via [`merge_auth_query`].
+    auth: Option<String>,
 }
 
 /// 全 builtin slot (or projection_names で subset) を iterate し、 各 slot の
@@ -439,6 +445,7 @@ fn collect_slot(
         ));
         return Ok(None);
     };
+    let auth = crate::application::wiring_mapper::extract_auth(&node).map(str::to_owned);
 
     let projection_name =
         crate::application::projection_naming::workflow_emit_projection_name(persona_id, slot);
@@ -481,6 +488,7 @@ fn collect_slot(
         projection_kind: base_kind,
         projection_config: base_config,
         projection_name,
+        auth,
     }))
 }
 
@@ -499,7 +507,16 @@ async fn render_collected_slot_async(
     registry: &PluginRegistry,
     warnings: &mut Vec<String>,
 ) -> WireResult<RenderedProjection> {
-    let fetched = match registry.route(&c.source_uri) {
+    // Indirect auth reference layer — `c.auth` is the
+    // wiring entry's `metadata.auth` (credential reference key, never a
+    // secret). Merge it into the raw `source_uri` as `?auth=<key>` for this
+    // one fetch, unless the URI already declares its own `auth` param (URI
+    // wins, never overwritten). `c.source_uri` itself (and the
+    // `wiring_entry.source_uri` field surfaced below) stays the stored,
+    // unmerged value — only the URI actually routed/fetched carries the
+    // merge.
+    let fetch_uri = merge_auth_query(&c.source_uri, c.auth.as_deref());
+    let fetched = match registry.route(&fetch_uri) {
         Ok((adapter, uri)) => match adapter.fetch(&uri).await {
             Ok(v) => v,
             Err(e) => {
@@ -547,6 +564,52 @@ async fn render_collected_slot_async(
         target_form: c.target_form,
         rendered,
     })
+}
+
+/// Merges a wiring entry's `metadata.auth` service key into `source_uri` as
+/// an `?auth=<key>` query param, per the convention documented in
+/// `infrastructure::adapter`'s "External service integration policy".
+///
+/// - `meta_auth: None` (no `metadata.auth` on the wiring entry) → `source_uri`
+///   unchanged.
+/// - `meta_auth: Some(key)` and `source_uri` has **no** `auth` query param →
+///   `key` is appended.
+/// - `meta_auth: Some(key)` but `source_uri` **already** declares its own
+///   `auth` query param → `source_uri` unchanged (URI wins, never
+///   overwritten — a URI-declared `auth` always takes precedence over the
+///   wiring entry's `metadata.auth`).
+/// - `source_uri` fails to parse as a [`WireUri`] → unchanged; the real
+///   parse error surfaces downstream from `PluginRegistry::route` instead
+///   of being masked here.
+fn merge_auth_query(source_uri: &str, meta_auth: Option<&str>) -> String {
+    let Some(key) = meta_auth else {
+        return source_uri.to_string();
+    };
+    match WireUri::parse(source_uri) {
+        Ok(parsed) if parsed.query_get("auth").is_none() => {
+            append_query_param(source_uri, "auth", key)
+        }
+        _ => source_uri.to_string(),
+    }
+}
+
+/// Appends a `key=value` query param to `raw_uri`, choosing `?` or `&` based
+/// on whether a query string is already present, and re-inserting any
+/// `#fragment` after the new param (fragments always trail the query
+/// string per RFC 3986). Operates on the raw string only — does not
+/// re-interpret scheme/host/path, which stay the exclusive concern of
+/// [`WireUri::parse`] and the adapters.
+fn append_query_param(raw_uri: &str, key: &str, value: &str) -> String {
+    let (base, fragment) = match raw_uri.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (raw_uri, None),
+    };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    let merged = format!("{base}{sep}{key}={value}");
+    match fragment {
+        Some(f) => format!("{merged}#{f}"),
+        None => merged,
+    }
 }
 
 /// Iterate every registered node type and collect nodes matching `spec`.
@@ -2953,5 +3016,153 @@ mod tests {
             sorted(got),
             vec!["mail".to_string(), "news".into(), "todo".into()]
         );
+    }
+
+    // ---- adapter-auth-spec ST4/ST5 — merge_auth_query / append_query_param ----
+
+    #[test]
+    fn merge_auth_query_no_metadata_auth_leaves_uri_unchanged() {
+        assert_eq!(
+            merge_auth_query("github://octocat/hello-world", None),
+            "github://octocat/hello-world"
+        );
+    }
+
+    #[test]
+    fn merge_auth_query_appends_when_uri_has_no_query() {
+        assert_eq!(
+            merge_auth_query("github://octocat/hello-world", Some("github-alt")),
+            "github://octocat/hello-world?auth=github-alt"
+        );
+    }
+
+    #[test]
+    fn merge_auth_query_appends_with_ampersand_when_uri_already_has_query() {
+        assert_eq!(
+            merge_auth_query(
+                "github://octocat/hello-world?kind=issues",
+                Some("github-alt")
+            ),
+            "github://octocat/hello-world?kind=issues&auth=github-alt"
+        );
+    }
+
+    #[test]
+    fn merge_auth_query_uri_side_auth_wins_no_overwrite() {
+        // URI-declared auth wins: metadata.auth must never overwrite it.
+        assert_eq!(
+            merge_auth_query(
+                "github://octocat/hello-world?auth=from-uri",
+                Some("from-metadata")
+            ),
+            "github://octocat/hello-world?auth=from-uri"
+        );
+    }
+
+    #[test]
+    fn merge_auth_query_preserves_fragment_after_merged_query() {
+        assert_eq!(
+            merge_auth_query("file:///tmp/x#frag", Some("svc")),
+            "file:///tmp/x?auth=svc#frag"
+        );
+    }
+
+    #[test]
+    fn merge_auth_query_unparsable_uri_left_unchanged() {
+        // Not `WireUri::parse`-able (no scheme separator) — surfaced later
+        // by `PluginRegistry::route`'s own parse error, not masked here.
+        assert_eq!(
+            merge_auth_query("not-a-uri", Some("svc")),
+            "not-a-uri",
+            "unparsable source_uri must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn append_query_param_uses_question_mark_when_absent() {
+        assert_eq!(
+            append_query_param("mini-app://mailbox", "auth", "k"),
+            "mini-app://mailbox?auth=k"
+        );
+    }
+
+    #[test]
+    fn append_query_param_uses_ampersand_when_query_present() {
+        assert_eq!(
+            append_query_param("mini-app://mailbox?alias=x", "auth", "k"),
+            "mini-app://mailbox?alias=x&auth=k"
+        );
+    }
+
+    // ---- adapter-auth-spec ST4/ST5 — collect_slot auth extraction ----
+
+    fn register_stub_projection(s: &SqliteStorage, name: &str) {
+        use crate::domain::entity::projection::{PluginDispatch, Projection};
+        ProjectionRegistry::new(s)
+            .register(
+                &Projection::from_parts(
+                    name,
+                    "unused_spec_ref",
+                    "n={{count}}",
+                    TargetForm::Prompt,
+                    PluginDispatch::Default,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn collect_slot_extracts_auth_from_wiring_metadata() {
+        use crate::application::wiring_mapper;
+        use crate::domain::entity::{PersonaId, Slot, Source};
+
+        let s = setup();
+        let mut extras = serde_json::Map::new();
+        extras.insert("auth".to_string(), json!("svc-x"));
+        let mut node = bare_node("p.issues", wiring_mapper::WIRING_TYPE);
+        node.metadata = wiring_mapper::wiring_metadata_object(
+            &PersonaId::new("p").unwrap(),
+            &Slot::new("issues").unwrap(),
+            &Source::new("github://o/r").unwrap(),
+            Some(extras),
+        );
+        s.insert_node(&node).unwrap();
+        register_stub_projection(&s, "p.section.issues");
+
+        let proj_reg = ProjectionRegistry::new(&s);
+        let overlays = std::collections::BTreeMap::new();
+        let mut warnings = Vec::new();
+        let collected = collect_slot("issues", "p", &s, &proj_reg, &overlays, &mut warnings)
+            .unwrap()
+            .expect("wiring entry should collect");
+        assert_eq!(collected.source_uri, "github://o/r");
+        assert_eq!(collected.auth.as_deref(), Some("svc-x"));
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn collect_slot_auth_none_when_metadata_lacks_auth() {
+        use crate::application::wiring_mapper;
+        use crate::domain::entity::{PersonaId, Slot, Source};
+
+        let s = setup();
+        let mut node = bare_node("p.mailbox", wiring_mapper::WIRING_TYPE);
+        node.metadata = wiring_mapper::wiring_metadata_object(
+            &PersonaId::new("p").unwrap(),
+            &Slot::new("mailbox").unwrap(),
+            &Source::new("mini-app://mailbox").unwrap(),
+            None,
+        );
+        s.insert_node(&node).unwrap();
+        register_stub_projection(&s, "p.section.mailbox");
+
+        let proj_reg = ProjectionRegistry::new(&s);
+        let overlays = std::collections::BTreeMap::new();
+        let mut warnings = Vec::new();
+        let collected = collect_slot("mailbox", "p", &s, &proj_reg, &overlays, &mut warnings)
+            .unwrap()
+            .expect("wiring entry should collect");
+        assert_eq!(collected.auth, None);
     }
 }

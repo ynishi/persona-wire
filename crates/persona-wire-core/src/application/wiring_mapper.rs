@@ -65,6 +65,13 @@ pub const META_SOURCE_URI: &str = "source_uri";
 /// maintenance (used by `is_self_attached_wiring`).
 pub const META_MAINTENANCE_EXEMPT: &str = "maintenance_exempt";
 
+/// `metadata.auth` key — optional credential **reference key** (never a
+/// secret; see `application::auth` module docs). Consumed at fetch time by
+/// `use_cases::render_collected_slot_async`, which merges it into
+/// `source_uri` as an `?auth=<key>` query param unless the URI already
+/// declares its own.
+pub const META_AUTH: &str = "auth";
+
 // -- Node → Entity (extract helpers, tolerant) ------------------------------
 
 /// Borrow the `persona` field as `&str` if present and a string.
@@ -91,6 +98,14 @@ pub fn extract_maintenance_exempt(node: &Node) -> bool {
         .get(META_MAINTENANCE_EXEMPT)
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Borrow the `auth` field (credential reference key, never a secret) as
+/// `&str` if present and a string. `None` when absent — the common case for
+/// wiring entries that authenticate via the adapter's literal default
+/// service name.
+pub fn extract_auth(node: &Node) -> Option<&str> {
+    node.metadata.get(META_AUTH).and_then(Value::as_str)
 }
 
 /// Validate-and-extract the slot as a typed [`Slot`] VO. Returns `Ok(None)`
@@ -222,6 +237,18 @@ mod tests {
     fn extract_maintenance_exempt_defaults_false() {
         let n = raw_node("a.b", json!({}));
         assert!(!extract_maintenance_exempt(&n));
+    }
+
+    #[test]
+    fn extract_auth_reads_present_key() {
+        let n = raw_node("a.b", json!({"auth": "github-alt"}));
+        assert_eq!(extract_auth(&n), Some("github-alt"));
+    }
+
+    #[test]
+    fn extract_auth_returns_none_when_absent() {
+        let n = raw_node("a.b", json!({}));
+        assert_eq!(extract_auth(&n), None);
     }
 
     #[test]

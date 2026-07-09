@@ -140,6 +140,14 @@ pub struct WiringEntry {
     /// hand-writing the `metadata` table.
     #[serde(default)]
     pub maintenance_exempt: Option<bool>,
+    /// Optional credential **reference key** (never a secret) carried into
+    /// `metadata.auth`. Consumed at fetch time by
+    /// `use_cases::render_collected_slot_async`, which merges it into the
+    /// `source_uri` as an `?auth=<key>` query param (see
+    /// `application::auth` module docs) unless the URI already declares its
+    /// own `auth` param.
+    #[serde(default)]
+    pub auth: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
@@ -416,6 +424,9 @@ pub fn install_bundle(
                         "maintenance_exempt".to_string(),
                         serde_json::Value::Bool(flag),
                     );
+                }
+                if let Some(auth) = &entry.auth {
+                    meta.insert("auth".to_string(), serde_json::Value::String(auth.clone()));
                 }
                 if let serde_json::Value::Object(extra) = &entry.metadata {
                     for (k, v) in extra {
@@ -995,6 +1006,62 @@ source_uri = "mini-app://mailbox?alias=for_shi"
         assert!(
             node.metadata.get("maintenance_exempt").is_none(),
             "absent flag should not synthesize metadata key, got: {:?}",
+            node.metadata
+        );
+    }
+
+    #[test]
+    fn install_wiring_persists_auth_service_key() {
+        // `auth` (credential reference key, never a secret) must round-trip
+        // into node metadata alongside persona/axis/source_uri.
+        let s = setup();
+        let body = r#"
+[[wirings]]
+persona_id = "shi"
+slot = "issues"
+source_uri = "github://ynishi/persona-wire"
+auth = "github-alt"
+"#;
+        let bundle = register_bundle(&s, "shi.issues.v1", body);
+        let r = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        assert_eq!(r.installed.len(), 1, "report: {:?}", r);
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+
+        let node_id = s
+            .lookup_node_id_by_name("shi.issues")
+            .unwrap()
+            .expect("wiring node row");
+        let node = s.get_node(&node_id).unwrap().expect("get_node");
+        assert_eq!(
+            node.metadata.get("auth").and_then(|v| v.as_str()),
+            Some("github-alt"),
+            "auth service_key should round-trip into node metadata, got: {:?}",
+            node.metadata
+        );
+    }
+
+    #[test]
+    fn install_wiring_omits_auth_when_absent() {
+        // Coverage for the default branch — wirings that do not set `auth`
+        // must not synthesize a metadata.auth key (full backward
+        // compatibility for existing bundles).
+        let s = setup();
+        let body = r#"
+[[wirings]]
+persona_id = "shi"
+slot = "mailbox"
+source_uri = "mini-app://mailbox?alias=for_shi"
+"#;
+        let bundle = register_bundle(&s, "shi.mailbox.noauth.v1", body);
+        install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+        let node_id = s
+            .lookup_node_id_by_name("shi.mailbox")
+            .unwrap()
+            .expect("wiring node row");
+        let node = s.get_node(&node_id).unwrap().expect("get_node");
+        assert!(
+            node.metadata.get("auth").is_none(),
+            "absent auth should not synthesize metadata key, got: {:?}",
             node.metadata
         );
     }

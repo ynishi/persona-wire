@@ -77,6 +77,11 @@
 //! been granted access to, which surfaces as a normal fetch failure via
 //! `persona_wire_transport_http::HttpClient`.
 //!
+//! The literal `"notion"` service key is overridable per-fetch via the
+//! URI's `?auth=<service_key>` query param (see `persona_wire_core::
+//! infrastructure::adapter`'s "External service integration policy" for the
+//! convention); absent, behavior is unchanged.
+//!
 //! Notion enforces an average rate limit of roughly 3 requests per second
 //! per integration; exceeding it returns HTTP 429 with a `Retry-After`
 //! header. This adapter does not implement client-side throttling — a 429
@@ -195,7 +200,7 @@ impl Adapter for NotionAdapter {
     /// resolution, and output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_notion_uri(uri)?;
-        let client = notion_http_client()?;
+        let client = notion_http_client(uri)?;
         match &spec.kind {
             NotionKind::Search => fetch_search(&client, &spec).await,
             NotionKind::Database(database_id) => {
@@ -236,20 +241,37 @@ impl Adapter for NotionAdapter {
 /// Builds a fresh, Notion-configured `HttpClient` (auth resolved per-call,
 /// not at boot; see module docs "Auth"). Shared by every fetch path so all
 /// stay in sync on headers/timeout/version.
-fn notion_http_client() -> WireResult<HttpClient> {
+fn notion_http_client(uri: &WireUri) -> WireResult<HttpClient> {
     // Auth is resolved per-fetch (not at boot); see module docs "Auth".
     // Notion has no unauthenticated access mode, unlike the github
     // adapter, so a missing token fails loud here.
-    let token = Credentials::default_chain().get("notion")?.ok_or_else(|| {
-        WireError::Storage(
-            "notion adapter: no token found for 'notion' (set PERSONA_WIRE_TOKEN_NOTION / NOTION_TOKEN, or run 'persona-wire token set notion')"
-                .to_string(),
-        )
+    let service_key = resolve_service_key(uri, "notion");
+    let token = Credentials::default_chain().get(service_key)?.ok_or_else(|| {
+        if service_key == "notion" {
+            WireError::Storage(
+                "notion adapter: no token found for 'notion' (set PERSONA_WIRE_TOKEN_NOTION / NOTION_TOKEN, or run 'persona-wire token set notion')"
+                    .to_string(),
+            )
+        } else {
+            WireError::Storage(format!(
+                "notion adapter: no token found for '{service_key}' (set PERSONA_WIRE_TOKEN_<KEY> uppercased, or run 'persona-wire token set {service_key}')"
+            ))
+        }
     })?;
     Ok(HttpClient::new("notion adapter")
         .with_timeout(FETCH_TIMEOUT)
         .with_header("Notion-Version", NOTION_VERSION)
         .with_bearer(token))
+}
+
+/// Resolves the credential service key for this fetch: the URI's
+/// `?auth=<service_key>` query param when present (reference key only,
+/// never a secret — see `persona_wire_core::infrastructure::adapter`'s
+/// "External service integration policy"), otherwise `default_key` (this
+/// adapter's literal `"notion"` service name, preserving pre-existing
+/// behavior when the param is absent).
+fn resolve_service_key<'a>(uri: &'a WireUri, default_key: &'static str) -> &'a str {
+    uri.query_get("auth").unwrap_or(default_key)
 }
 
 /// The four Notion endpoint kinds this adapter can target, selected via the
@@ -782,6 +804,20 @@ fn truncate_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- resolve_service_key (?auth= override, network-free) ----
+
+    #[test]
+    fn resolve_service_key_defaults_when_auth_param_absent() {
+        let uri = WireUri::parse("notion://search").unwrap();
+        assert_eq!(resolve_service_key(&uri, "notion"), "notion");
+    }
+
+    #[test]
+    fn resolve_service_key_overrides_when_auth_param_present() {
+        let uri = WireUri::parse("notion://search?auth=notion-alt").unwrap();
+        assert_eq!(resolve_service_key(&uri, "notion"), "notion-alt");
+    }
 
     // ---- parse_notion_uri ----
 

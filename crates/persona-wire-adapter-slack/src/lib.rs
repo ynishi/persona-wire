@@ -77,6 +77,11 @@
 //! `conversations.history`, which surfaces as a normal fetch failure (see
 //! "Error handling" below).
 //!
+//! The literal `"slack"` service key is overridable per-fetch via the
+//! URI's `?auth=<service_key>` query param (see `persona_wire_core::
+//! infrastructure::adapter`'s "External service integration policy" for the
+//! convention); absent, behavior is unchanged.
+//!
 //! Slack's HTTP response is always `200 OK`; success/failure is signalled by
 //! the response body's `{"ok": true|false}` field (see "Error handling"
 //! below) — a `429` status is the sole HTTP-level exception, carrying a
@@ -233,7 +238,7 @@ impl Adapter for SlackAdapter {
     /// output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_slack_uri(uri)?;
-        let client = slack_http_client()?;
+        let client = slack_http_client(uri)?;
         match &spec.kind {
             SlackKind::Channels => drive_channels_loop(&client, &spec).await,
             SlackKind::History(channel_id) => drive_history_loop(&client, channel_id, &spec).await,
@@ -248,19 +253,36 @@ impl Adapter for SlackAdapter {
 
 /// Builds a fresh, Slack-configured `HttpClient` (auth resolved per-call,
 /// not at boot; see module docs "Auth").
-fn slack_http_client() -> WireResult<HttpClient> {
+fn slack_http_client(uri: &WireUri) -> WireResult<HttpClient> {
     // Auth is resolved per-fetch (not at boot); see module docs "Auth".
     // Slack has no unauthenticated access mode, so a missing token fails
     // loud here.
-    let token = Credentials::default_chain().get("slack")?.ok_or_else(|| {
-        WireError::Storage(
-            "slack adapter: no token found for 'slack' (set PERSONA_WIRE_TOKEN_SLACK / SLACK_BOT_TOKEN, or run 'persona-wire token set slack')"
-                .to_string(),
-        )
+    let service_key = resolve_service_key(uri, "slack");
+    let token = Credentials::default_chain().get(service_key)?.ok_or_else(|| {
+        if service_key == "slack" {
+            WireError::Storage(
+                "slack adapter: no token found for 'slack' (set PERSONA_WIRE_TOKEN_SLACK / SLACK_BOT_TOKEN, or run 'persona-wire token set slack')"
+                    .to_string(),
+            )
+        } else {
+            WireError::Storage(format!(
+                "slack adapter: no token found for '{service_key}' (set PERSONA_WIRE_TOKEN_<KEY> uppercased, or run 'persona-wire token set {service_key}')"
+            ))
+        }
     })?;
     Ok(HttpClient::new("slack adapter")
         .with_timeout(FETCH_TIMEOUT)
         .with_bearer(token))
+}
+
+/// Resolves the credential service key for this fetch: the URI's
+/// `?auth=<service_key>` query param when present (reference key only,
+/// never a secret — see `persona_wire_core::infrastructure::adapter`'s
+/// "External service integration policy"), otherwise `default_key` (this
+/// adapter's literal `"slack"` service name, preserving pre-existing
+/// behavior when the param is absent).
+fn resolve_service_key<'a>(uri: &'a WireUri, default_key: &'static str) -> &'a str {
+    uri.query_get("auth").unwrap_or(default_key)
 }
 
 /// The three Slack endpoint kinds this adapter can target, selected via the
@@ -781,6 +803,20 @@ fn truncate_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- resolve_service_key (?auth= override, network-free) ----
+
+    #[test]
+    fn resolve_service_key_defaults_when_auth_param_absent() {
+        let uri = WireUri::parse("slack://channels").unwrap();
+        assert_eq!(resolve_service_key(&uri, "slack"), "slack");
+    }
+
+    #[test]
+    fn resolve_service_key_overrides_when_auth_param_present() {
+        let uri = WireUri::parse("slack://channels?auth=slack-alt").unwrap();
+        assert_eq!(resolve_service_key(&uri, "slack"), "slack-alt");
+    }
 
     // ---- parse_slack_uri ----
 

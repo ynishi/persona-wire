@@ -55,6 +55,11 @@
 //! the `PERSONA_WIRE_TOKEN_GITHUB` or `GITHUB_TOKEN` environment variable, or
 //! store one in the OS keychain via `persona-wire token set github`.
 //!
+//! The literal `"github"` service key is overridable per-fetch via the URI's
+//! `?auth=<service_key>` query param (see `persona_wire_core::infrastructure
+//! ::adapter`'s "External service integration policy" for the convention);
+//! absent, behavior is unchanged.
+//!
 //! When no token resolves, the adapter proceeds unauthenticated — this works
 //! for public repos but is subject to GitHub's unauthenticated rate limit
 //! (60 requests/hour per IP). A backend error while resolving the token
@@ -158,7 +163,7 @@ impl Adapter for GithubAdapter {
     /// `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let spec = parse_github_uri(uri)?;
-        let client = github_http_client()?;
+        let client = github_http_client(uri)?;
         let mut items: Vec<serde_json::Value> = Vec::new();
         let mut url = spec.endpoint_url();
         let has_more = loop {
@@ -187,8 +192,9 @@ impl Adapter for GithubAdapter {
 
 /// Builds a fresh, GitHub-configured `HttpClient` (auth resolved per-call,
 /// not at boot; see module docs "Auth").
-fn github_http_client() -> WireResult<HttpClient> {
-    let token = Credentials::default_chain().get("github")?;
+fn github_http_client(uri: &WireUri) -> WireResult<HttpClient> {
+    let service_key = resolve_service_key(uri, "github");
+    let token = Credentials::default_chain().get(service_key)?;
     let mut client = HttpClient::new("github adapter")
         .with_timeout(FETCH_TIMEOUT)
         .with_header("Accept", "application/vnd.github+json")
@@ -199,6 +205,16 @@ fn github_http_client() -> WireResult<HttpClient> {
         client = client.with_bearer(token);
     }
     Ok(client)
+}
+
+/// Resolves the credential service key for this fetch: the URI's
+/// `?auth=<service_key>` query param when present (reference key only,
+/// never a secret — see `persona_wire_core::infrastructure::adapter`'s
+/// "External service integration policy"), otherwise `default_key` (this
+/// adapter's literal `"github"` service name, preserving pre-existing
+/// behavior when the param is absent).
+fn resolve_service_key<'a>(uri: &'a WireUri, default_key: &'static str) -> &'a str {
+    uri.query_get("auth").unwrap_or(default_key)
 }
 
 /// The three GitHub REST endpoints this adapter can target, selected via the
@@ -495,6 +511,20 @@ fn truncate_body(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- resolve_service_key (?auth= override, network-free) ----
+
+    #[test]
+    fn resolve_service_key_defaults_when_auth_param_absent() {
+        let uri = WireUri::parse("github://octocat/hello-world").unwrap();
+        assert_eq!(resolve_service_key(&uri, "github"), "github");
+    }
+
+    #[test]
+    fn resolve_service_key_overrides_when_auth_param_present() {
+        let uri = WireUri::parse("github://octocat/hello-world?auth=github-alt").unwrap();
+        assert_eq!(resolve_service_key(&uri, "github"), "github-alt");
+    }
 
     // ---- parse_github_uri ----
 

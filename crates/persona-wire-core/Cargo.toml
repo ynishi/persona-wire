@@ -23,6 +23,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] 
 url.workspace = true
 async-trait.workspace = true
 ulid.workspace = true
+# Secret-holding token type for AuthMaterial (application::auth) — never
+# Debug/log-exposed. Same dep already used by persona-wire-credentials /
+# persona-wire-transport-http / every HTTP adapter crate.
+secrecy.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
