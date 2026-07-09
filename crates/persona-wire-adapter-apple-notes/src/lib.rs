@@ -80,6 +80,10 @@ impl Adapter for AppleNotesAdapter {
 
 /// Parsed `applenotes://` URI: optional folder filter, optional title
 /// substring query, and a row limit.
+// On non-macOS targets `fetch_impl` is a stub that never inspects the spec,
+// so the fields look "dead" to `-D warnings`. macOS is the only production
+// consumer of these fields, so silence the warning on other platforms only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone)]
 struct AppleNotesUriSpec {
     folder: Option<String>,
