@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/ynishi/persona-wire/compare/v0.12.0...v0.12.1) - 2026-07-09
+
+### Added
+
+- *(adapters)* add Wave 2 (apple-notes / activitypub / bluesky)
+
+### Other
+
+- *(aidoc)* integrate cargo-aidoc + commit LLM-facing artifacts
+
 ## [0.12.0](https://github.com/ynishi/persona-wire/compare/v0.11.0...v0.12.0) - 2026-07-08
 
 ### Added
