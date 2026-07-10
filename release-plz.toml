@@ -5,7 +5,7 @@ git_release_enable = false   # GitHub Release is created by cargo-dist
 git_tag_enable = false       # default off; only the representative crate tags
 git_tag_name = "v{{ version }}"  # unified tag name, also used for CHANGELOG compare links
 semver_check = true
-release_always = true        # TEMPORARY — see below; revert to false after new adapters land on crates.io
+release_always = false       # publish only when the release PR is merged
 pr_labels = ["release"]
 # Rate limit mitigation for the 15-crate workspace: give each `cargo publish` a
 # generous timeout so release-plz waits for crates.io indexing between crates
@@ -101,8 +101,10 @@ version_group = "persona-wire"
 name = "persona-wire-adapter-slack"
 version_group = "persona-wire"
 
-# NB: matrix + mastodon are intentionally not in version_group during their
-# initial publish cycle. release-plz treats the group as "already released"
-# whenever the group's tag (v0.12.1) exists, which skips even brand-new
-# unpublished members — the same shape Wave 2 hit. They join the lockstep
-# group after their first landing on crates.io.
+[[package]]
+name = "persona-wire-adapter-matrix"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-mastodon"
+version_group = "persona-wire"
