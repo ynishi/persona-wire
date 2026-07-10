@@ -1,0 +1,31 @@
+{
+  "crate": "persona-wire-adapter-mastodon",
+  "version": "0.12.1",
+  "items": [
+    {
+      "path": "persona_wire_adapter_mastodon::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `items` cap when `?limit=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_mastodon::DEFAULT_SERVICE_KEY",
+      "kind": "constant",
+      "docs": "Default credentials service key when `?auth=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_mastodon::FETCH_TIMEOUT",
+      "kind": "constant",
+      "docs": "Per-request HTTP timeout (connect + body), matching\n`persona-wire-transport-http::DEFAULT_TIMEOUT`."
+    },
+    {
+      "path": "persona_wire_adapter_mastodon::MASTODON_LIMIT_MAX",
+      "kind": "constant",
+      "docs": "Mastodon's own upper bound for `?limit=` on timeline endpoints. A\nrequested `limit` above this is clamped down (with a `tracing::warn!`),\nnot rejected — see the module docs \"URI grammar\"."
+    },
+    {
+      "path": "persona_wire_adapter_mastodon::MastodonAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for Mastodon (`mastodon://` scheme)."
+    }
+  ]
+}

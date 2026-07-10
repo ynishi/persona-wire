@@ -1,4 +1,4 @@
-# persona-wire-adapter-notion 0.12.0
+# persona-wire-adapter-notion 0.12.1
 
 persona-wire Adapter for Notion (scheme `notion://`).
 
@@ -78,6 +78,11 @@ database** via that page/database's "•••" menu → "Add connections" —
 Notion returns HTTP 404 for otherwise-valid ids the integration has not
 been granted access to, which surfaces as a normal fetch failure via
 `persona_wire_transport_http::HttpClient`.
+
+The literal `"notion"` service key is overridable per-fetch via the
+URI's `?auth=<service_key>` query param (see `persona_wire_core::
+infrastructure::adapter`'s "External service integration policy" for the
+convention); absent, behavior is unchanged.
 
 Notion enforces an average rate limit of roughly 3 requests per second
 per integration; exceeding it returns HTTP 429 with a `Retry-After`

@@ -38,6 +38,11 @@ changelog_include = [
     "persona-wire-adapter-todoist",
     "persona-wire-adapter-notion",
     "persona-wire-adapter-slack",
+    "persona-wire-adapter-apple-notes",
+    "persona-wire-adapter-activitypub",
+    "persona-wire-adapter-bluesky",
+    "persona-wire-adapter-matrix",
+    "persona-wire-adapter-mastodon",
 ]
 
 [[package]]
@@ -94,4 +99,12 @@ version_group = "persona-wire"
 
 [[package]]
 name = "persona-wire-adapter-slack"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-matrix"
+version_group = "persona-wire"
+
+[[package]]
+name = "persona-wire-adapter-mastodon"
 version_group = "persona-wire"

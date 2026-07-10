@@ -1,0 +1,21 @@
+{
+  "crate": "persona-wire-adapter-activitypub",
+  "version": "0.12.1",
+  "items": [
+    {
+      "path": "persona_wire_adapter_activitypub::ActivityPubAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for the Fediverse (`activitypub://` scheme)."
+    },
+    {
+      "path": "persona_wire_adapter_activitypub::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `posts` cap when `?limit=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_activitypub::FETCH_TIMEOUT",
+      "kind": "constant",
+      "docs": "Per-request HTTP timeout (connect + body), matching\n`persona-wire-transport-http::DEFAULT_TIMEOUT`."
+    }
+  ]
+}

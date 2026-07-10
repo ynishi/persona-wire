@@ -1,4 +1,4 @@
-# persona-wire-adapter-obsidian 0.12.0
+# persona-wire-adapter-obsidian 0.12.1
 
 persona-wire Adapter for Obsidian vault (scheme `obsidian://`).
 

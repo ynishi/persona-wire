@@ -1,4 +1,4 @@
-# persona-wire-adapter-todoist 0.12.0
+# persona-wire-adapter-todoist 0.12.1
 
 persona-wire Adapter for Todoist (scheme `todoist://`).
 
@@ -59,6 +59,11 @@ access mode — a missing token **fails loud**. Set a token via the
 `PERSONA_WIRE_TOKEN_TODOIST` or `TODOIST_API_TOKEN` environment variable,
 or store one in the OS keychain via `persona-wire token set todoist`. The
 token is found under Todoist Settings → Integrations → Developer.
+
+The literal `"todoist"` service key is overridable per-fetch via the
+URI's `?auth=<service_key>` query param (see `persona_wire_core::
+infrastructure::adapter`'s "External service integration policy" for the
+convention); absent, behavior is unchanged.
 
 Todoist enforces a rate limit of roughly 1,000 requests per 15 minutes
 per user; exceeding it returns HTTP 429, which surfaces as a normal fetch

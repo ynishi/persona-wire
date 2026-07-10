@@ -179,8 +179,21 @@ fn resolve_service_key<'a>(uri: &'a WireUri, default: &'a str) -> &'a str {
 /// `persona_wire_adapter_github::github_http_client`, Matrix has no
 /// unauthenticated fallback (module docs "Auth").
 fn matrix_http_client(uri: &WireUri) -> WireResult<HttpClient> {
+    matrix_http_client_from_creds(uri, &Credentials::default_chain())
+}
+
+/// Inner helper that takes an explicit [`Credentials`] chain. Extracted so
+/// unit tests can inject an env-only chain (via
+/// [`Credentials::with_providers`]) and avoid touching the OS keyring —
+/// Linux CI runners have no `secret-service` DBus daemon, so the default
+/// chain hard-errors before the fail-loud guidance message can be
+/// produced.
+fn matrix_http_client_from_creds(
+    uri: &WireUri,
+    credentials: &Credentials,
+) -> WireResult<HttpClient> {
     let service_key = resolve_service_key(uri, DEFAULT_SERVICE_KEY);
-    let token = Credentials::default_chain().get(service_key)?.ok_or_else(|| {
+    let token = credentials.get(service_key)?.ok_or_else(|| {
         let env_var = service_key.to_uppercase().replace('-', "_");
         WireError::Storage(format!(
             "matrix adapter: no token configured for service '{service_key}' (set PERSONA_WIRE_TOKEN_{env_var} or run `persona-wire token set {service_key}`)"
@@ -478,15 +491,24 @@ mod tests {
     // and `cargo test` runs tests in parallel threads — the same convention
     // `persona-wire-credentials::tests::env_provider_alias_fallback_and_primary_precedence`
     // uses to avoid flaking on shared env state.
+    /// Env-only [`Credentials`] chain — bypasses the OS keyring so tests
+    /// stay hermetic (Linux CI has no `secret-service` DBus daemon). See
+    /// [`matrix_http_client_from_creds`] doc for rationale.
+    fn env_only_credentials() -> Credentials {
+        use persona_wire_credentials::EnvTokenProvider;
+        Credentials::with_providers(vec![Box::new(EnvTokenProvider)])
+    }
+
     #[test]
     fn matrix_http_client_fails_loud_without_token_then_builds_with_env_token() {
         std::env::remove_var("PERSONA_WIRE_TOKEN_MATRIX");
         let uri = WireUri::parse("matrix://matrix.org/sync").unwrap();
+        let creds = env_only_credentials();
 
         // `HttpClient` intentionally does not derive `Debug` (module docs of
         // `persona_wire_transport_http`), so `Result::unwrap_err` (which
         // bounds `T: Debug`) does not apply here — match instead.
-        let err = match matrix_http_client(&uri) {
+        let err = match matrix_http_client_from_creds(&uri, &creds) {
             Err(e) => e,
             Ok(_) => panic!("expected Err without PERSONA_WIRE_TOKEN_MATRIX set"),
         };
@@ -497,7 +519,7 @@ mod tests {
         );
 
         std::env::set_var("PERSONA_WIRE_TOKEN_MATRIX", "dummy-token");
-        let result = matrix_http_client(&uri);
+        let result = matrix_http_client_from_creds(&uri, &creds);
         std::env::remove_var("PERSONA_WIRE_TOKEN_MATRIX");
         assert!(
             result.is_ok(),
@@ -509,15 +531,16 @@ mod tests {
     fn matrix_http_client_honors_auth_override_env_var() {
         std::env::remove_var("PERSONA_WIRE_TOKEN_MATRIX_WORK");
         let uri = WireUri::parse("matrix://work.example.org/sync?auth=matrix-work").unwrap();
+        let creds = env_only_credentials();
 
-        let err = match matrix_http_client(&uri) {
+        let err = match matrix_http_client_from_creds(&uri, &creds) {
             Err(e) => e,
             Ok(_) => panic!("expected Err without PERSONA_WIRE_TOKEN_MATRIX_WORK set"),
         };
         assert!(format!("{err}").contains("PERSONA_WIRE_TOKEN_MATRIX_WORK"));
 
         std::env::set_var("PERSONA_WIRE_TOKEN_MATRIX_WORK", "dummy-token");
-        let result = matrix_http_client(&uri);
+        let result = matrix_http_client_from_creds(&uri, &creds);
         std::env::remove_var("PERSONA_WIRE_TOKEN_MATRIX_WORK");
         assert!(result.is_ok());
     }

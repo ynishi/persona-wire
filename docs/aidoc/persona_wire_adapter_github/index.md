@@ -1,4 +1,4 @@
-# persona-wire-adapter-github 0.12.0
+# persona-wire-adapter-github 0.12.1
 
 persona-wire Adapter for GitHub (scheme `github://`).
 
@@ -56,6 +56,11 @@ a token change takes effect without restarting the process and avoids a
 keychain prompt on every boot when no token is configured. Set a token via
 the `PERSONA_WIRE_TOKEN_GITHUB` or `GITHUB_TOKEN` environment variable, or
 store one in the OS keychain via `persona-wire token set github`.
+
+The literal `"github"` service key is overridable per-fetch via the URI's
+`?auth=<service_key>` query param (see `persona_wire_core::infrastructure
+::adapter`'s "External service integration policy" for the convention);
+absent, behavior is unchanged.
 
 When no token resolves, the adapter proceeds unauthenticated — this works
 for public repos but is subject to GitHub's unauthenticated rate limit

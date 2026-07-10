@@ -1,4 +1,4 @@
-# persona-wire-adapter-slack 0.12.0
+# persona-wire-adapter-slack 0.12.1
 
 persona-wire Adapter for Slack (scheme `slack://`).
 
@@ -78,6 +78,11 @@ bot explicitly invited** (`/invite @<bot>` in that channel) — a bot token
 without that invite gets a `not_in_channel` API error on
 `conversations.history`, which surfaces as a normal fetch failure (see
 "Error handling" below).
+
+The literal `"slack"` service key is overridable per-fetch via the
+URI's `?auth=<service_key>` query param (see `persona_wire_core::
+infrastructure::adapter`'s "External service integration policy" for the
+convention); absent, behavior is unchanged.
 
 Slack's HTTP response is always `200 OK`; success/failure is signalled by
 the response body's `{"ok": true|false}` field (see "Error handling"

@@ -39,6 +39,7 @@ for any [`Wiring`] constructed through this module's parsers (modulo the
 
 ## Functions
 
+- `extract_auth` — Borrow the `auth` field (credential reference key, never a secret) as
 - `extract_maintenance_exempt` — Read the `maintenance_exempt` flag, defaulting to `false` when missing
 - `extract_persona` — Borrow the `persona` field as `&str` if present and a string.
 - `extract_slot` — Borrow the slot field (legacy key `axis`) as `&str` if present and a
@@ -49,6 +50,7 @@ for any [`Wiring`] constructed through this module's parsers (modulo the
 
 ## Constants
 
+- `META_AUTH` — `metadata.auth` key — optional credential **reference key** (never a
 - `META_MAINTENANCE_EXEMPT` — `metadata.maintenance_exempt` key — opt-out flag for session-cyclic
 - `META_PERSONA` — `metadata.persona` key (PersonaId, natural composite key part 1).
 - `META_SLOT` — `metadata.axis` key — legacy storage name for the [`Slot`] (natural

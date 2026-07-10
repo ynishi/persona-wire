@@ -1,0 +1,16 @@
+{
+  "crate": "persona-wire-adapter-apple-notes",
+  "version": "0.12.1",
+  "items": [
+    {
+      "path": "persona_wire_adapter_apple_notes::AppleNotesAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for the local Notes.app database (`applenotes://` scheme)."
+    },
+    {
+      "path": "persona_wire_adapter_apple_notes::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `notes` cap when `?limit=` is absent from the URI."
+    }
+  ]
+}

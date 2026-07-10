@@ -1,4 +1,4 @@
-# persona-wire-adapter-rss 0.12.0
+# persona-wire-adapter-rss 0.12.1
 
 persona-wire Adapter for RSS/Atom/JSON feeds (scheme `rss://`).
 

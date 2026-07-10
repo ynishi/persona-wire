@@ -1,5 +1,5 @@
 <!-- persona_wire/index.md -->
-# persona-wire 0.12.0
+# persona-wire 0.12.1
 
 persona-wire — CLI + migration hub for the 15-crate persona-wire
 workspace. persona-wire is a graph engine over persona × SoT ×
@@ -131,8 +131,252 @@ accepts NULL leaves the schema untouched.
 - `MIGRATION` — Registry entry for migration 003 — referenced from
 
 
+<!-- persona_wire_adapter_activitypub/index.md -->
+# persona-wire-adapter-activitypub 0.12.1
+
+persona-wire Adapter for the Fediverse (scheme `activitypub://`).
+
+## Architecture
+
+`ActivityPubAdapter` is a stateless [`Adapter`] impl split into
+independent functions, mirroring `persona-wire-adapter-rss`:
+
+- [`parse_activitypub_uri`] — `WireUri` → `ActivityPubUriSpec` (instance +
+  user + output kind + item limit).
+- HTTP fetch — delegated to `persona_wire_transport_http::HttpClient`
+  ([`fetch_actor`] for the actor document, [`fetch_outbox`] for the
+  2-page outbox fetch), with `Accept: application/activity+json` on
+  every request.
+- [`normalize_actor`] / [`normalize_posts`] — raw ActivityStreams JSON →
+  the Wire JSON shapes below.
+
+Only the **public**, unauthenticated surface of the ActivityPub protocol
+is exercised: an actor's outbox and profile document. `follow` / write /
+DM / private post / any authenticated action are out of MVP scope.
+
+Fediverse compat: any instance implementing the ActivityPub actor +
+`OrderedCollection` outbox conventions (Mastodon, Misskey, Pleroma,
+Firefish, and others) — no server-specific branching, only defensive
+`serde_json::Value` field access since not every implementation matches
+the spec byte-for-byte.
+
+## URI grammar
+
+```text
+activitypub://<instance>/@<user>[?kind=profile|outbox][?limit=N]
+```
+
+- `instance` (the URI host) is the Fediverse instance hostname (e.g.
+  `mastodon.social`); an empty host is an error.
+- The path must be `/@<user>` (Mastodon handle convention); a missing
+  `@` prefix is an error. Internally this resolves to the canonical
+  ActivityPub actor URL `https://<instance>/users/<user>`.
+- `?kind=` selects the output shape (default `outbox`): `outbox` (the
+  actor's most recent public posts) or `profile` (actor metadata).
+- `?limit=N` caps the number of posts returned (default
+  [`DEFAULT_LIMIT`], `outbox` only). A non-numeric or zero value fails
+  loud.
+- Unknown query keys are silently ignored (same forward-compatible
+  convention as `persona-wire-adapter-rss`).
+
+## Output shape
+
+`?kind=outbox` (default):
+```json
+{
+  "kind": "outbox",
+  "actor": { "url": "...", "handle": "@user@instance" },
+  "posts": [
+    { "id": "...", "content": "...|null", "published": "<RFC3339>|null",
+      "url": "...|null", "attachments": [{ "type": "...", "url": "..." }] }
+  ]
+}
+```
+
+`?kind=profile`:
+```json
+{
+  "kind": "profile",
+  "actor": { "url": "...", "handle": "...", "name": "...|null",
+    "summary": "...|null", "followers_url": "...|null",
+    "following_url": "...|null" }
+}
+```
+
+HTML `content` / `summary` are passed through undecoded and unsanitized
+(the caller's responsibility); no length truncation is applied (Mastodon
+caps posts at 500 chars, Misskey at 3000 — truncating here would
+silently disagree with the source instance).
+
+
+<!-- persona_wire_adapter_apple_notes/index.md -->
+# persona-wire-adapter-apple-notes 0.12.1
+
+persona-wire Adapter for the local Notes.app database (scheme `applenotes://`).
+
+## Architecture
+
+`AppleNotesAdapter` is a stateless [`Adapter`] impl. `Notes.app`'s
+`NoteStore.sqlite` only exists on macOS, so the crate splits into:
+
+- [`parse_apple_notes_uri`] — `WireUri` → `AppleNotesUriSpec` (folder
+  filter + title substring query + row limit). Platform-independent, so
+  it is unit-tested on every target.
+- The `macos` module (behind `#[cfg(target_os = "macos")]`) — resolves
+  `NoteStore.sqlite`'s on-disk path and runs the read-only filter query
+  via `rusqlite`, including the Core Data → RFC3339 timestamp
+  conversion.
+
+On non-macOS targets `fetch` returns `WireError::Storage("apple-notes
+adapter: unsupported platform (macOS only)")` without touching the
+filesystem, so the crate still compiles workspace-wide.
+
+## URI grammar
+
+```text
+applenotes://[folder]/?query=<substring>&limit=N
+```
+
+- `folder` (the URI host) is optional; an absent or empty host means
+  "all folders".
+- `?query=<substring>` is a case-insensitive substring match against
+  note titles (absent = all notes).
+- `?limit=N` caps the number of items returned (default
+  [`DEFAULT_LIMIT`]). A non-numeric or zero value fails loud.
+- Unknown query keys are silently ignored (same forward-compatible
+  convention as `persona-wire-adapter-rss` / `-obsidian`).
+
+## Output shape
+
+```json
+{
+  "folder": "<folder name>|null",
+  "query":  "<query substring>|null",
+  "notes": [
+    { "id": "<Core Data primary key as string>", "title": "...|null",
+      "folder": "...|null", "created": "<RFC3339>|null",
+      "modified": "<RFC3339>|null" }
+  ]
+}
+```
+
+`notes` is ordered by `modified` descending (newest first), capped at
+`limit`. Note bodies are out of MVP scope — Notes.app stores them as
+gzip'd protobuf in `ZICNOTEDATA` — and may be added later via an
+AppleScript fallback.
+
+
+<!-- persona_wire_adapter_bluesky/index.md -->
+# persona-wire-adapter-bluesky 0.12.1
+
+persona-wire Adapter for Bluesky (scheme `bluesky://`).
+
+## Architecture
+
+`BlueskyAdapter` is a stateless [`Adapter`] impl split into independent
+functions, mirroring `persona-wire-adapter-activitypub` /
+`persona-wire-adapter-rss`:
+
+- [`parse_bluesky_uri`] — `WireUri` → `BlueskyUriSpec` (actor + output
+  kind + item limit + optional post rkey).
+- HTTP fetch — delegated to `persona_wire_transport_http::HttpClient`
+  ([`fetch_author_feed`] / [`fetch_profile`] / [`fetch_post_thread`]),
+  each hitting a single unauthenticated AT Protocol XRPC endpoint on the
+  public AppView.
+- [`normalize_feed`] / [`normalize_profile`] / [`normalize_thread`] — raw
+  `app.bsky.*` lexicon JSON → the Wire JSON shapes below.
+
+Only the **public**, unauthenticated AppView surface is exercised: an
+actor's author feed, profile, and a single post's thread. Authenticated
+endpoints (home timeline / DMs / follow / write / OAuth) are out of MVP
+scope.
+
+## AT Protocol glossary
+
+- **DID** (`did:plc:...`) — an actor's permanent, non-human-readable
+  identifier; never changes even if the handle does.
+- **Handle** (`alice.bsky.social`) — an actor's human-readable,
+  DNS-backed name; resolves to a DID.
+- **rkey** — the trailing path segment of a record's URI (e.g. the
+  `3jzfc...` in `at://did:plc:xxx/app.bsky.feed.post/3jzfc...`), a
+  per-collection-per-repo unique key.
+- **at URI** — `at://<did-or-handle>/<collection>/<rkey>`, the
+  canonical address of a single record inside a repo.
+- **XRPC** — AT Protocol's HTTP RPC convention: every endpoint is
+  `GET/POST /xrpc/<lexicon-id>` (e.g. `app.bsky.feed.getAuthorFeed`).
+- **AppView** — a service (here, the public `public.api.bsky.app`
+  instance) that aggregates raw repo records into query-friendly views
+  (feeds, profiles, threads) without requiring auth.
+
+## URI grammar
+
+```text
+bluesky://<actor>[?kind=feed|profile|thread][?limit=N][?post=<rkey>]
+```
+
+- `actor` (the URI host) is a Bluesky handle (e.g. `bsky.app`) or DID
+  (`did:plc:xxx`); an empty host is an error.
+- `?kind=` selects the output shape (default `feed`):
+  - `feed` = `getAuthorFeed` — the actor's most recent posts (including
+    reposts and replies).
+  - `profile` = `getProfile` — actor metadata (display name / bio /
+    follower counts).
+  - `thread` = `getPostThread` — a single post plus its direct replies;
+    requires `?post=<rkey>`.
+- `?limit=N` caps the number of feed entries returned (default
+  [`DEFAULT_LIMIT`], `feed` only; parsed and range-checked for every
+  `kind`, matching `persona-wire-adapter-activitypub`'s convention). A
+  non-numeric, zero, or over-[`MAX_LIMIT`] value fails loud.
+- `?post=<rkey>` supplies the target post's rkey for `?kind=thread`
+  (required — missing it is an error); silently ignored for any other
+  `kind`.
+- Unknown query keys are silently ignored (same forward-compatible
+  convention as `persona-wire-adapter-rss` /
+  `persona-wire-adapter-activitypub`).
+
+## Output shape
+
+`?kind=feed` (default):
+```json
+{
+  "kind": "feed",
+  "actor": "<handle or did>",
+  "posts": [
+    { "uri": "...", "cid": "...",
+      "author": { "handle": "...", "did": "...", "displayName": "...|null" },
+      "text": "...", "created_at": "<RFC3339>|null",
+      "reply_count": 0, "repost_count": 0, "like_count": 0,
+      "is_repost": false, "is_reply": false }
+  ]
+}
+```
+
+`?kind=profile`:
+```json
+{
+  "kind": "profile",
+  "actor": { "handle": "...", "did": "...", "displayName": "...|null",
+    "description": "...|null", "followers_count": 0, "follows_count": 0,
+    "posts_count": 0 }
+}
+```
+
+`?kind=thread`:
+```json
+{
+  "kind": "thread",
+  "post": { "<same shape as a feed entry>" },
+  "replies": [ { "<same shape as a feed entry>" } ]
+}
+```
+
+`replies` is one level deep only — nested replies-of-replies are dropped,
+not flattened. Missing numeric fields default to `0` (matching the
+Bluesky API's own behavior); missing string fields are `null`.
+
+
 <!-- persona_wire_adapter_github/index.md -->
-# persona-wire-adapter-github 0.12.0
+# persona-wire-adapter-github 0.12.1
 
 persona-wire Adapter for GitHub (scheme `github://`).
 
@@ -190,6 +434,11 @@ a token change takes effect without restarting the process and avoids a
 keychain prompt on every boot when no token is configured. Set a token via
 the `PERSONA_WIRE_TOKEN_GITHUB` or `GITHUB_TOKEN` environment variable, or
 store one in the OS keychain via `persona-wire token set github`.
+
+The literal `"github"` service key is overridable per-fetch via the URI's
+`?auth=<service_key>` query param (see `persona_wire_core::infrastructure
+::adapter`'s "External service integration policy" for the convention);
+absent, behavior is unchanged.
 
 When no token resolves, the adapter proceeds unauthenticated — this works
 for public repos but is subject to GitHub's unauthenticated rate limit
@@ -254,8 +503,230 @@ post-fetch. If the filtered count still falls short, the loop follows the
 `Link` header to the next page.
 
 
+<!-- persona_wire_adapter_mastodon/index.md -->
+# persona-wire-adapter-mastodon 0.12.1
+
+persona-wire Adapter for Mastodon (scheme `mastodon://`).
+
+## Architecture
+
+`MastodonAdapter` is a stateless [`Adapter`] impl split into three
+independent functions, mirroring `persona-wire-adapter-github`:
+
+- [`parse_mastodon_uri`] — `WireUri` → [`MastodonUriSpec`] (instance +
+  timeline kind + `limit` / `local` / `only_media`).
+- [`resolve_service_key`] — `WireUri` → credentials service key (the
+  `?auth=` override, or the crate-wide default).
+- [`mastodon_http_client`] — service key + timeline kind → a
+  Bearer-authenticated (or, for `timelines/public` only,
+  unauthenticated-fallback) [`HttpClient`].
+
+`Adapter::fetch` wires the three together, then fetches Mastodon's REST
+API v1 response as-is and wraps it in the Wire JSON shape below — Phase 1
+does not re-shape individual status objects (see "Output shape").
+
+## URI grammar
+
+```text
+mastodon://<instance>/timelines/home?limit=N&auth=<key>
+mastodon://<instance>/timelines/public?local=true&only_media=false&limit=N&auth=<key>
+```
+
+- `<instance>` is the URI host (e.g. `mastodon.social` / `fosstodon.org`);
+  an empty host fails loud. The upstream base URL is `https://<instance>`.
+- The path must be exactly `timelines/home` or `timelines/public`; any
+  other path fails loud.
+- `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
+  A non-numeric or zero value fails loud. A value above
+  [`MASTODON_LIMIT_MAX`] (Mastodon's own per-request ceiling) is clamped
+  down to it, with a `tracing::warn!` (not a hard failure — unlike
+  `?limit=0`, an oversized limit is a harmless, silently-correctable
+  input).
+- `local` / `only_media` apply to `timelines/public` only (default
+  `false` for both); `true` / `false` are accepted, any other value fails
+  loud. For `timelines/home`, both are silently ignored (not read, not
+  validated) — Mastodon's home-timeline endpoint has no such filter, same
+  convention as `persona-wire-adapter-github`'s `state` being ignored for
+  `kind=releases`.
+- `?auth=<service_key>` selects which credentials-provider service key to
+  resolve the Bearer token from, letting one caller manage tokens for
+  multiple instances (e.g. `?auth=work` resolves the `work` service key
+  instead of the crate-wide default, [`DEFAULT_SERVICE_KEY`]). Absent or
+  empty `?auth=` uses the default. This key never reaches the upstream
+  request — it is consumed by [`resolve_service_key`] and does not appear
+  in [`MastodonUriSpec::endpoint_url`]'s query string.
+- Unknown query keys are silently ignored (same forward-compatible
+  convention as `persona-wire-adapter-github` / `-rss`).
+
+## Auth
+
+Resolved per-fetch (not at boot) via
+`persona_wire_credentials::Credentials::default_chain().get(service_key)`,
+so a token change takes effect without restarting the process. Set a
+token via the `PERSONA_WIRE_TOKEN_<SERVICE_KEY>` environment variable (or,
+for the default service key, the `MASTODON_ACCESS_TOKEN` alias), or store
+one in the OS keychain via `persona-wire token set mastodon`.
+
+Unlike `persona-wire-adapter-github` (unauthenticated fallback for every
+request — GitHub's public-repo read endpoints tolerate it), auth
+resolution here is **asymmetric per timeline**:
+
+- `timelines/home` always requires a resolved token (Mastodon has no
+  unauthenticated "home" concept — it is inherently the caller's own
+  feed) — a missing token **fails loud**.
+- `timelines/public` (instance-local or federated public feed) works
+  unauthenticated — a missing token falls back gracefully (logged via
+  `tracing::info!`, not an error).
+
+A backend error while resolving the token (e.g. keychain access denied)
+always fails loud and propagates, for both timelines — only "no token
+configured" is treated as `None`.
+
+## Output shape
+
+```json
+{
+  "instance": "mastodon.social",
+  "kind": "timelines/home",
+  "items": [ /* raw Mastodon Status objects, unmodified */ ]
+}
+```
+
+`items` is the upstream Mastodon REST API v1 response array passed
+through unmodified (Phase 1 does not extract or rename individual
+`Status` fields, unlike `persona-wire-adapter-github`'s per-item
+normalization) — see the module-level "Phase 1 scope" note below. A
+non-array upstream response fails loud, naming the instance and kind.
+
+## Phase 1 scope
+
+Only the two read-only timeline endpoints above are implemented:
+`GET /api/v1/timelines/home` and `GET /api/v1/timelines/public`. No
+posting, no notifications, no search, no account lookup, no pagination
+beyond a single `?limit=N` page (Mastodon's `Link`-header pagination,
+mirroring `persona-wire-adapter-github`'s multi-page loop, is a future
+extension once a caller needs more than one page's worth of items).
+
+## vs. `activitypub://`
+
+`persona-wire-adapter-activitypub` reads the **public, unauthenticated**
+surface of the ActivityPub protocol (an actor's outbox / profile
+document) and works against any compliant Fediverse server (Mastodon,
+Misskey, Pleroma, ...) via the generic ActivityStreams shape. This crate
+is **Mastodon-native**: it calls Mastodon's own REST API v1
+(`/api/v1/timelines/...`), which is Mastodon-specific (not a generic
+ActivityPub concept) and, for `timelines/home`, requires the caller's own
+Bearer token — a capability the generic ActivityPub outbox model has no
+equivalent for. Use `activitypub://` for cross-instance public reads of a
+specific account; use `mastodon://` for a caller's own home feed or an
+instance's local/public timeline.
+
+
+<!-- persona_wire_adapter_matrix/index.md -->
+# persona-wire-adapter-matrix 0.12.1
+
+persona-wire Adapter for Matrix (scheme `matrix://`).
+
+## Architecture
+
+`MatrixAdapter` is a stateless [`Adapter`] impl split into three
+independent pieces, matching the repo-wide adapter convention (see
+`persona_wire_core::infrastructure::adapter` crate docs):
+
+- [`parse_matrix_uri`] — `WireUri` → [`MatrixRequest`] (homeserver + kind
+  dispatch: `sync` or `rooms/<room_id>/messages`).
+- HTTP fetch — delegated to `persona_wire_transport_http::HttpClient` (no
+  Matrix-specific knowledge in the transport layer).
+- [`Adapter::fetch`] — builds the upstream request URL per kind, sends it,
+  and wraps the raw Matrix Client-Server API v3 JSON response in a small
+  `{scheme, kind, homeserver, ..., body}` envelope (see "Output shape").
+
+Phase 1 covers exactly two Matrix Client-Server API v3 endpoints:
+`GET /_matrix/client/v3/sync` and `GET /_matrix/client/v3/rooms/{room_id}/messages`.
+Sending messages, room membership management, and end-to-end encryption
+are out of scope for this Phase.
+
+## URI grammar
+
+```text
+matrix://<homeserver>/sync[?limit=N][&auth=<key>]
+matrix://<homeserver>/rooms/<room_id>/messages[?limit=N][&dir=b|f][&auth=<key>]
+```
+
+- `host` is the Matrix homeserver (e.g. `matrix.org`); an empty host
+  fails loud. The upstream request URL is always `https://<homeserver>`.
+- The first path segment selects the endpoint: `sync` (no further
+  segments) or `rooms/<room_id>/messages` (exactly three segments). Any
+  other path **fails loud** — matching `persona-wire-adapter-github`'s
+  `?kind=` convention, an unrecognized shape here would otherwise mean a
+  silently wrong request rather than a clear rejection.
+- `<room_id>` is a Matrix room ID (`!abc:matrix.org`) or room alias
+  (`#room:matrix.org`), percent-encoded in the URI path segment; the
+  adapter percent-decodes it before embedding it in the upstream request
+  URL (re-encoded exactly once there via `url::Url::path_segments_mut`,
+  the same "decode once, encode once" convention as
+  `persona-wire-adapter-todoist`'s `filter` query value).
+- `limit` caps the number of events returned by either endpoint (default
+  [`DEFAULT_LIMIT`]). A non-numeric or zero value fails loud.
+- `dir` only applies to `rooms/<room_id>/messages` (pagination direction);
+  default `"b"` (backwards). `"f"` is also accepted; any other value
+  fails loud. It is not read at all for `sync` (unapplicable — same
+  "silently ignored for the kind it doesn't apply to" convention as
+  `persona-wire-adapter-github`'s `state` for `kind=releases`).
+- `auth` selects the credential `service_key` (see "Auth"); it is
+  captured by [`resolve_service_key`] before endpoint dispatch and never
+  forwarded to the upstream Matrix request URL.
+- All other query keys are silently ignored (same forward-compatible
+  convention as every other adapter in this workspace).
+
+## Auth
+
+Every Matrix Client-Server API v3 endpoint covered by Phase 1 is called
+with `Authorization: Bearer <access_token>` — unlike
+`persona-wire-adapter-github`, this adapter has **no unauthenticated
+fallback**; a missing token fails loud (matching
+`persona-wire-adapter-todoist`'s auth-required convention).
+
+The credential `service_key` defaults to [`DEFAULT_SERVICE_KEY`]
+(`"matrix"`), resolved per-fetch (not at boot) via
+`persona_wire_credentials::Credentials::default_chain().get(service_key)`.
+Store an access token via `persona-wire token set matrix`, or set the
+`PERSONA_WIRE_TOKEN_MATRIX` environment variable.
+
+Multi-homeserver setups (distinct accounts per homeserver) override the
+service key per-URI via `?auth=<service_key>`, e.g.
+`matrix://work.example.org/sync?auth=matrix-work` resolves the token
+under `PERSONA_WIRE_TOKEN_MATRIX_WORK` / `persona-wire token set
+matrix-work` instead of the default `matrix` key.
+
+## Output shape
+
+```json
+{
+  "scheme": "matrix",
+  "kind": "sync",
+  "homeserver": "matrix.org",
+  "body": { /* raw /_matrix/client/v3/sync response */ }
+}
+```
+
+```json
+{
+  "scheme": "matrix",
+  "kind": "rooms_messages",
+  "homeserver": "matrix.org",
+  "room_id": "!abc:matrix.org",
+  "body": { /* raw /_matrix/client/v3/rooms/{room_id}/messages response */ }
+}
+```
+
+`body` is the upstream Matrix JSON response verbatim (no per-field
+normalization in Phase 1 — the raw `sync` / `messages` response shapes
+are Matrix spec, not this crate's concern to re-flatten).
+
+
 <!-- persona_wire_adapter_mcp/index.md -->
-# persona-wire-adapter-mcp 0.12.0
+# persona-wire-adapter-mcp 0.12.1
 
 persona-wire Adapter for any MCP server (scheme `mcp://`).
 
@@ -297,7 +768,7 @@ pooling is out of scope for the single-shot Wire use case.
 
 
 <!-- persona_wire_adapter_mini_app/index.md -->
-# persona-wire-adapter-mini-app 0.12.0
+# persona-wire-adapter-mini-app 0.12.1
 
 persona-wire Adapter for mini-app SoT (scheme `mini-app://`).
 
@@ -325,7 +796,7 @@ wire は filter / MiniJinja / ListFilter 意味論を一切解釈しない。
 
 
 <!-- persona_wire_adapter_notion/index.md -->
-# persona-wire-adapter-notion 0.12.0
+# persona-wire-adapter-notion 0.12.1
 
 persona-wire Adapter for Notion (scheme `notion://`).
 
@@ -406,6 +877,11 @@ Notion returns HTTP 404 for otherwise-valid ids the integration has not
 been granted access to, which surfaces as a normal fetch failure via
 `persona_wire_transport_http::HttpClient`.
 
+The literal `"notion"` service key is overridable per-fetch via the
+URI's `?auth=<service_key>` query param (see `persona_wire_core::
+infrastructure::adapter`'s "External service integration policy" for the
+convention); absent, behavior is unchanged.
+
 Notion enforces an average rate limit of roughly 3 requests per second
 per integration; exceeding it returns HTTP 429 with a `Retry-After`
 header. This adapter does not implement client-side throttling — a 429
@@ -479,7 +955,7 @@ every page.
 
 
 <!-- persona_wire_adapter_obsidian/index.md -->
-# persona-wire-adapter-obsidian 0.12.0
+# persona-wire-adapter-obsidian 0.12.1
 
 persona-wire Adapter for Obsidian vault (scheme `obsidian://`).
 
@@ -513,7 +989,7 @@ obsidian:///<vault-root>/<note>[?frontmatter={on|off}&links={off|edge}]
 
 
 <!-- persona_wire_adapter_persona_pack/index.md -->
-# persona-wire-adapter-persona-pack 0.12.0
+# persona-wire-adapter-persona-pack 0.12.1
 
 `persona-wire-adapter-persona-pack` — persona-pack SDK access の ACL Facade。
 
@@ -561,7 +1037,7 @@ persona-pack 上流の TOML field 名 (`target` / `strategy` 等) や `extra` ta
 
 
 <!-- persona_wire_adapter_rss/index.md -->
-# persona-wire-adapter-rss 0.12.0
+# persona-wire-adapter-rss 0.12.1
 
 persona-wire Adapter for RSS/Atom/JSON feeds (scheme `rss://`).
 
@@ -607,7 +1083,7 @@ rss://<host>/<path>[?scheme=http][?limit=N]
 
 
 <!-- persona_wire_adapter_slack/index.md -->
-# persona-wire-adapter-slack 0.12.0
+# persona-wire-adapter-slack 0.12.1
 
 persona-wire Adapter for Slack (scheme `slack://`).
 
@@ -687,6 +1163,11 @@ bot explicitly invited** (`/invite @<bot>` in that channel) — a bot token
 without that invite gets a `not_in_channel` API error on
 `conversations.history`, which surfaces as a normal fetch failure (see
 "Error handling" below).
+
+The literal `"slack"` service key is overridable per-fetch via the
+URI's `?auth=<service_key>` query param (see `persona_wire_core::
+infrastructure::adapter`'s "External service integration policy" for the
+convention); absent, behavior is unchanged.
 
 Slack's HTTP response is always `200 OK`; success/failure is signalled by
 the response body's `{"ok": true|false}` field (see "Error handling"
@@ -799,7 +1280,7 @@ Every upstream request is sent with `limit = min(spec.limit, MAX_LIMIT)`
 
 
 <!-- persona_wire_adapter_sqlite_x/index.md -->
-# persona-wire-adapter-sqlite-x 0.12.0
+# persona-wire-adapter-sqlite-x 0.12.1
 
 persona-wire Adapter for raw SQLite SoT (scheme `sqlite://`).
 
@@ -843,7 +1324,7 @@ caller (template / projection) 側で必要なら decode する。
 
 
 <!-- persona_wire_adapter_todoist/index.md -->
-# persona-wire-adapter-todoist 0.12.0
+# persona-wire-adapter-todoist 0.12.1
 
 persona-wire Adapter for Todoist (scheme `todoist://`).
 
@@ -905,6 +1386,11 @@ access mode — a missing token **fails loud**. Set a token via the
 or store one in the OS keychain via `persona-wire token set todoist`. The
 token is found under Todoist Settings → Integrations → Developer.
 
+The literal `"todoist"` service key is overridable per-fetch via the
+URI's `?auth=<service_key>` query param (see `persona_wire_core::
+infrastructure::adapter`'s "External service integration policy" for the
+convention); absent, behavior is unchanged.
+
 Todoist enforces a rate limit of roughly 1,000 requests per 15 minutes
 per user; exceeding it returns HTTP 429, which surfaces as a normal fetch
 failure via `persona_wire_transport_http::HttpClient`.
@@ -956,7 +1442,7 @@ larger requests.
 
 
 <!-- persona_wire_core/index.md -->
-# persona-wire-core 0.12.0
+# persona-wire-core 0.12.1
 
 # persona-wire-core
 
@@ -1216,6 +1702,7 @@ and which are persona-wire's own extension.
 ## Modules
 
 - [`application`](application.md): Application layer — use cases and registries.
+- [`application::auth`](application__auth.md): Indirect authentication reference layer for Adapter fetches
 - [`application::bundle_install`](application__bundle_install.md): Bundle install use case — TOML parse → name resolution → registry
 - [`application::bundle_registry`](application__bundle_registry.md): Bundle registry — PoEAA Registry pattern (Fowler PoEAA Ch.18) for
 - [`application::doctor`](application__doctor.md): wire_doctor module — Finding-driven 2-axis (graph / workflow) health
@@ -1282,6 +1769,65 @@ Holds:
 - [`spec_registry`]       — Specification registry (dynamic / composable selector)
 - [`projection_registry`] — NamedProjection registry (fixed / named view)
 - [`use_cases`]           — wire_init / wire_close / wire_doctor / etc. flows
+- [`auth`]                — indirect authentication reference layer
+  (`AuthSpec` / `AuthResolver`) consumed by adapter fetches via the
+  `?auth=<service_key>` URI query param convention
+
+
+<!-- persona_wire_core/application__auth.md -->
+# persona-wire-core::application::auth
+
+Indirect authentication reference layer for Adapter fetches
+(`application::auth`).
+
+## Why indirection
+
+A bundle's `[[wirings]]` entry (and the adapter `source_uri` it carries)
+is persisted as plain-text `Node.metadata` — it must never hold a secret
+value. Instead, wiring / bundle authors write a **credential reference
+key** (`service_key`), and secret resolution happens later, at fetch
+time, through the existing [`persona-wire-credentials`] provider chain
+(env var → OS keyring). This module defines the domain-facing vocabulary
+for that reference:
+
+```text
+bundle TOML / source_uri            SQLite (plain text OK: key names only)
+  wiring: source_uri = "github://owner/repo"
+          auth = "github-alt"   ← reference key only, never a secret
+                    │
+                    ▼
+  AuthSpec { service_key, method: AuthMethod }
+                    │
+                    │ AuthResolver::resolve
+                    ▼
+  AuthMaterial::Bearer(SecretString)
+                    │
+  exposed only at the transport boundary (e.g.
+  `persona_wire_transport_http::HttpClient::with_bearer`)
+```
+
+[`AuthResolver`] is implemented by `persona-wire-credentials`'s
+`CredentialsAuthResolver` (wraps `Credentials::default_chain()`), so this
+crate stays free of any concrete credential-backend dependency — it only
+owns the shape of the reference, not how it resolves.
+
+## Phase 1 scope
+
+Only [`AuthMethod::Bearer`] ships in Phase 1. `AuthMethod` and
+[`AuthMaterial`] are both `#[non_exhaustive]` so that later phases
+(`AtprotoSession` / `OAuth2` / token refresh) can add variants without a
+breaking change; any `match` on either type from outside this crate must
+carry a wildcard arm.
+
+## Types
+
+- `AuthMaterial` — Resolved authentication material — the actual secret, held as a
+- `AuthMethod` — Authentication method carried by an [`AuthSpec`].
+- `AuthSpec` — A wiring entry's authentication reference — **never** the secret itself.
+
+## Traits
+
+- `AuthResolver` — Resolves an [`AuthSpec`] into concrete [`AuthMaterial`], or `None` when
 
 
 <!-- persona_wire_core/application__bundle_install.md -->
@@ -1983,6 +2529,7 @@ for any [`Wiring`] constructed through this module's parsers (modulo the
 
 ## Functions
 
+- `extract_auth` — Borrow the `auth` field (credential reference key, never a secret) as
 - `extract_maintenance_exempt` — Read the `maintenance_exempt` flag, defaulting to `false` when missing
 - `extract_persona` — Borrow the `persona` field as `&str` if present and a string.
 - `extract_slot` — Borrow the slot field (legacy key `axis`) as `&str` if present and a
@@ -1993,6 +2540,7 @@ for any [`Wiring`] constructed through this module's parsers (modulo the
 
 ## Constants
 
+- `META_AUTH` — `metadata.auth` key — optional credential **reference key** (never a
 - `META_MAINTENANCE_EXEMPT` — `metadata.maintenance_exempt` key — opt-out flag for session-cyclic
 - `META_PERSONA` — `metadata.persona` key (PersonaId, natural composite key part 1).
 - `META_SLOT` — `metadata.axis` key — legacy storage name for the [`Slot`] (natural
@@ -2777,6 +3325,29 @@ stateless, direct SDK integration).
   demand-ranked prioritization. The only exclusion criterion is that the
   service has been discontinued.
 
+### `?auth=<service_key>` query param convention (Phase 1, decided
+together with `application::auth`)
+
+Every HTTP-authenticated adapter honors an optional `?auth=<service_key>`
+query param on its `source_uri`:
+
+- `<service_key>` is a **credential reference key only** — never a
+  secret. It is looked up via
+  `persona_wire_credentials::Credentials::get(service_key)` (env var →
+  OS keyring), exactly like the adapter's own literal default service
+  name (e.g. `"github"`).
+- When present, `<service_key>` **overrides** the adapter's literal
+  default service name for that one fetch (e.g. `?auth=github-alt` looks
+  up the `github-alt` credential instead of `github`) — lets one wiring
+  entry authenticate as a different identity than another entry using
+  the same adapter/scheme.
+- When absent, behavior is unchanged: the adapter's literal default
+  service name is used (full backward compatibility).
+- This is an ordinary query key from every adapter's own URI-grammar
+  perspective — it follows the same "unknown query keys are silently
+  ignored" convention documented above, so adding `?auth=` never
+  conflicts with an adapter's own `?kind=` / `?limit=` / etc. params.
+
 ## Types
 
 - `FileAdapter` — (no documentation)
@@ -2924,7 +3495,7 @@ ACL Facade 観点:
 
 
 <!-- persona_wire_credentials/index.md -->
-# persona-wire-credentials 0.12.0
+# persona-wire-credentials 0.12.1
 
 Provider-chain credential resolution for persona-wire Adapters
 (`persona-wire-credentials`).
@@ -2974,7 +3545,7 @@ a token.
 
 
 <!-- persona_wire_mcp/index.md -->
-# persona-wire-mcp 0.12.0
+# persona-wire-mcp 0.12.1
 
 persona-wire MCP server library — the transport layer that wraps
 [`persona_wire_core`] for consumption by MCP clients (Claude Code,
@@ -2989,12 +3560,12 @@ by the [`WireServer`] struct, whose methods are annotated with
 [`WireServer::new`] constructs a persistent [`SqliteStorage`] +
 [`PluginRegistry`] pair once at startup. The registry combines
 core defaults (FileAdapter + HandlebarsEngine + StaticProjection)
-with the ten external adapter crates
+with the fifteen external adapter crates
 (`persona-wire-adapter-{mini-app, sqlite-x, obsidian,
-persona-pack, mcp, rss, github, todoist, notion, slack}`), so
-every scheme-tagged URI a caller passes to `wire_prompt_context`,
-`wire_render`, or `wire_workflow_fire` resolves through the same
-pipeline.
+persona-pack, mcp, rss, github, matrix, mastodon, todoist, notion, slack,
+apple-notes, activitypub, bluesky}`), so every scheme-tagged URI a caller
+passes to `wire_prompt_context`, `wire_render`, or `wire_workflow_fire`
+resolves through the same pipeline.
 
 No CLI parsing / entry-point code lives here — the `persona-wire`
 binary in the sibling crate is the only intended caller, and its
@@ -3003,7 +3574,7 @@ the operator's on-disk DB and hand it to `serve_stdio`.
 
 
 <!-- persona_wire_transport_http/index.md -->
-# persona-wire-transport-http 0.12.0
+# persona-wire-transport-http 0.12.1
 
 Shared HTTP transport for persona-wire Adapters (`persona-wire-transport-http`).
 

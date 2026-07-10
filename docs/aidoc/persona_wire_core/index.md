@@ -1,4 +1,4 @@
-# persona-wire-core 0.12.0
+# persona-wire-core 0.12.1
 
 # persona-wire-core
 
@@ -258,6 +258,7 @@ and which are persona-wire's own extension.
 ## Modules
 
 - [`application`](application.md): Application layer — use cases and registries.
+- [`application::auth`](application__auth.md): Indirect authentication reference layer for Adapter fetches
 - [`application::bundle_install`](application__bundle_install.md): Bundle install use case — TOML parse → name resolution → registry
 - [`application::bundle_registry`](application__bundle_registry.md): Bundle registry — PoEAA Registry pattern (Fowler PoEAA Ch.18) for
 - [`application::doctor`](application__doctor.md): wire_doctor module — Finding-driven 2-axis (graph / workflow) health

@@ -1,0 +1,26 @@
+{
+  "crate": "persona-wire-adapter-matrix",
+  "version": "0.12.1",
+  "items": [
+    {
+      "path": "persona_wire_adapter_matrix::DEFAULT_LIMIT",
+      "kind": "constant",
+      "docs": "Default `limit` cap when `?limit=` is absent from the URI (applies to\nboth `sync` and `rooms/<room_id>/messages`)."
+    },
+    {
+      "path": "persona_wire_adapter_matrix::DEFAULT_SERVICE_KEY",
+      "kind": "constant",
+      "docs": "Default credential `service_key` when `?auth=` is absent from the URI."
+    },
+    {
+      "path": "persona_wire_adapter_matrix::FETCH_TIMEOUT",
+      "kind": "constant",
+      "docs": "Per-request HTTP timeout (connect + body), matching\n`persona-wire-adapter-github::FETCH_TIMEOUT`."
+    },
+    {
+      "path": "persona_wire_adapter_matrix::MatrixAdapter",
+      "kind": "struct",
+      "docs": "persona-wire Adapter for Matrix (`matrix://` scheme)."
+    }
+  ]
+}

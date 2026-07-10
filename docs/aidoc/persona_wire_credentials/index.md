@@ -1,4 +1,4 @@
-# persona-wire-credentials 0.12.0
+# persona-wire-credentials 0.12.1
 
 Provider-chain credential resolution for persona-wire Adapters
 (`persona-wire-credentials`).

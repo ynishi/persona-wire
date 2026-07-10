@@ -1,6 +1,6 @@
 {
   "crate": "persona-wire-adapter-slack",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "items": [
     {
       "path": "persona_wire_adapter_slack::API_BASE",

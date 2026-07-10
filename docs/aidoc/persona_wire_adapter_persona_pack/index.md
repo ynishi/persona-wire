@@ -1,4 +1,4 @@
-# persona-wire-adapter-persona-pack 0.12.0
+# persona-wire-adapter-persona-pack 0.12.1
 
 `persona-wire-adapter-persona-pack` — persona-pack SDK access の ACL Facade。
 

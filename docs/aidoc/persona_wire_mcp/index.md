@@ -1,4 +1,4 @@
-# persona-wire-mcp 0.12.0
+# persona-wire-mcp 0.12.1
 
 persona-wire MCP server library — the transport layer that wraps
 [`persona_wire_core`] for consumption by MCP clients (Claude Code,
@@ -13,12 +13,12 @@ by the [`WireServer`] struct, whose methods are annotated with
 [`WireServer::new`] constructs a persistent [`SqliteStorage`] +
 [`PluginRegistry`] pair once at startup. The registry combines
 core defaults (FileAdapter + HandlebarsEngine + StaticProjection)
-with the ten external adapter crates
+with the fifteen external adapter crates
 (`persona-wire-adapter-{mini-app, sqlite-x, obsidian,
-persona-pack, mcp, rss, github, todoist, notion, slack}`), so
-every scheme-tagged URI a caller passes to `wire_prompt_context`,
-`wire_render`, or `wire_workflow_fire` resolves through the same
-pipeline.
+persona-pack, mcp, rss, github, matrix, mastodon, todoist, notion, slack,
+apple-notes, activitypub, bluesky}`), so every scheme-tagged URI a caller
+passes to `wire_prompt_context`, `wire_render`, or `wire_workflow_fire`
+resolves through the same pipeline.
 
 No CLI parsing / entry-point code lives here — the `persona-wire`
 binary in the sibling crate is the only intended caller, and its

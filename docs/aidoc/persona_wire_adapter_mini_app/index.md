@@ -1,4 +1,4 @@
-# persona-wire-adapter-mini-app 0.12.0
+# persona-wire-adapter-mini-app 0.12.1
 
 persona-wire Adapter for mini-app SoT (scheme `mini-app://`).
 

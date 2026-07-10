@@ -1,4 +1,4 @@
-# persona-wire-adapter-sqlite-x 0.12.0
+# persona-wire-adapter-sqlite-x 0.12.1
 
 persona-wire Adapter for raw SQLite SoT (scheme `sqlite://`).
 

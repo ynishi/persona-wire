@@ -1,4 +1,4 @@
-# persona-wire-transport-http 0.12.0
+# persona-wire-transport-http 0.12.1
 
 Shared HTTP transport for persona-wire Adapters (`persona-wire-transport-http`).
 
