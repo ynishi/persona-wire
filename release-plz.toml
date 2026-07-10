@@ -101,10 +101,8 @@ version_group = "persona-wire"
 name = "persona-wire-adapter-slack"
 version_group = "persona-wire"
 
-[[package]]
-name = "persona-wire-adapter-matrix"
-version_group = "persona-wire"
-
-[[package]]
-name = "persona-wire-adapter-mastodon"
-version_group = "persona-wire"
+# NB: matrix + mastodon are intentionally not in version_group during their
+# initial publish cycle. release-plz treats the group as "already released"
+# whenever the group's tag (v0.12.1) exists, which skips even brand-new
+# unpublished members — the same shape Wave 2 hit. They join the lockstep
+# group after their first landing on crates.io.
