@@ -1,0 +1,27 @@
+[package]
+name = "persona-wire-adapter-mastodon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for Mastodon (scheme `mastodon://`). Fetches the home / public timelines via the Mastodon REST API v1, with Bearer token auth via persona-wire-credentials (home requires auth; public falls back to unauthenticated)."
+
+[dependencies]
+persona-wire-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+secrecy.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+# Shared HTTP transport (fetch is scheme-agnostic; see module docs).
+persona-wire-transport-http.workspace = true
+# Provider-chain credential resolution (env var -> OS keychain).
+persona-wire-credentials.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

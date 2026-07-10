@@ -27,6 +27,8 @@ members = [
     "crates/persona-wire-adapter-slack",
     "crates/persona-wire-adapter-apple-notes",
     "crates/persona-wire-adapter-bluesky",
+    "crates/persona-wire-adapter-matrix",
+    "crates/persona-wire-adapter-mastodon",
 ]
 
 [workspace.package]
@@ -117,3 +119,5 @@ persona-wire-adapter-notion = { path = "crates/persona-wire-adapter-notion", ver
 persona-wire-adapter-slack = { path = "crates/persona-wire-adapter-slack", version = "0.12.1" }
 persona-wire-adapter-apple-notes = { path = "crates/persona-wire-adapter-apple-notes", version = "0.12.1" }
 persona-wire-adapter-bluesky = { path = "crates/persona-wire-adapter-bluesky", version = "0.12.1" }
+persona-wire-adapter-matrix = { path = "crates/persona-wire-adapter-matrix", version = "0.12.1" }
+persona-wire-adapter-mastodon = { path = "crates/persona-wire-adapter-mastodon", version = "0.12.1" }

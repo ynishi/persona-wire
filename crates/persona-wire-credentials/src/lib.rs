@@ -58,6 +58,7 @@ pub const ALIAS_ENV_VARS: &[(&str, &str)] = &[
     ("todoist", "TODOIST_API_TOKEN"),
     ("notion", "NOTION_TOKEN"),
     ("slack", "SLACK_BOT_TOKEN"),
+    ("mastodon", "MASTODON_ACCESS_TOKEN"),
 ];
 
 /// A single credential source consulted by [`Credentials`].

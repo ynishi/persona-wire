@@ -1,0 +1,32 @@
+[package]
+name = "persona-wire-adapter-matrix"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "persona-wire Adapter for Matrix (scheme `matrix://`). Fetches sync state / room messages via the Matrix Client-Server API v3, with Bearer token auth via persona-wire-credentials."
+
+[dependencies]
+persona-wire-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+secrecy.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+# Shared HTTP transport (fetch is scheme-agnostic; see module docs).
+persona-wire-transport-http.workspace = true
+# Provider-chain credential resolution (env var -> OS keychain).
+persona-wire-credentials.workspace = true
+# Percent-decode of the `room_id` / room-alias path segment.
+percent-encoding.workspace = true
+# Request URL building (query pairs / path segment percent-encoding), matching
+# persona-wire-adapter-todoist's convention.
+url.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

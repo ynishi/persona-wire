@@ -1467,6 +1467,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "persona-wire-adapter-mastodon"
+version = "0.12.1"
+dependencies = [
+ "async-trait",
+ "persona-wire-core",
+ "persona-wire-credentials",
+ "persona-wire-transport-http",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "persona-wire-adapter-matrix"
+version = "0.12.1"
+dependencies = [
+ "async-trait",
+ "percent-encoding",
+ "persona-wire-core",
+ "persona-wire-credentials",
+ "persona-wire-transport-http",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "persona-wire-adapter-mcp"
 version = "0.12.1"
 dependencies = [
@@ -1633,6 +1665,8 @@ dependencies = [
  "persona-wire-adapter-apple-notes",
  "persona-wire-adapter-bluesky",
  "persona-wire-adapter-github",
+ "persona-wire-adapter-mastodon",
+ "persona-wire-adapter-matrix",
  "persona-wire-adapter-mcp",
  "persona-wire-adapter-mini-app",
  "persona-wire-adapter-notion",
