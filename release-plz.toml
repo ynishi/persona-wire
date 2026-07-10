@@ -5,7 +5,7 @@ git_release_enable = false   # GitHub Release is created by cargo-dist
 git_tag_enable = false       # default off; only the representative crate tags
 git_tag_name = "v{{ version }}"  # unified tag name, also used for CHANGELOG compare links
 semver_check = true
-release_always = false       # publish only when the release PR is merged
+release_always = true        # TEMPORARY — see below; revert to false after new adapters land on crates.io
 pr_labels = ["release"]
 # Rate limit mitigation for the 15-crate workspace: give each `cargo publish` a
 # generous timeout so release-plz waits for crates.io indexing between crates
