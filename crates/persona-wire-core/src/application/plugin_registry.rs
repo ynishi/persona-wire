@@ -32,8 +32,21 @@ use std::sync::Arc;
 use crate::domain::error::{WireError, WireResult};
 use crate::domain::port::ProjectionRenderer;
 use crate::infrastructure::adapter::Adapter;
+use crate::infrastructure::filter::FilterCap;
 use crate::infrastructure::template::TemplateEngine;
 use crate::infrastructure::wire_uri::WireUri;
+
+/// `wire_doctor` display row for one registered [`Adapter`]: its scheme plus
+/// the cross-cutting [`FilterCap`]s it declared support for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterInfo {
+    /// URI scheme identifier (matches [`Adapter::scheme`]).
+    pub scheme: &'static str,
+    /// Cross-cutting filter capabilities the adapter declared (matches
+    /// [`Adapter::filter_caps`]). Empty means "no cross-cutting filter
+    /// support".
+    pub filter_caps: Vec<FilterCap>,
+}
 
 /// 3 軸 Plugin を統合管理する immutable registry。
 ///
@@ -133,6 +146,21 @@ impl PluginRegistry {
     pub fn schemes(&self) -> Vec<&'static str> {
         let mut v: Vec<_> = self.adapters.keys().copied().collect();
         v.sort_unstable();
+        v
+    }
+
+    /// `wire_doctor` 表示用: 登録 adapter の scheme + filter capability 一覧
+    /// (scheme 昇順、既存 [`schemes`](Self::schemes) と同順序規約)。
+    pub fn describe(&self) -> Vec<AdapterInfo> {
+        let mut v: Vec<AdapterInfo> = self
+            .adapters
+            .iter()
+            .map(|(&scheme, adapter)| AdapterInfo {
+                scheme,
+                filter_caps: adapter.filter_caps().to_vec(),
+            })
+            .collect();
+        v.sort_unstable_by_key(|info| info.scheme);
         v
     }
 
@@ -246,6 +274,48 @@ mod tests {
         assert_eq!(reg.schemes(), vec!["file"]);
         assert_eq!(reg.engine_ids(), vec!["handlebars"]);
         assert_eq!(reg.projection_kinds(), vec!["static"]);
+    }
+
+    /// Test-only adapter with no filter caps, scheme sorts before `"file"`.
+    struct NoFilterAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for NoFilterAdapter {
+        fn scheme(&self) -> &'static str {
+            "aaa-test"
+        }
+
+        async fn fetch(&self, _uri: &WireUri) -> WireResult<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[test]
+    fn describe_returns_scheme_and_filter_caps_sorted_by_scheme() {
+        let reg = PluginRegistry::builder()
+            .with_adapter(FileAdapter)
+            .with_adapter(NoFilterAdapter)
+            .build()
+            .unwrap();
+        let info = reg.describe();
+        assert_eq!(info.len(), 2);
+        // scheme ascending: "aaa-test" < "file"
+        assert_eq!(info[0].scheme, "aaa-test");
+        assert!(
+            info[0].filter_caps.is_empty(),
+            "adapter without filter_caps override should describe as empty"
+        );
+        assert_eq!(info[1].scheme, "file");
+        assert_eq!(
+            info[1].filter_caps,
+            vec![FilterCap::LineRange, FilterCap::Tail { n_max: 1000 }],
+        );
+    }
+
+    #[test]
+    fn describe_empty_registry_returns_empty_vec() {
+        let reg = PluginRegistry::builder().build().unwrap();
+        assert!(reg.describe().is_empty());
     }
 
     #[test]

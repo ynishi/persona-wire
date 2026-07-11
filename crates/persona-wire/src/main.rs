@@ -603,7 +603,13 @@ fn main() -> Result<()> {
 
         Command::WireDoctor => {
             let s = SqliteStorage::open(&db)?;
-            let out = wire_doctor(&s, None)?;
+            let registry = PluginRegistry::default_builder_for_wire()
+                .with_adapter(MiniAppAdapter)
+                .with_adapter(SqliteAdapter)
+                .with_adapter(ObsidianAdapter)
+                .with_adapter(PersonaPackAdapter::from_env()?)
+                .build()?;
+            let out = wire_doctor(&s, None, &registry)?;
             println!("{}", out.report_markdown);
         }
 

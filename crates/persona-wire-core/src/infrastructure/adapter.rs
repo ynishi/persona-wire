@@ -9,13 +9,21 @@
 //!   std::fs::read (json/toml parsing is a future extension; currently the
 //!   contents are returned as a string).
 //!
-//!   Query param extensions (R5):
+//!   Query param extensions (R5, now routed through the unified
+//!   [`crate::infrastructure::filter`] vocabulary via
+//!   [`Adapter::filter_caps`] / [`crate::infrastructure::filter::WireFilters::parse`]):
 //!   - `?tail=last_section` — the trailing section (split at markdown `## `
 //!     h2 boundaries; returns everything from the last h2 onward)
 //!   - `?tail_n=<N>` — the last N lines (line-based; capped at
 //!     [`TAIL_N_MAX`] = 1000 lines as a context size guard)
+//!   - `?lines=<FROM>-<TO>` — a 1-origin inclusive line range; `TO` beyond
+//!     the total line count clamps gracefully, `FROM` beyond the total
+//!     returns an empty body. Mutually exclusive with `?tail` / `?tail_n`
+//!     (fails loud if both are present).
 //!   - no query param → fetch the whole file (backward-compat)
-//!   - unknown / unparsable values → graceful fail = whole-file fetch
+//!   - unknown / unparsable values → **fail loud** (`Err`), per the unified
+//!     filter error policy (behavior changed from the earlier graceful
+//!     whole-file fallback; see `filter` module docs)
 //!
 //!   Metadata (R4):
 //!   - `size_bytes` — size of the whole file in bytes (the original file
@@ -107,6 +115,7 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use crate::domain::error::{WireError, WireResult};
+use crate::infrastructure::filter::{FilterCap, TailSpec, WireFilters};
 use crate::infrastructure::wire_uri::WireUri;
 use async_trait::async_trait;
 
@@ -137,6 +146,14 @@ pub trait Adapter: Send + Sync {
     /// (collisions fail fast at registry build time).
     fn scheme(&self) -> &'static str;
 
+    /// Declares the cross-cutting [`FilterCap`]s this adapter interprets via
+    /// [`WireFilters::parse`]. Default is empty (no cross-cutting filter
+    /// support) so every pre-existing adapter compiles unchanged; opting in
+    /// is additive.
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[]
+    }
+
     /// Interprets the parsed `WireUri` per scheme and returns fresh data as a
     /// `serde_json::Value`.
     ///
@@ -150,19 +167,10 @@ pub trait Adapter: Send + Sync {
 
 // ---- file adapter (std::fs) ----
 
+/// Bundled `file://` / `file:` scheme [`Adapter`] backed by `std::fs`. See
+/// the module-level docs for the URI grammar (query param extensions) and
+/// output shape.
 pub struct FileAdapter;
-
-/// Tail-fetch mode internal to `FileAdapter`.
-///
-/// - [`TailMode::Full`]        — no query param / invalid value (graceful fail)
-/// - [`TailMode::LastSection`] — `?tail=last_section`
-/// - [`TailMode::LastN`]       — `?tail_n=N` (N already clamped to [`TAIL_N_MAX`])
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TailMode {
-    Full,
-    LastSection,
-    LastN(usize),
-}
 
 impl FileAdapter {
     /// Takes the path part of `file://<path>` or `file:<path>` and reads the
@@ -175,13 +183,14 @@ impl FileAdapter {
     /// The result includes the R4 metadata (`size_bytes` / `modified_at` /
     /// nested `metadata` field).
     pub async fn fetch_file(&self, raw_path: &str) -> WireResult<serde_json::Value> {
-        self.fetch_file_impl(raw_path, TailMode::Full).await
+        self.fetch_file_impl(raw_path, &WireFilters::default())
+            .await
     }
 
     async fn fetch_file_impl(
         &self,
         raw_path: &str,
-        mode: TailMode,
+        filters: &WireFilters,
     ) -> WireResult<serde_json::Value> {
         let resolved = resolve_file_path(raw_path)?;
 
@@ -207,7 +216,7 @@ impl FileAdapter {
             let size_bytes = child_meta.len();
             let modified_at = mtime_unix(&child_meta);
             let meta_json = build_file_metadata(&newest);
-            let body = apply_tail(&body_full, &mode);
+            let body = apply_filters(&body_full, filters);
             Ok(serde_json::json!({
                 "scheme": "file",
                 "kind": "newest_in_dir",
@@ -224,7 +233,7 @@ impl FileAdapter {
             let size_bytes = meta.len();
             let modified_at = mtime_unix(&meta);
             let meta_json = build_file_metadata(&resolved);
-            let body = apply_tail(&body_full, &mode);
+            let body = apply_filters(&body_full, filters);
             Ok(serde_json::json!({
                 "scheme": "file",
                 "kind": "file",
@@ -244,6 +253,10 @@ impl Adapter for FileAdapter {
         "file"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::LineRange, FilterCap::Tail { n_max: TAIL_N_MAX }]
+    }
+
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         // The file URI accepts lenient, non-RFC forms like `file://~/foo`, so
         // extract the path part from the raw string via strip_prefix (typed
@@ -253,54 +266,60 @@ impl Adapter for FileAdapter {
             .strip_prefix("file://")
             .or_else(|| source_uri.strip_prefix("file:"))
             .ok_or_else(|| WireError::Storage(format!("file adapter: bad uri: {source_uri}")))?;
-        let mode = parse_tail_mode(uri);
-        self.fetch_file_impl(rest, mode).await
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        if filters.line_range.is_some() && filters.tail.is_some() {
+            return Err(WireError::Storage(
+                "lines and tail are mutually exclusive".to_string(),
+            ));
+        }
+        self.fetch_file_impl(rest, &filters).await
     }
 }
 
-/// Determines the [`TailMode`] from the `WireUri` query params.
-///
-/// - `?tail=last_section` → [`TailMode::LastSection`]
-/// - `?tail_n=N` (integer N > 0) → [`TailMode::LastN`] (N clamped to [`TAIL_N_MAX`])
-/// - unknown value / unparsable / N=0 → [`TailMode::Full`] (graceful fail)
-fn parse_tail_mode(uri: &WireUri) -> TailMode {
-    if let Some(tail) = uri.query_get("tail") {
-        if tail == "last_section" {
-            return TailMode::LastSection;
-        }
-        // Unknown value → graceful fail = Full
-        return TailMode::Full;
+/// Applies the parsed [`WireFilters`] to `body` and returns the resulting
+/// substring. `line_range` takes precedence over `tail` (callers validate
+/// the two are mutually exclusive before reaching here); no filter present
+/// returns `body` unchanged (backward-compat whole-body fetch).
+fn apply_filters(body: &str, filters: &WireFilters) -> String {
+    if let Some((from, to)) = filters.line_range {
+        apply_lines(body, from, to)
+    } else {
+        apply_tail(body, filters.tail.as_ref())
     }
-    if let Some(n_str) = uri.query_get("tail_n") {
-        if let Ok(n) = n_str.parse::<usize>() {
-            if n > 0 {
-                return TailMode::LastN(n.min(TAIL_N_MAX));
-            }
-        }
-        // Unparsable / n=0 → graceful fail = Full
-        return TailMode::Full;
-    }
-    TailMode::Full
 }
 
-/// Applies `mode` to `body` and returns the resulting substring.
+/// Applies `tail` to `body` and returns the resulting substring.
 ///
-/// - [`TailMode::Full`]        — returns `body` unchanged
-/// - [`TailMode::LastSection`] — returns from the last `## ` h2 heading line to the end
-/// - [`TailMode::LastN`]       — returns the last N lines joined with `"\n"`
-fn apply_tail(body: &str, mode: &TailMode) -> String {
-    match mode {
-        TailMode::Full => body.to_string(),
-        TailMode::LastSection => {
+/// - `None`                          — returns `body` unchanged
+/// - [`TailSpec::LastSection`] — returns from the last `## ` h2 heading line to the end
+/// - [`TailSpec::LastN`]       — returns the last N lines joined with `"\n"`
+fn apply_tail(body: &str, tail: Option<&TailSpec>) -> String {
+    match tail {
+        None => body.to_string(),
+        Some(TailSpec::LastSection) => {
             let pos = last_h2_pos(body);
             body[pos..].to_string()
         }
-        TailMode::LastN(n) => {
+        Some(TailSpec::LastN(n)) => {
             let lines: Vec<&str> = body.lines().collect();
             let skip = lines.len().saturating_sub(*n);
             lines[skip..].join("\n")
         }
     }
+}
+
+/// Applies `?lines=FROM-TO` (1-origin inclusive) to `body`. `to` is clamped
+/// to the total line count (graceful over-range); `from` beyond the total
+/// line count returns an empty string.
+fn apply_lines(body: &str, from: usize, to: usize) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let total = lines.len();
+    if from > total {
+        return String::new();
+    }
+    let start = from - 1;
+    let end = to.min(total);
+    lines[start..end].join("\n")
 }
 
 /// Returns the byte position of the last markdown h2 heading (a line starting
@@ -532,35 +551,79 @@ mod tests {
         assert_eq!(v["kind"].as_str().unwrap(), "file");
     }
 
-    // ---- R5: graceful fail — ?tail=invalid ----
+    // ---- R5 → unified filter policy: fail loud (was graceful) — ?tail=invalid ----
+    //
+    // Behavior change (adapter-filter-if Phase 1, decided): `?tail=unknown`
+    // used to silently fall back to whole-file fetch. Under the unified
+    // filter error policy (see `infrastructure::filter` module docs), a
+    // type-invalid filter value is now `Err` (fail loud).
 
     #[tokio::test]
-    async fn file_adapter_r5_tail_invalid_graceful_fail() {
+    async fn file_adapter_r5_tail_invalid_fails_loud() {
         let content = "some content\n";
         let path = write_test_file("r5_tail_inv.txt", content);
         let uri = WireUri::parse(&format!("file://{}?tail=invalid", path.display())).unwrap();
         let a = FileAdapter;
-        let v = a.fetch(&uri).await.unwrap();
-        assert_eq!(
-            v["body"].as_str().unwrap(),
-            content,
-            "graceful fail: full body returned"
-        );
+        let r = a.fetch(&uri).await;
+        assert!(r.is_err(), "unknown ?tail= value should fail loud");
     }
 
-    // ---- R5: graceful fail — ?tail_n=abc ----
+    // ---- R5 → unified filter policy: fail loud (was graceful) — ?tail_n=abc ----
 
     #[tokio::test]
-    async fn file_adapter_r5_tail_n_invalid_graceful_fail() {
+    async fn file_adapter_r5_tail_n_invalid_fails_loud() {
         let content = "some content\n";
         let path = write_test_file("r5_tail_n_inv.txt", content);
         let uri = WireUri::parse(&format!("file://{}?tail_n=abc", path.display())).unwrap();
         let a = FileAdapter;
+        let r = a.fetch(&uri).await;
+        assert!(r.is_err(), "non-numeric ?tail_n= value should fail loud");
+    }
+
+    // ---- ?lines=FROM-TO ----
+
+    #[tokio::test]
+    async fn file_adapter_lines_normal_range() {
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+        let path = write_test_file("lines_normal.txt", content);
+        let uri = WireUri::parse(&format!("file://{}?lines=2-4", path.display())).unwrap();
+        let a = FileAdapter;
         let v = a.fetch(&uri).await.unwrap();
-        assert_eq!(
-            v["body"].as_str().unwrap(),
-            content,
-            "graceful fail: full body returned"
+        assert_eq!(v["body"].as_str().unwrap(), "line2\nline3\nline4");
+    }
+
+    #[tokio::test]
+    async fn file_adapter_lines_to_beyond_total_clamps_gracefully() {
+        let content = "line1\nline2\nline3\n";
+        let path = write_test_file("lines_over.txt", content);
+        let uri = WireUri::parse(&format!("file://{}?lines=2-100", path.display())).unwrap();
+        let a = FileAdapter;
+        let v = a.fetch(&uri).await.unwrap();
+        assert_eq!(v["body"].as_str().unwrap(), "line2\nline3");
+    }
+
+    #[tokio::test]
+    async fn file_adapter_lines_from_beyond_total_returns_empty() {
+        let content = "line1\nline2\n";
+        let path = write_test_file("lines_from_over.txt", content);
+        let uri = WireUri::parse(&format!("file://{}?lines=10-20", path.display())).unwrap();
+        let a = FileAdapter;
+        let v = a.fetch(&uri).await.unwrap();
+        assert_eq!(v["body"].as_str().unwrap(), "");
+    }
+
+    // ---- lines + tail mutual exclusivity ----
+
+    #[tokio::test]
+    async fn file_adapter_lines_and_tail_n_mutually_exclusive() {
+        let content = "line1\nline2\nline3\n";
+        let path = write_test_file("lines_and_tail.txt", content);
+        let uri = WireUri::parse(&format!("file://{}?lines=1-2&tail_n=1", path.display())).unwrap();
+        let a = FileAdapter;
+        let r = a.fetch(&uri).await;
+        assert!(
+            r.is_err(),
+            "lines and tail_n together should fail loud (mutually exclusive)"
         );
     }
 
@@ -616,53 +679,43 @@ mod tests {
     }
 
     #[test]
-    fn apply_tail_full_returns_body() {
+    fn apply_tail_none_returns_body() {
         let body = "a\nb\nc\n";
-        assert_eq!(apply_tail(body, &TailMode::Full), body);
+        assert_eq!(apply_tail(body, None), body);
     }
 
     #[test]
     fn apply_tail_last_n_returns_last_lines() {
         let body = "a\nb\nc\nd\ne\n";
-        let result = apply_tail(body, &TailMode::LastN(3));
+        let result = apply_tail(body, Some(&TailSpec::LastN(3)));
         assert_eq!(result, "c\nd\ne");
     }
 
     #[test]
     fn apply_tail_last_n_returns_all_when_n_exceeds_line_count() {
         let body = "x\ny\n";
-        let result = apply_tail(body, &TailMode::LastN(1000));
+        let result = apply_tail(body, Some(&TailSpec::LastN(1000)));
         assert_eq!(result, "x\ny");
     }
 
+    // ---- apply_lines: pure function boundary checks ----
+
     #[test]
-    fn parse_tail_mode_unknown_tail_returns_full() {
-        let uri = WireUri::parse("file:///tmp/x?tail=unknown").unwrap();
-        assert_eq!(parse_tail_mode(&uri), TailMode::Full);
+    fn apply_lines_normal_range() {
+        let body = "a\nb\nc\nd\ne\n";
+        assert_eq!(apply_lines(body, 2, 4), "b\nc\nd");
     }
 
     #[test]
-    fn parse_tail_mode_last_section() {
-        let uri = WireUri::parse("file:///tmp/x?tail=last_section").unwrap();
-        assert_eq!(parse_tail_mode(&uri), TailMode::LastSection);
+    fn apply_lines_to_beyond_total_clamps() {
+        let body = "a\nb\nc\n";
+        assert_eq!(apply_lines(body, 1, 100), "a\nb\nc");
     }
 
     #[test]
-    fn parse_tail_mode_tail_n_clamped() {
-        let uri = WireUri::parse("file:///tmp/x?tail_n=5000").unwrap();
-        assert_eq!(parse_tail_mode(&uri), TailMode::LastN(TAIL_N_MAX));
-    }
-
-    #[test]
-    fn parse_tail_mode_tail_n_abc_returns_full() {
-        let uri = WireUri::parse("file:///tmp/x?tail_n=abc").unwrap();
-        assert_eq!(parse_tail_mode(&uri), TailMode::Full);
-    }
-
-    #[test]
-    fn parse_tail_mode_no_params_returns_full() {
-        let uri = WireUri::parse("file:///tmp/x").unwrap();
-        assert_eq!(parse_tail_mode(&uri), TailMode::Full);
+    fn apply_lines_from_beyond_total_returns_empty() {
+        let body = "a\nb\n";
+        assert_eq!(apply_lines(body, 10, 20), "");
     }
 
     // ---- R4 tests (metadata expose — main style: nested metadata object) ----

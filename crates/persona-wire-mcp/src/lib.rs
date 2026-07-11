@@ -465,7 +465,7 @@ impl WireServer {
         Parameters(p): Parameters<WireDoctorParams>,
     ) -> Result<String, String> {
         let s = self.storage.lock().map_err(|e| e.to_string())?;
-        let out = wire_doctor(&s, p.persona_id).map_err(|e| e.to_string())?;
+        let out = wire_doctor(&s, p.persona_id, &self.registry).map_err(|e| e.to_string())?;
         Ok(out.report_markdown)
     }
 

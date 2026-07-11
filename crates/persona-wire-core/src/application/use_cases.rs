@@ -748,12 +748,15 @@ pub struct WireDoctorOutput {
 ///
 /// 内部は [`crate::application::doctor::run`] (Probe registry) に完全委譲、
 /// Finding 列挙 + verdict 集約形式の Markdown を返す (design §5 / §8)。
+/// `registry` は登録 adapter の scheme + filter capability 一覧を `## Adapters`
+/// 節に反映するために使う (adapter-filter-if Phase 1)。
 /// 数値カウントが必要なら [`graph_scan_summary`] を別途呼ぶ。
 pub fn wire_doctor(
     storage: &SqliteStorage,
     persona_id: Option<String>,
+    registry: &PluginRegistry,
 ) -> WireResult<WireDoctorOutput> {
-    let report_markdown = crate::application::doctor::run(storage, persona_id)?;
+    let report_markdown = crate::application::doctor::run(storage, persona_id, registry)?;
     Ok(WireDoctorOutput { report_markdown })
 }
 
@@ -1854,7 +1857,7 @@ mod tests {
         // bare persona node with no metadata + no edges — SHOULD count as orphan
         s.insert_node(&bare_node("p", "persona")).unwrap();
 
-        let out = wire_doctor(&s, None).unwrap();
+        let out = wire_doctor(&s, None, &default_registry()).unwrap();
         let summary = graph_scan_summary(&s).unwrap();
         assert_eq!(summary.total_node_count, 3);
         assert_eq!(summary.total_edge_count, 0);
@@ -1871,7 +1874,8 @@ mod tests {
     #[test]
     fn wire_doctor_returns_2axis_integrated_report() {
         let storage = setup();
-        let out = wire_doctor(&storage, None).expect("wire_doctor should pass on empty setup");
+        let out = wire_doctor(&storage, None, &default_registry())
+            .expect("wire_doctor should pass on empty setup");
         // Finding-driven format (design §8): scope + verdict + axis sections。
         assert!(
             out.report_markdown.contains("## Graph axis"),
@@ -1885,6 +1889,25 @@ mod tests {
         // empty setup → GraphEdgesZero probe fires (error) → BROKEN。
         assert!(out.report_markdown.contains("verdict: BROKEN"));
         assert!(out.report_markdown.contains("graph.edges_zero"));
+    }
+
+    #[test]
+    fn wire_doctor_report_includes_adapters_section() {
+        // adapter-filter-if Phase 1: wire_doctor renders a `## Adapters`
+        // section describing registered adapter scheme + filter_caps.
+        let storage = setup();
+        let out = wire_doctor(&storage, None, &default_registry()).unwrap();
+        assert!(
+            out.report_markdown.contains("## Adapters"),
+            "report_markdown should contain '## Adapters' header; got: {}",
+            out.report_markdown
+        );
+        assert!(
+            out.report_markdown
+                .contains("- file: lines, tail(n_max=1000)"),
+            "report_markdown should list the bundled FileAdapter's filter caps; got: {}",
+            out.report_markdown
+        );
     }
 
     #[test]

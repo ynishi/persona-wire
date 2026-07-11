@@ -3,6 +3,7 @@
 //! design.md §5 (verdict) / §8 (output 形式) に対応。
 
 use crate::application::doctor::finding::{Axis, Finding, Severity};
+use crate::application::plugin_registry::AdapterInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -70,6 +71,29 @@ pub fn to_markdown(persona_filter: Option<&str>, findings: Vec<Finding>) -> Stri
     out.push_str(&render_axis(Axis::Graph, &findings));
     out.push_str(&render_axis(Axis::Workflow, &findings));
 
+    out
+}
+
+/// Renders the `## Adapters` section (adapter-filter-if Phase 1): one line
+/// per registered adapter, `scheme: <caps, comma-separated>` or
+/// `scheme: (no filters)` when the adapter declared no [`FilterCap`]s.
+///
+/// [`FilterCap`]: crate::infrastructure::filter::FilterCap
+pub fn render_adapters(adapters: &[AdapterInfo]) -> String {
+    let mut out = String::from("## Adapters\n\n");
+    if adapters.is_empty() {
+        out.push_str("_(no adapters registered)_\n\n");
+        return out;
+    }
+    for a in adapters {
+        if a.filter_caps.is_empty() {
+            out.push_str(&format!("- {}: (no filters)\n", a.scheme));
+        } else {
+            let caps: Vec<String> = a.filter_caps.iter().map(|c| c.to_string()).collect();
+            out.push_str(&format!("- {}: {}\n", a.scheme, caps.join(", ")));
+        }
+    }
+    out.push('\n');
     out
 }
 

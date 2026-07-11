@@ -257,5 +257,7 @@ pub mod application;
 pub mod domain;
 pub mod infrastructure;
 
+pub use application::plugin_registry::AdapterInfo;
 pub use domain::error::WireError;
 pub use domain::error::WireResult;
+pub use infrastructure::filter::{FilterCap, TailSpec, WireFilters};

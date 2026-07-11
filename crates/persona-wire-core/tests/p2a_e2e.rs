@@ -20,6 +20,10 @@ use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;
 use serde_json::json;
 
+fn default_registry() -> PluginRegistry {
+    PluginRegistry::default_for_wire().unwrap()
+}
+
 fn bare_node(id: &str, type_: &str, metadata: serde_json::Value) -> Node {
     Node {
         id: ulid_from_seed(id),
@@ -71,7 +75,7 @@ fn wire_doctor_parity_with_wire_close_on_same_graph() {
     )
     .unwrap();
     let close_summary = graph_scan_summary(&s).unwrap();
-    let _doctor = wire_doctor(&s, None).unwrap();
+    let _doctor = wire_doctor(&s, None, &default_registry()).unwrap();
     let doctor_summary = graph_scan_summary(&s).unwrap();
 
     // wire_close and wire_doctor must agree on every count.
@@ -109,7 +113,7 @@ fn wire_doctor_reports_orphan_zero_when_every_node_is_touched() {
     s.insert_edge(&bare_edge("e_bc", "b", "c", "routes_to"))
         .unwrap();
 
-    let doctor = wire_doctor(&s, None).unwrap();
+    let doctor = wire_doctor(&s, None, &default_registry()).unwrap();
     let doctor_summary = graph_scan_summary(&s).unwrap();
     assert_eq!(doctor_summary.total_node_count, 3);
     assert_eq!(doctor_summary.total_edge_count, 2);
@@ -174,7 +178,7 @@ fn wire_doctor_with_dynamic_specification_e2e() {
     assert_eq!(init.projections[0].rendered, "Active personas (2): p1, p2");
 
     // wire_doctor sees the whole graph (3 personas, 2 edges, 0 orphans).
-    let _doctor = wire_doctor(&s, None).unwrap();
+    let _doctor = wire_doctor(&s, None, &default_registry()).unwrap();
     let doctor_summary = graph_scan_summary(&s).unwrap();
     assert_eq!(doctor_summary.total_node_count, 3);
     assert_eq!(doctor_summary.total_edge_count, 2);
