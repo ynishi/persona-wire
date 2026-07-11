@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/ynishi/persona-wire/compare/v0.13.0...v0.14.0) - 2026-07-11
+
+### Added
+
+- *(core)* unified adapter filter IF — FilterCap vocabulary + WireFilters parser (Phase 1)
+
 ## [0.13.0](https://github.com/ynishi/persona-wire/compare/v0.12.1...v0.13.0) - 2026-07-11
 
 ### Added
