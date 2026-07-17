@@ -121,7 +121,7 @@ mod tests {
             spec_result: &data,
             template: "v={{k}}",
             target_form: TargetForm::Markdown,
-            persona_id: Some("shi"),
+            persona_id: Some("alice"),
             config: &cfg,
         };
         assert_eq!(proj.render(with_persona).await.unwrap(), "v=1");

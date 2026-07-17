@@ -1,6 +1,6 @@
 {
   "crate": "persona-wire-core",
-  "version": "0.12.1",
+  "version": "0.14.0",
   "items": [
     {
       "path": "persona_wire_core::application",
@@ -61,7 +61,7 @@
     {
       "path": "persona_wire_core::application::bundle_install::WiringEntry",
       "kind": "struct",
-      "docs": "Wiring section entry — one slot binding for one persona.\n\nPersisted as a `Node` of type `outline_node` whose name is\n`format!(\"{persona_id}.{slot}\")` and whose metadata carries\n`persona` / `axis` (= slot) / `source_uri`. Conflict resolution\noperates on the synthesized node name; the auto-increment suffix\ngoes on the slot half so the persona half stays readable\n(`shi.mailbox` → `shi.mailbox-1`)."
+      "docs": "Wiring section entry — one slot binding for one persona.\n\nPersisted as a `Node` of type `outline_node` whose name is\n`format!(\"{persona_id}.{slot}\")` and whose metadata carries\n`persona` / `axis` (= slot) / `source_uri`. Conflict resolution\noperates on the synthesized node name; the auto-increment suffix\ngoes on the slot half so the persona half stays readable\n(`alice.mailbox` → `alice.mailbox-1`)."
     },
     {
       "path": "persona_wire_core::application::bundle_install::WorkflowEntry",
@@ -205,7 +205,7 @@
     {
       "path": "persona_wire_core::application::doctor::probes::workflow_trigger_infra_missing",
       "kind": "module",
-      "docs": "workflow.trigger_infra_missing — trigger.kind=cron で cron 指定なし、\nまたは kind=on_event で event 文字列なし (error)。\n\ndesign.md §7 entry。 「受け手不在 / 永遠未 fire」 の構造的検出。\nNOTE: `on_event` の hook 実在検査 (agent-profiles 側の登録) は本 Probe\nscope 外、 将来 carry。 ここでは event 文字列の完備性のみ。"
+      "docs": "workflow.trigger_infra_missing — trigger.kind=cron で cron 指定なし、\nまたは kind=on_event で event 文字列なし (error)。\n\ndesign.md §7 entry。 「受け手不在 / 永遠未 fire」 の構造的検出。\nNOTE: `on_event` の hook 実在検査 (external hook registration 側) は本\nProbe scope 外、 将来 carry。 ここでは event 文字列の完備性のみ。"
     },
     {
       "path": "persona_wire_core::application::doctor::probes::workflow_trigger_infra_missing::WorkflowTriggerInfraMissing",
@@ -236,13 +236,18 @@
       "docs": "design §5: error >= 1 → BROKEN / warn >= 1 → DEGRADED / 全 PASS → HEALTHY。"
     },
     {
+      "path": "persona_wire_core::application::doctor::render::render_adapters",
+      "kind": "function",
+      "docs": "Renders the `## Adapters` section (adapter-filter-if Phase 1): one line\nper registered adapter, `scheme: <caps, comma-separated>` or\n`scheme: (no filters)` when the adapter declared no [`FilterCap`]s.\n\n[`FilterCap`]: crate::infrastructure::filter::FilterCap"
+    },
+    {
       "path": "persona_wire_core::application::doctor::render::to_markdown",
       "kind": "function"
     },
     {
       "path": "persona_wire_core::application::doctor::run",
       "kind": "function",
-      "docs": "design §3: Full mode (`persona_id = None`) / Persona-scoped mode (`Some(id)`)。\n戻り値は Markdown report (design §8 layout)。"
+      "docs": "design §3: Full mode (`persona_id = None`) / Persona-scoped mode (`Some(id)`)。\n戻り値は Markdown report (design §8 layout + adapter-filter-if Phase 1\n`## Adapters` 節)。 `registry` は登録 adapter の scheme + filter capability\n一覧 ([`PluginRegistry::describe`]) を `## Adapters` 節に反映するために使う。"
     },
     {
       "path": "persona_wire_core::application::merger",
@@ -258,6 +263,11 @@
       "path": "persona_wire_core::application::plugin_registry",
       "kind": "module",
       "docs": "PluginRegistry — 3 軸 Plugin (Adapter / TemplateEngine / Projection) を統合管理。\n\nserver boot 時に register、 runtime mutation なし (= immutable after `build()`)。\nPlugin の物理境界は外部 crate (例: `wire-adapter-pg` / `wire-template-jinja` /\n`wire-projection-llm`)、 boot 側 (`persona-wire-mcp` / `persona-wire` bin) で\n`PluginRegistry::builder()` に流し込んで構築する。\n\n## boot 例\n\n```ignore\nuse persona_wire_core::application::plugin_registry::PluginRegistry;\nuse persona_wire_core::infrastructure::adapter::FileAdapter;\nuse persona_wire_core::infrastructure::template::HandlebarsEngine;\nuse persona_wire_core::infrastructure::projection::StaticProjection;\nuse persona_wire_adapter_mini_app::MiniAppAdapter;\n\nlet registry = PluginRegistry::default_builder_for_wire()\n    .with_adapter(MiniAppAdapter)\n    .build()\n    .expect(\"plugin registry build\");\n```\n\nP3a stage: registry skeleton + builder + lookup surface のみ。 use_cases.rs\n側の dispatch 配線 (registry を引数で受け取って fetch / render を引く form)\nは P3a 後段で順次差し替え (現状は free fn `fetch_via_adapter` + `rendering::render`\n直呼びを維持、 後方互換)。"
+    },
+    {
+      "path": "persona_wire_core::application::plugin_registry::AdapterInfo",
+      "kind": "struct",
+      "docs": "`wire_doctor` display row for one registered [`Adapter`]: its scheme plus\nthe cross-cutting [`FilterCap`]s it declared support for."
     },
     {
       "path": "persona_wire_core::application::plugin_registry::PluginRegistry",
@@ -401,6 +411,15 @@
       "kind": "struct"
     },
     {
+      "path": "persona_wire_core::application::use_cases::WireFetchInput",
+      "kind": "struct",
+      "docs": "Input for [`wire_fetch`] — either a raw `source_uri`, or a\n`(persona_id, slot)` pair resolving an existing wiring entry (which also\napplies the entry's `metadata.auth` merge, matching what the render path\nfetches). Exactly one of the two forms must be supplied."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireFetchOutput",
+      "kind": "struct"
+    },
+    {
       "path": "persona_wire_core::application::use_cases::WireInitInput",
       "kind": "struct"
     },
@@ -454,6 +473,23 @@
       "kind": "struct"
     },
     {
+      "path": "persona_wire_core::application::use_cases::WireSlotDeleteInput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireSlotDeleteOutput",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireSlotRegisterInput",
+      "kind": "struct",
+      "docs": "Input for [`wire_slot_register`] — the minimal real information a slot\nneeds. Everything else (node name, spec body, projection name) is derived\nfrom the `(persona_id, slot)` pair by the same conventions the render\npath applies."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::WireSlotRegisterOutput",
+      "kind": "struct"
+    },
+    {
       "path": "persona_wire_core::application::use_cases::WireWorkflowFireInput",
       "kind": "struct"
     },
@@ -504,7 +540,7 @@
     {
       "path": "persona_wire_core::application::use_cases::wire_doctor",
       "kind": "function",
-      "docs": "Finding-driven 2-axis (graph / workflow) health diagnostic (design §3-§8).\n\n`persona_id = None` → Full mode (全 persona 横串)。\n`persona_id = Some(id)` → Persona-scoped mode (当該 persona に紐づく\nFinding のみ列挙、 main thread context を汚さない用)。\n\n内部は [`crate::application::doctor::run`] (Probe registry) に完全委譲、\nFinding 列挙 + verdict 集約形式の Markdown を返す (design §5 / §8)。\n数値カウントが必要なら [`graph_scan_summary`] を別途呼ぶ。"
+      "docs": "Finding-driven 2-axis (graph / workflow) health diagnostic (design §3-§8).\n\n`persona_id = None` → Full mode (全 persona 横串)。\n`persona_id = Some(id)` → Persona-scoped mode (当該 persona に紐づく\nFinding のみ列挙、 main thread context を汚さない用)。\n\n内部は [`crate::application::doctor::run`] (Probe registry) に完全委譲、\nFinding 列挙 + verdict 集約形式の Markdown を返す (design §5 / §8)。\n`registry` は登録 adapter の scheme + filter capability 一覧を `## Adapters`\n節に反映するために使う (adapter-filter-if Phase 1)。\n数値カウントが必要なら [`graph_scan_summary`] を別途呼ぶ。"
     },
     {
       "path": "persona_wire_core::application::use_cases::wire_edge_delete",
@@ -515,6 +551,11 @@
       "path": "persona_wire_core::application::use_cases::wire_edges_create_batch",
       "kind": "function",
       "docs": "Insert a batch of edges by iterating `insert_edge` 1 row at a time. Same\nnon-atomic semantics as `wire_nodes_create_batch`."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_fetch",
+      "kind": "function",
+      "docs": "Raw adapter preview — routes a URI through the same `PluginRegistry`\ndispatch the render path uses and returns the adapter output verbatim.\nThis closes the template-authoring loop: preview the `fetched_data`\nshape, then write the handlebars against it. Adapter errors fail loud\n(no silent `Null` fallback — unlike the render path's best-effort mode,\na preview call wants to see the failure)."
     },
     {
       "path": "persona_wire_core::application::use_cases::wire_init",
@@ -557,6 +598,16 @@
       "docs": "Render a single registered NamedProjection by name. Counterpart to\n`wire_init` (which renders every projection at once): use `wire_render`\nwhen you want exactly one rendered context, identified by name.\n\nAd-hoc inline rendering (spec + template + target_form passed inline,\nwithout registration) is carried to a follow-up surface — see\n`docs/wire-query-spec.md` §8 Future expansion."
     },
     {
+      "path": "persona_wire_core::application::use_cases::wire_slot_delete",
+      "kind": "function",
+      "docs": "Counterpart to [`wire_slot_register`] — removes the wiring node, the\nauto-registered spec, and the convention-named projection. Idempotent:\nmissing artifacts report `false` instead of erroring."
+    },
+    {
+      "path": "persona_wire_core::application::use_cases::wire_slot_register",
+      "kind": "function",
+      "docs": "One-shot slot setup — a macro over the three registrations the onboarding\nguide walks through by hand (`wire_node_create` + `wire_spec_register` +\n`wire_projection_register`), collapsing the caller-facing surface to the\nfive values that carry real information: persona / slot / source_uri /\ntemplate / target_form.\n\nDerivations (single SoT with the render path):\n- node name = `<persona>.<slot>` (`Wiring::storage_node_id` form)\n- spec name = `<persona>.spec.<slot>`, body = the standard 3-clause shape\n  (`TypeIs(outline_node) AND persona AND axis`)\n- projection name = `<persona>.section.<slot>`\n  (`projection_naming::workflow_emit_projection_name`)\n\nUpsert semantics: the spec / projection registries already upsert by\nname; the wiring node is matched by name and its canonical metadata keys\nare merged in place (ULID preserved, passthrough keys kept). Re-invoking\nwith changed values tunes the slot without a delete + recreate dance."
+    },
+    {
       "path": "persona_wire_core::application::use_cases::wire_spec_delete",
       "kind": "function",
       "docs": "Delete a Specification by ULID id or name. Projections referencing it via\nspec_ref will start returning dangling-spec errors at render time\n(existing wire_render contract)."
@@ -579,7 +630,7 @@
     {
       "path": "persona_wire_core::application::wiring_mapper",
       "kind": "module",
-      "docs": "Mapper boundary: [`Wiring`] Domain Entity ↔ wiring [`Node`].\n\nFowler PoEAA Data Mapper — `Node.metadata` JSON is the persistence form\n(storage column-equivalent), [`Wiring`] is the Domain Entity carrying\ninvariants. This module is the **single SoT** for translating between\nthe two shapes; `wire_init` / `wire_render` / `wire_prompt_context` and\nthe doctor probes route through here instead of inlining\n`metadata.get(\"axis\")` / `metadata.get(\"source_uri\")` string surgery.\n\nStorage form (cf. `domain/entity/wiring.rs` module docs):\n\n```text\nNode {\n  id: \"<persona>.<slot>\",        // natural composite key\n  type: \"outline_node\",\n  metadata: {\n    \"persona\":     String,\n    \"axis\":        String,       // legacy storage key for Slot name\n    \"source_uri\":  String,\n    \"maintenance_exempt\"?: bool, // self-attach signal (orphan suppression)\n    ...other passthrough fields...\n  },\n}\n```\n\nThe legacy `metadata[\"axis\"]` key carries the [`Slot`] name (see\n`domain/entity/slot.rs` docs for the axis → Slot vocabulary split). The\nstorage rename to `metadata[\"slot\"]` is a separate persistence migration;\nuntil then this module is the only place where the legacy key is read /\nwritten, so callsites in `use_cases.rs` / doctor probes / tests are free\nof the bare `\"axis\"` literal.\n\nRound-trip property: `node_to_wiring(wiring_to_node(w, opts)?)? == w`\nfor any [`Wiring`] constructed through this module's parsers (modulo the\n`projection_ref` carry, which is stored separately at the\n`ProjectionRegistry` boundary, not on the wiring Node)."
+      "docs": "Mapper boundary: [`Wiring`] Domain Entity ↔ wiring [`Node`].\n\nFowler PoEAA Data Mapper — `Node.metadata` JSON is the persistence form\n(storage column-equivalent), [`Wiring`] is the Domain Entity carrying\ninvariants. This module is the **single SoT** for translating between\nthe two shapes; `wire_init` / `wire_render` / `wire_prompt_context` and\nthe doctor probes route through here instead of inlining\n`metadata.get(\"axis\")` / `metadata.get(\"source_uri\")` string surgery.\n\nStorage form (cf. `domain/entity/wiring.rs` module docs):\n\n```text\nNode {\n  id: \"<persona>.<slot>\",        // natural composite key\n  type: \"outline_node\",\n  metadata: {\n    \"persona\":     String,\n    \"axis\":        String,       // legacy storage key for Slot name\n    \"source_uri\":  String,\n    \"maintenance_exempt\"?: bool, // self-attach signal (orphan suppression)\n    ...other passthrough fields...\n  },\n}\n```\n\nThe legacy `metadata[\"axis\"]` key carries the [`Slot`] name (see\n`domain/entity/slot.rs` docs for the axis → Slot vocabulary split). The\nstorage rename to `metadata[\"slot\"]` is a separate persistence migration;\nuntil then this module is the only place where the legacy key is read /\nwritten, so callsites in `use_cases.rs` / doctor probes / tests are free\nof the bare `\"axis\"` literal.\n\nRound-trip property: `node_to_wiring(wiring_to_node(w, opts)?)? == w`\nfor any [`Wiring`] constructed through this module's parsers (modulo the\n`projection_ref` carry — resolved at the `ProjectionRegistry` boundary\nvia the naming convention, or overridden by the optional\n`metadata.projection_ref` key when a wiring binds a projection\nexplicitly; see [`META_PROJECTION_REF`])."
     },
     {
       "path": "persona_wire_core::application::wiring_mapper::META_AUTH",
@@ -595,6 +646,11 @@
       "path": "persona_wire_core::application::wiring_mapper::META_PERSONA",
       "kind": "constant",
       "docs": "`metadata.persona` key (PersonaId, natural composite key part 1)."
+    },
+    {
+      "path": "persona_wire_core::application::wiring_mapper::META_PROJECTION_REF",
+      "kind": "constant",
+      "docs": "`metadata.projection_ref` key — optional explicit NamedProjection binding.\nWhen present, `use_cases::collect_slot` resolves the projection through\nthis name instead of the `<persona>.section.<slot>` convention\n(`projection_naming`), letting one registered projection serve multiple\npersonas and making the bundle `[[wirings]].projection_ref` field\nfunctional. Absent → convention fallback (the common case)."
     },
     {
       "path": "persona_wire_core::application::wiring_mapper::META_SLOT",
@@ -627,6 +683,11 @@
       "docs": "Borrow the `persona` field as `&str` if present and a string."
     },
     {
+      "path": "persona_wire_core::application::wiring_mapper::extract_projection_ref",
+      "kind": "function",
+      "docs": "Borrow the explicit `projection_ref` binding as `&str` if present and a\nstring. `None` when absent — the common case, which falls back to the\n`<persona>.section.<slot>` naming convention at resolve time."
+    },
+    {
       "path": "persona_wire_core::application::wiring_mapper::extract_slot",
       "kind": "function",
       "docs": "Borrow the slot field (legacy key `axis`) as `&str` if present and a\nstring. Returns the slot name without applying the [`Slot`] non-empty /\nno-dot invariants — for typed extraction use [`extract_slot_typed`]."
@@ -644,7 +705,7 @@
     {
       "path": "persona_wire_core::application::wiring_mapper::node_to_wiring",
       "kind": "function",
-      "docs": "Strict mapper: build a typed [`Wiring`] from a wiring [`Node`].\n\n`projection_ref` is supplied by the caller because the wiring Node does\n**not** persist the projection ref — that lives at the\n`ProjectionRegistry` boundary, looked up via `projection_naming` rules.\nPass `None` when the projection ref is not (yet) known.\n\nErrors with `DomainError::InvalidMetadata` when required keys\n(`persona` / `axis` / `source_uri`) are missing or violate the VO\ninvariants of [`PersonaId`] / [`Slot`] / [`Source`]."
+      "docs": "Strict mapper: build a typed [`Wiring`] from a wiring [`Node`].\n\n`projection_ref` is supplied by the caller: in the common case the\nwiring Node does not persist a projection ref (it is looked up at the\n`ProjectionRegistry` boundary via `projection_naming` rules), and a\nwiring may override that with an explicit `metadata.projection_ref`\n([`extract_projection_ref`]) — either way the caller resolves first and\npasses the result here. Pass `None` when the ref is not (yet) known.\n\nErrors with `DomainError::InvalidMetadata` when required keys\n(`persona` / `axis` / `source_uri`) are missing or violate the VO\ninvariants of [`PersonaId`] / [`Slot`] / [`Source`]."
     },
     {
       "path": "persona_wire_core::application::wiring_mapper::wiring_metadata_object",
@@ -1063,12 +1124,12 @@
     {
       "path": "persona_wire_core::infrastructure",
       "kind": "module",
-      "docs": "Infrastructure layer — drives Storage and Rendering as adapters.\n\n- [`storage`]   — SQLite (rusqlite) adapter implementing graph persistence\n- [`rendering`] — Prompt / Markdown / JSON / ASCII rendering adapter (thin wrapper over `template`)\n- [`template`]  — Template Engine Plugin trait (`HandlebarsEngine` default impl)\n- [`adapter`]   — Layer 6 SoT Adapter Plugin trait (`FileAdapter`; mini-app は外部 crate `persona-wire-adapter-mini-app`)"
+      "docs": "Infrastructure layer — drives Storage and Rendering as adapters.\n\n- [`storage`]   — SQLite (rusqlite) adapter implementing graph persistence\n- [`rendering`] — Prompt / Markdown / JSON / ASCII rendering adapter (thin wrapper over `template`)\n- [`template`]  — Template Engine Plugin trait (`HandlebarsEngine` default impl)\n- [`adapter`]   — Layer 6 SoT Adapter Plugin trait (`FileAdapter`; mini-app は外部 crate `persona-wire-adapter-mini-app`)\n- [`filter`]    — Unified cross-cutting adapter filter vocabulary (`FilterCap` / `WireFilters`) shared by every `Adapter::filter_caps` opt-in"
     },
     {
       "path": "persona_wire_core::infrastructure::adapter",
       "kind": "module",
-      "docs": "Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.\n\nThe core keeps only the Adapter trait and the bundled `FileAdapter`. Each\nwiring entry node's `metadata.source_uri` is dispatched by scheme — plugin\naxis 1 of 3.\n\nBundled scheme:\n- `file://<absolute-or-tilde-path>` — reads the raw contents via\n  std::fs::read (json/toml parsing is a future extension; currently the\n  contents are returned as a string).\n\n  Query param extensions (R5):\n  - `?tail=last_section` — the trailing section (split at markdown `## `\n    h2 boundaries; returns everything from the last h2 onward)\n  - `?tail_n=<N>` — the last N lines (line-based; capped at\n    [`TAIL_N_MAX`] = 1000 lines as a context size guard)\n  - no query param → fetch the whole file (backward-compat)\n  - unknown / unparsable values → graceful fail = whole-file fetch\n\n  Metadata (R4):\n  - `size_bytes` — size of the whole file in bytes (the original file\n    size, not the post-tail body size)\n  - `modified_at` — last modified time (Unix epoch seconds, u64)\n  - `metadata` — nested metadata object (`filename` / `full_path` /\n    `last_modified` / `size_bytes` / `age_days`)\n\nProvided by external crates (split out in P3b):\n- `mini-app://<table>...` → `persona-wire-adapter-mini-app` crate (`MiniAppAdapter`)\n\nThe outline / persona-pack / journal schemes are carried by external\nadapter crates.\n\n## Adapter authoring guide (conventions for adding a new scheme)\n\nAdd one crate per scheme, named `persona-wire-adapter-<scheme>`, to the\nworkspace. The canonical reference is `persona-wire-adapter-rss` (minimal,\nstateless, direct SDK integration).\n\n- **Three-function split**: `parse_<scheme>_uri` ([`WireUri`] → Spec struct),\n  transport fetch (no domain knowledge), and `normalize_<scheme>`\n  (raw response → Wire JSON shape). HTTP transport is provided by the\n  shared `persona-wire-transport-http` crate (promoted 2026-07-07);\n  HTTP-backed adapters use its `HttpClient` instead of hand-rolling\n  `reqwest` calls.\n- **Guard constants**: declare item caps / timeouts / text truncation as\n  `pub const` (rss example: `DEFAULT_LIMIT=20` / `FETCH_TIMEOUT=30s` /\n  `SUMMARY_MAX_CHARS=500`). Align timeouts with existing adapters\n  (`DEFAULT_RPC_TIMEOUT` in the mcp adapter).\n- **Error / query conventions**: missing or invalid required components\n  (empty host, `limit=0`, ...) fail loud with [`WireError::Storage`].\n  Unknown query keys are silently ignored (forward-compat convention).\n  Missing output fields are `null`; timestamps are RFC3339. A missing\n  source is graceful (`FileAdapter` in this file: non-existent path →\n  `body: null` with `Ok`).\n- **Docs**: `#![warn(missing_docs)]` plus a crate-root `//!` header with\n  three sections: Architecture / URI grammar / Output shape.\n- **Tests**: parse / normalize are offline unit tests over inline\n  fixtures. Never add tests that depend on live network access.\n- **Registration**: add one `.with_adapter(XxxAdapter)` line to the\n  `PluginRegistry::default_builder_for_wire()` chain on the boot side\n  (`persona-wire-mcp/src/lib.rs`). Scheme collisions fail fast at\n  registry build time.\n- **Pagination**: adapters that support `?limit=N` where `N` can exceed a\n  single upstream page MUST drive the pagination loop internally inside\n  `Adapter::fetch` and emit a truthful `has_more` field distinguishing\n  truncated-at-limit from upstream-exhausted. Cursor form (Link header,\n  NextToken, offset, ...) is a private implementation detail — the wire\n  layer never sees it. Adapters that ignore `?limit` (single-shot fetches\n  such as `FileAdapter`) simply return their canonical shape.\n\n## External service integration policy (decided 2026-07-07)\n\n- When a service exposes a public SDK / API, call it **directly** from the\n  adapter. Do not relay through an MCP integration (this is a core benefit\n  of the Rust + Adapter pattern).\n- UX first: never make the user repeat authentication. Receive credentials\n  via environment variables and never embed secrets in `source_uri`.\n  Choose the auth mechanism per SDK on a case-by-case basis.\n- Adapter expansion targets coverage (including minor services), not\n  demand-ranked prioritization. The only exclusion criterion is that the\n  service has been discontinued.\n\n### `?auth=<service_key>` query param convention (Phase 1, decided\ntogether with `application::auth`)\n\nEvery HTTP-authenticated adapter honors an optional `?auth=<service_key>`\nquery param on its `source_uri`:\n\n- `<service_key>` is a **credential reference key only** — never a\n  secret. It is looked up via\n  `persona_wire_credentials::Credentials::get(service_key)` (env var →\n  OS keyring), exactly like the adapter's own literal default service\n  name (e.g. `\"github\"`).\n- When present, `<service_key>` **overrides** the adapter's literal\n  default service name for that one fetch (e.g. `?auth=github-alt` looks\n  up the `github-alt` credential instead of `github`) — lets one wiring\n  entry authenticate as a different identity than another entry using\n  the same adapter/scheme.\n- When absent, behavior is unchanged: the adapter's literal default\n  service name is used (full backward compatibility).\n- This is an ordinary query key from every adapter's own URI-grammar\n  perspective — it follows the same \"unknown query keys are silently\n  ignored\" convention documented above, so adding `?auth=` never\n  conflicts with an adapter's own `?kind=` / `?limit=` / etc. params."
+      "docs": "Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.\n\nThe core keeps only the Adapter trait and the bundled `FileAdapter`. Each\nwiring entry node's `metadata.source_uri` is dispatched by scheme — plugin\naxis 1 of 3.\n\nBundled scheme:\n- `file://<absolute-or-tilde-path>` — reads the raw contents via\n  std::fs::read (json/toml parsing is a future extension; currently the\n  contents are returned as a string).\n\n  Query param extensions (R5, now routed through the unified\n  [`crate::infrastructure::filter`] vocabulary via\n  [`Adapter::filter_caps`] / [`crate::infrastructure::filter::WireFilters::parse`]):\n  - `?tail=last_section` — the trailing section (split at markdown `## `\n    h2 boundaries; returns everything from the last h2 onward)\n  - `?tail_n=<N>` — the last N lines (line-based; capped at\n    [`TAIL_N_MAX`] = 1000 lines as a context size guard)\n  - `?lines=<FROM>-<TO>` — a 1-origin inclusive line range; `TO` beyond\n    the total line count clamps gracefully, `FROM` beyond the total\n    returns an empty body. Mutually exclusive with `?tail` / `?tail_n`\n    (fails loud if both are present).\n  - no query param → fetch the whole file (backward-compat)\n  - unknown / unparsable values → **fail loud** (`Err`), per the unified\n    filter error policy (behavior changed from the earlier graceful\n    whole-file fallback; see `filter` module docs)\n\n  Metadata (R4):\n  - `size_bytes` — size of the whole file in bytes (the original file\n    size, not the post-tail body size)\n  - `modified_at` — last modified time (Unix epoch seconds, u64)\n  - `metadata` — nested metadata object (`filename` / `full_path` /\n    `last_modified` / `size_bytes` / `age_days`)\n\nProvided by external crates (split out in P3b):\n- `mini-app://<table>...` → `persona-wire-adapter-mini-app` crate (`MiniAppAdapter`)\n\nThe outline / persona-pack / journal schemes are carried by external\nadapter crates.\n\n## Adapter authoring guide (conventions for adding a new scheme)\n\nAdd one crate per scheme, named `persona-wire-adapter-<scheme>`, to the\nworkspace. The canonical reference is `persona-wire-adapter-rss` (minimal,\nstateless, direct SDK integration).\n\n- **Three-function split**: `parse_<scheme>_uri` ([`WireUri`] → Spec struct),\n  transport fetch (no domain knowledge), and `normalize_<scheme>`\n  (raw response → Wire JSON shape). HTTP transport is provided by the\n  shared `persona-wire-transport-http` crate (promoted 2026-07-07);\n  HTTP-backed adapters use its `HttpClient` instead of hand-rolling\n  `reqwest` calls.\n- **Guard constants**: declare item caps / timeouts / text truncation as\n  `pub const` (rss example: `DEFAULT_LIMIT=20` / `FETCH_TIMEOUT=30s` /\n  `SUMMARY_MAX_CHARS=500`). Align timeouts with existing adapters\n  (`DEFAULT_RPC_TIMEOUT` in the mcp adapter).\n- **Error / query conventions**: missing or invalid required components\n  (empty host, `limit=0`, ...) fail loud with [`WireError::Storage`].\n  Unknown query keys are silently ignored (forward-compat convention).\n  Missing output fields are `null`; timestamps are RFC3339. A missing\n  source is graceful (`FileAdapter` in this file: non-existent path →\n  `body: null` with `Ok`).\n- **Docs**: `#![warn(missing_docs)]` plus a crate-root `//!` header with\n  three sections: Architecture / URI grammar / Output shape.\n- **Tests**: parse / normalize are offline unit tests over inline\n  fixtures. Never add tests that depend on live network access.\n- **Registration**: add one `.with_adapter(XxxAdapter)` line to the\n  `PluginRegistry::default_builder_for_wire()` chain on the boot side\n  (`persona-wire-mcp/src/lib.rs`). Scheme collisions fail fast at\n  registry build time.\n- **Pagination**: adapters that support `?limit=N` where `N` can exceed a\n  single upstream page MUST drive the pagination loop internally inside\n  `Adapter::fetch` and emit a truthful `has_more` field distinguishing\n  truncated-at-limit from upstream-exhausted. Cursor form (Link header,\n  NextToken, offset, ...) is a private implementation detail — the wire\n  layer never sees it. Adapters that ignore `?limit` (single-shot fetches\n  such as `FileAdapter`) simply return their canonical shape.\n\n## External service integration policy (decided 2026-07-07)\n\n- When a service exposes a public SDK / API, call it **directly** from the\n  adapter. Do not relay through an MCP integration (this is a core benefit\n  of the Rust + Adapter pattern).\n- UX first: never make the user repeat authentication. Receive credentials\n  via environment variables and never embed secrets in `source_uri`.\n  Choose the auth mechanism per SDK on a case-by-case basis.\n- Adapter expansion targets coverage (including minor services), not\n  demand-ranked prioritization. The only exclusion criterion is that the\n  service has been discontinued.\n\n### `?auth=<service_key>` query param convention (Phase 1, decided\ntogether with `application::auth`)\n\nEvery HTTP-authenticated adapter honors an optional `?auth=<service_key>`\nquery param on its `source_uri`:\n\n- `<service_key>` is a **credential reference key only** — never a\n  secret. It is looked up via\n  `persona_wire_credentials::Credentials::get(service_key)` (env var →\n  OS keyring), exactly like the adapter's own literal default service\n  name (e.g. `\"github\"`).\n- When present, `<service_key>` **overrides** the adapter's literal\n  default service name for that one fetch (e.g. `?auth=github-alt` looks\n  up the `github-alt` credential instead of `github`) — lets one wiring\n  entry authenticate as a different identity than another entry using\n  the same adapter/scheme.\n- When absent, behavior is unchanged: the adapter's literal default\n  service name is used (full backward compatibility).\n- This is an ordinary query key from every adapter's own URI-grammar\n  perspective — it follows the same \"unknown query keys are silently\n  ignored\" convention documented above, so adding `?auth=` never\n  conflicts with an adapter's own `?kind=` / `?limit=` / etc. params."
     },
     {
       "path": "persona_wire_core::infrastructure::adapter::Adapter",
@@ -1077,12 +1138,33 @@
     },
     {
       "path": "persona_wire_core::infrastructure::adapter::FileAdapter",
-      "kind": "struct"
+      "kind": "struct",
+      "docs": "Bundled `file://` / `file:` scheme [`Adapter`] backed by `std::fs`. See\nthe module-level docs for the URI grammar (query param extensions) and\noutput shape."
     },
     {
       "path": "persona_wire_core::infrastructure::adapter::TAIL_N_MAX",
       "kind": "constant",
       "docs": "Upper bound for `N` in `?tail_n=<N>` (context size guard).\nValues above this are clamped before taking the tail lines."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::filter",
+      "kind": "module",
+      "docs": "Unified adapter filter vocabulary + shared parser.\n\n## Architecture\n\nBefore this module, cross-cutting query params (`?limit=`, `?tail=`,\n`?since=`) were parsed independently by each adapter (`FileAdapter`'s\n`parse_tail_mode`, the todoist/notion/slack adapters' own ad-hoc\n`limit` parsing, ...), so the same semantic filter grew 3 slightly\ndifferent error dialects across the workspace: some silently ignored\nbad input, some clamped, some fail-loud'd with adapter-specific message\nshapes. [`FilterCap`] / [`WireFilters`] / [`WireFilters::parse`]\nconsolidate that into **one closed vocabulary** (7 known keys) and\n**one error policy** (see the table below), so every adapter that opts\nin via [`crate::infrastructure::adapter::Adapter::filter_caps`] gets\nidentical parsing behavior for free.\n\n## Filter vs Addressing\n\nA `source_uri` query string carries two orthogonal kinds of keys:\n- **Filter keys** — cross-cutting, adapter-agnostic slicing/selection\n  (`limit` / `lines` / `tail` / `tail_n` / `since` / `until` / `query`).\n  This module owns their grammar and error policy.\n- **Addressing keys** — adapter-specific identity/routing params\n  (`kind`, `state`, `auth`, `project_id`, ...). These stay entirely\n  inside each adapter's own parser; [`WireFilters::parse`] never\n  inspects or rejects them (see the \"unknown query keys are silently\n  ignored\" convention documented in\n  [`crate::infrastructure::adapter`]).\n\n## Unified error policy\n\n| condition | behavior |\n|---|---|\n| filter key absent | field stays `None` (default) |\n| value present but wrong type (`limit=abc`, `lines=x-y`, `tail_n=abc`, `tail=unknown`) | `Err` (fail loud) |\n| value well-typed but exceeds a declared cap (`limit=5000` w/ `max=Some(40)`, `tail_n=5000` w/ `n_max=1000`) | clamp to the cap + `tracing::warn!` |\n| `limit=0` (list-shaped filter with no useful semantics for zero) | `Err` |\n| `lines=FROM-TO` with `FROM > TO`, or `FROM == 0` (1-origin violation) | `Err` |\n| filter key present in the URI but not declared in `caps` | `Err` (\"not supported by this adapter\") |"
+    },
+    {
+      "path": "persona_wire_core::infrastructure::filter::FilterCap",
+      "kind": "enum",
+      "docs": "A cross-cutting filter capability an [`Adapter`](crate::infrastructure::adapter::Adapter)\ndeclares support for via `filter_caps()`. [`WireFilters::parse`] only\nhonors query keys whose capability is present in the `caps` slice passed\nto it; everything else in this closed vocabulary is rejected."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::filter::TailSpec",
+      "kind": "enum",
+      "docs": "Tail-slicing variant for [`WireFilters::tail`] (promoted from the\nformer `FileAdapter`-private `TailMode`, now a shared public vocabulary\nitem so every adapter declaring [`FilterCap::Tail`] gets the same\nsemantics)."
+    },
+    {
+      "path": "persona_wire_core::infrastructure::filter::WireFilters",
+      "kind": "struct",
+      "docs": "Parsed cross-cutting filters for one `source_uri` fetch, produced by\n[`WireFilters::parse`]. Fields left `None` mean \"the caller did not\nrequest that filter\" — adapters treat that as their existing\nbackward-compatible default (e.g. whole-body fetch)."
     },
     {
       "path": "persona_wire_core::infrastructure::projection",

@@ -111,10 +111,10 @@ mod tests {
     fn persona_scoped_mode_skips_probe() {
         // issue 9f70b493 regression: Phase A persona-scoped mode は graph axis
         // の applicable 対象外、 edges_zero finding を emit してはいけない
-        // (= mia 等の wire_doctor が edges=0 で BROKEN 化する false-positive 除去)。
+        // (= persona-scoped wire_doctor が edges=0 で BROKEN 化する false-positive 除去)。
         let s = setup();
-        s.insert_node(&bare_persona_node("mia")).unwrap();
-        let f = scan(&GraphEdgesZero, &s, Some("mia")).unwrap();
+        s.insert_node(&bare_persona_node("carol")).unwrap();
+        let f = scan(&GraphEdgesZero, &s, Some("carol")).unwrap();
         assert!(
             f.is_empty(),
             "persona-scoped mode must not emit edges_zero finding: {f:?}"
@@ -139,8 +139,8 @@ mod tests {
         // 機能しない)。
         let s = setup();
         let wf = workflow_node(
-            "mia.workflow.session_close",
-            Some("mia"),
+            "carol.workflow.session_close",
+            Some("carol"),
             serde_json::json!({"kind": "on_event", "event": "session_close"}),
             serde_json::json!({"kind": "no_op"}),
             true,

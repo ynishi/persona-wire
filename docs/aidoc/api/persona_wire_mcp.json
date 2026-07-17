@@ -1,6 +1,6 @@
 {
   "crate": "persona-wire-mcp",
-  "version": "0.12.1",
+  "version": "0.14.0",
   "items": [
     {
       "path": "persona_wire_mcp::ONBOARDING_GUIDE",
@@ -44,6 +44,10 @@
       "kind": "struct"
     },
     {
+      "path": "persona_wire_mcp::WireFetchParams",
+      "kind": "struct"
+    },
+    {
       "path": "persona_wire_mcp::WireInitParams",
       "kind": "struct"
     },
@@ -83,6 +87,14 @@
       "path": "persona_wire_mcp::WireServer",
       "kind": "struct",
       "docs": "MCP server wrapping persona-wire-core."
+    },
+    {
+      "path": "persona_wire_mcp::WireSlotDeleteParams",
+      "kind": "struct"
+    },
+    {
+      "path": "persona_wire_mcp::WireSlotRegisterParams",
+      "kind": "struct"
     },
     {
       "path": "persona_wire_mcp::WireSpecRegisterParams",

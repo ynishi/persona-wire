@@ -1,4 +1,4 @@
-# persona-wire-core 0.12.1
+# persona-wire-core 0.14.0
 
 # persona-wire-core
 
@@ -308,6 +308,7 @@ and which are persona-wire's own extension.
 - [`domain::port::projection_renderer`](domain__port__projection_renderer.md): `ProjectionRenderer` — Driven Port for projection rendering.
 - [`infrastructure`](infrastructure.md): Infrastructure layer — drives Storage and Rendering as adapters.
 - [`infrastructure::adapter`](infrastructure__adapter.md): Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.
+- [`infrastructure::filter`](infrastructure__filter.md): Unified adapter filter vocabulary + shared parser.
 - [`infrastructure::projection`](infrastructure__projection.md): Projection Adapters — concrete [`ProjectionRenderer`] implementations.
 - [`infrastructure::projection::static`](infrastructure__projection__static.md): `StaticProjection` — core 同梱 default Adapter for [`ProjectionRenderer`].
 - [`infrastructure::rendering`](infrastructure__rendering.md): Rendering adapter — render extracted graph subsets into output forms.

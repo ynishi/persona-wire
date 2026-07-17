@@ -23,9 +23,9 @@ version = "0.1.0"
 description = "E2E sample"
 
 [[nodes]]
-name = "shi"
+name = "alice"
 node_type = "persona"
-metadata = { owner = "ytk" }
+metadata = { owner = "owner_a" }
 
 [[specs]]
 name = "active_personas"
@@ -102,12 +102,15 @@ fn bundle_register_install_roundtrip() {
     assert_eq!(proj.spec_ref().as_str(), "active_personas");
 
     // Node persists with the declared name + type.
-    let node_id = s.lookup_node_id_by_name("shi").unwrap().expect("node row");
+    let node_id = s
+        .lookup_node_id_by_name("alice")
+        .unwrap()
+        .expect("node row");
     let node = s.get_node(&node_id).unwrap().expect("get_node");
     assert_eq!(node.r#type, "persona");
     assert_eq!(
         node.metadata.get("owner").and_then(|v| v.as_str()),
-        Some("ytk")
+        Some("owner_a")
     );
 }
 
@@ -137,7 +140,7 @@ fn bundle_reinstall_increments_names_without_duplicating_originals() {
     let final_names: Vec<_> = r2.installed.iter().map(|i| i.final_name.clone()).collect();
     assert!(final_names.contains(&"active_personas-1".to_string()));
     assert!(final_names.contains(&"personas_overview-1".to_string()));
-    assert!(final_names.contains(&"shi-1".to_string()));
+    assert!(final_names.contains(&"alice-1".to_string()));
 
     // The original rows are still intact — increment did not overwrite.
     assert!(SpecRegistry::new(&s)
@@ -148,7 +151,7 @@ fn bundle_reinstall_increments_names_without_duplicating_originals() {
         .get("personas_overview")
         .unwrap()
         .is_some());
-    assert!(s.lookup_node_id_by_name("shi").unwrap().is_some());
+    assert!(s.lookup_node_id_by_name("alice").unwrap().is_some());
 
     // The internal spec_ref of the suffixed projection points at the
     // suffixed spec, not the original — internal references are rewritten

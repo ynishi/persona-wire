@@ -1,4 +1,4 @@
-# persona-wire 0.12.1
+# persona-wire 0.14.0
 
 persona-wire — CLI + migration hub for the 15-crate persona-wire
 workspace. persona-wire is a graph engine over persona × SoT ×

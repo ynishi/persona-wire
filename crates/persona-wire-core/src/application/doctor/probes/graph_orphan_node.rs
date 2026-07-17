@@ -23,7 +23,7 @@ impl Probe for GraphOrphanNode {
         for t in storage.list_types_by_kind("node")? {
             // workflow_def Node は edge を持たないのが正常 (= Workflow Entity は
             // trigger / action で動作完結、 graph axis の edge-based 接続概念に
-            // 属さない)。 issue `f3bb100e` — `mia.workflow.session_close` 等
+            // 属さない)。 issue `f3bb100e` — `carol.workflow.session_close` 等
             // workflow node を orphan として false-positive 報告していた。
             if t == WORKFLOW_TYPE {
                 continue;
@@ -115,8 +115,8 @@ mod tests {
         // 正常 = orphan 判定対象から除外。
         let s = setup();
         let wf = workflow_node(
-            "mia.workflow.session_close",
-            Some("mia"),
+            "carol.workflow.session_close",
+            Some("carol"),
             serde_json::json!({"kind": "on_event", "event": "session_close"}),
             serde_json::json!({"kind": "no_op"}),
             true,

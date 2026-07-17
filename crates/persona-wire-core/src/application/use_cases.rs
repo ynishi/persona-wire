@@ -957,7 +957,7 @@ pub struct GraphScanSummary {
 /// `priorities` / `tick_log` / `journal` slots).
 ///
 /// Without this guard, `wire_doctor` reports every wiring entry as orphan
-/// (issue `15a46ce6` — 41/41 false-positive on the shi dogfood session).
+/// (41/41 false-positive observed on a real dogfood session).
 pub(crate) fn is_self_attached_wiring(node: &crate::domain::graph::Node) -> bool {
     use crate::application::wiring_mapper;
     if !node.metadata.is_object() {
@@ -2852,7 +2852,7 @@ mod tests {
             version: 1,
             prev_id: None,
             metadata: wiring_mapper::wiring_metadata_object(
-                &PersonaId::new("shi").unwrap(),
+                &PersonaId::new("alice").unwrap(),
                 &Slot::new("mailbox").unwrap(),
                 &Source::new(source_uri).unwrap(),
                 None,
@@ -2864,12 +2864,12 @@ mod tests {
     #[test]
     fn node_update_merge_overwrites_one_key_preserves_others() {
         let s = setup();
-        seed_wiring_node(&s, "shi.mailbox", "mini-app://mailbox?alias=for_shi");
+        seed_wiring_node(&s, "alice.mailbox", "mini-app://mailbox?alias=for_alice");
         let out = wire_node_update(
             WireNodeUpdateInput {
-                id: "shi.mailbox".into(),
+                id: "alice.mailbox".into(),
                 metadata_patch: json!({
-                    "source_uri": "mini-app://mailbox?alias=for_shi&limit=10",
+                    "source_uri": "mini-app://mailbox?alias=for_alice&limit=10",
                 }),
                 mode: WireNodeUpdateMode::Merge,
             },
@@ -2878,7 +2878,7 @@ mod tests {
         .unwrap();
         // source_uri が新値に、 persona / slot (= 旧 axis 互換 key) は維持される
         use crate::application::wiring_mapper;
-        assert_eq!(out.id, "shi.mailbox");
+        assert_eq!(out.id, "alice.mailbox");
         assert_eq!(out.mode, WireNodeUpdateMode::Merge);
         let synthetic = Node {
             id: ulid_from_seed(&out.id),
@@ -2895,15 +2895,15 @@ mod tests {
         };
         assert_eq!(
             wiring_mapper::extract_source_uri(&synthetic),
-            Some("mini-app://mailbox?alias=for_shi&limit=10")
+            Some("mini-app://mailbox?alias=for_alice&limit=10")
         );
-        assert_eq!(wiring_mapper::extract_persona(&synthetic), Some("shi"));
+        assert_eq!(wiring_mapper::extract_persona(&synthetic), Some("alice"));
         assert_eq!(wiring_mapper::extract_slot(&synthetic), Some("mailbox"));
         // 永続化検証
-        let stored = s.get_node_by_name("shi.mailbox").unwrap().unwrap();
+        let stored = s.get_node_by_name("alice.mailbox").unwrap().unwrap();
         assert_eq!(
             wiring_mapper::extract_source_uri(&stored),
-            Some("mini-app://mailbox?alias=for_shi&limit=10")
+            Some("mini-app://mailbox?alias=for_alice&limit=10")
         );
     }
 
@@ -2911,10 +2911,10 @@ mod tests {
     fn node_update_merge_null_value_deletes_key() {
         use crate::application::wiring_mapper;
         let s = setup();
-        seed_wiring_node(&s, "shi.tmp", "mini-app://x");
+        seed_wiring_node(&s, "alice.tmp", "mini-app://x");
         let out = wire_node_update(
             WireNodeUpdateInput {
-                id: "shi.tmp".into(),
+                id: "alice.tmp".into(),
                 metadata_patch: json!({ wiring_mapper::META_SLOT: null }),
                 mode: WireNodeUpdateMode::Merge,
             },
@@ -2936,7 +2936,7 @@ mod tests {
             metadata: out.metadata.clone(),
         };
         assert!(wiring_mapper::extract_slot(&synthetic).is_none());
-        assert_eq!(wiring_mapper::extract_persona(&synthetic), Some("shi"));
+        assert_eq!(wiring_mapper::extract_persona(&synthetic), Some("alice"));
         assert_eq!(
             wiring_mapper::extract_source_uri(&synthetic),
             Some("mini-app://x")
@@ -2946,10 +2946,10 @@ mod tests {
     #[test]
     fn node_update_replace_swaps_metadata_wholesale() {
         let s = setup();
-        seed_wiring_node(&s, "shi.tmp", "mini-app://x");
+        seed_wiring_node(&s, "alice.tmp", "mini-app://x");
         let out = wire_node_update(
             WireNodeUpdateInput {
-                id: "shi.tmp".into(),
+                id: "alice.tmp".into(),
                 metadata_patch: json!({"only_field": 42}),
                 mode: WireNodeUpdateMode::Replace,
             },
@@ -2996,10 +2996,10 @@ mod tests {
     #[test]
     fn node_update_rejects_non_object_patch() {
         let s = setup();
-        seed_wiring_node(&s, "shi.tmp", "mini-app://x");
+        seed_wiring_node(&s, "alice.tmp", "mini-app://x");
         let result = wire_node_update(
             WireNodeUpdateInput {
-                id: "shi.tmp".into(),
+                id: "alice.tmp".into(),
                 metadata_patch: json!("not an object"),
                 mode: WireNodeUpdateMode::Merge,
             },
@@ -3363,7 +3363,7 @@ mod tests {
         );
     }
 
-    // ---- adapter-auth-spec ST4/ST5 — merge_auth_query / append_query_param ----
+    // ---- adapter auth — merge_auth_query / append_query_param ----
 
     #[test]
     fn merge_auth_query_no_metadata_auth_leaves_uri_unchanged() {
@@ -3439,7 +3439,7 @@ mod tests {
         );
     }
 
-    // ---- adapter-auth-spec ST4/ST5 — collect_slot auth extraction ----
+    // ---- adapter auth — collect_slot auth extraction ----
 
     fn register_stub_projection(s: &SqliteStorage, name: &str) {
         use crate::domain::entity::projection::{PluginDispatch, Projection};

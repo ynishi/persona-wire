@@ -2,7 +2,7 @@
 
 > persona-wire — CLI + migration hub for the 15-crate persona-wire
 
-## persona-wire 0.12.1
+## persona-wire 0.14.0
 
 - [persona-wire overview](persona_wire/index.md): persona-wire — CLI + migration hub for the 15-crate persona-wire
 - [persona-wire::migrations](persona_wire/migrations.md): Schema migration framework — Diesel / sqlx style, scoped to persona-wire's
@@ -10,67 +10,67 @@
 - [persona-wire::migrations::m002_registry_id_ulid](persona_wire/migrations__m002_registry_id_ulid.md): 002 — `specifications` / `projections` rebuild: `name TEXT PK` →
 - [persona-wire::migrations::m003_bundle_installs_fk_relax](persona_wire/migrations__m003_bundle_installs_fk_relax.md): 003 — relax `bundle_installs.bundle_id` to nullable + ON DELETE SET NULL.
 
-## persona-wire-adapter-activitypub 0.12.1
+## persona-wire-adapter-activitypub 0.14.0
 
 - [persona-wire-adapter-activitypub overview](persona_wire_adapter_activitypub/index.md): persona-wire Adapter for the Fediverse (scheme `activitypub://`).
 
-## persona-wire-adapter-apple-notes 0.12.1
+## persona-wire-adapter-apple-notes 0.14.0
 
 - [persona-wire-adapter-apple-notes overview](persona_wire_adapter_apple_notes/index.md): persona-wire Adapter for the local Notes.app database (scheme `applenotes://`).
 
-## persona-wire-adapter-bluesky 0.12.1
+## persona-wire-adapter-bluesky 0.14.0
 
 - [persona-wire-adapter-bluesky overview](persona_wire_adapter_bluesky/index.md): persona-wire Adapter for Bluesky (scheme `bluesky://`).
 
-## persona-wire-adapter-github 0.12.1
+## persona-wire-adapter-github 0.14.0
 
 - [persona-wire-adapter-github overview](persona_wire_adapter_github/index.md): persona-wire Adapter for GitHub (scheme `github://`).
 
-## persona-wire-adapter-mastodon 0.12.1
+## persona-wire-adapter-mastodon 0.14.0
 
 - [persona-wire-adapter-mastodon overview](persona_wire_adapter_mastodon/index.md): persona-wire Adapter for Mastodon (scheme `mastodon://`).
 
-## persona-wire-adapter-matrix 0.12.1
+## persona-wire-adapter-matrix 0.14.0
 
 - [persona-wire-adapter-matrix overview](persona_wire_adapter_matrix/index.md): persona-wire Adapter for Matrix (scheme `matrix://`).
 
-## persona-wire-adapter-mcp 0.12.1
+## persona-wire-adapter-mcp 0.14.0
 
 - [persona-wire-adapter-mcp overview](persona_wire_adapter_mcp/index.md): persona-wire Adapter for any MCP server (scheme `mcp://`).
 
-## persona-wire-adapter-mini-app 0.12.1
+## persona-wire-adapter-mini-app 0.14.0
 
 - [persona-wire-adapter-mini-app overview](persona_wire_adapter_mini_app/index.md): persona-wire Adapter for mini-app SoT (scheme `mini-app://`).
 
-## persona-wire-adapter-notion 0.12.1
+## persona-wire-adapter-notion 0.14.0
 
 - [persona-wire-adapter-notion overview](persona_wire_adapter_notion/index.md): persona-wire Adapter for Notion (scheme `notion://`).
 
-## persona-wire-adapter-obsidian 0.12.1
+## persona-wire-adapter-obsidian 0.14.0
 
 - [persona-wire-adapter-obsidian overview](persona_wire_adapter_obsidian/index.md): persona-wire Adapter for Obsidian vault (scheme `obsidian://`).
 
-## persona-wire-adapter-persona-pack 0.12.1
+## persona-wire-adapter-persona-pack 0.14.0
 
 - [persona-wire-adapter-persona-pack overview](persona_wire_adapter_persona_pack/index.md): `persona-wire-adapter-persona-pack` — persona-pack SDK access の ACL Facade。
 
-## persona-wire-adapter-rss 0.12.1
+## persona-wire-adapter-rss 0.14.0
 
 - [persona-wire-adapter-rss overview](persona_wire_adapter_rss/index.md): persona-wire Adapter for RSS/Atom/JSON feeds (scheme `rss://`).
 
-## persona-wire-adapter-slack 0.12.1
+## persona-wire-adapter-slack 0.14.0
 
 - [persona-wire-adapter-slack overview](persona_wire_adapter_slack/index.md): persona-wire Adapter for Slack (scheme `slack://`).
 
-## persona-wire-adapter-sqlite-x 0.12.1
+## persona-wire-adapter-sqlite-x 0.14.0
 
 - [persona-wire-adapter-sqlite-x overview](persona_wire_adapter_sqlite_x/index.md): persona-wire Adapter for raw SQLite SoT (scheme `sqlite://`).
 
-## persona-wire-adapter-todoist 0.12.1
+## persona-wire-adapter-todoist 0.14.0
 
 - [persona-wire-adapter-todoist overview](persona_wire_adapter_todoist/index.md): persona-wire Adapter for Todoist (scheme `todoist://`).
 
-## persona-wire-core 0.12.1
+## persona-wire-core 0.14.0
 
 - [persona-wire-core overview](persona_wire_core/index.md): # persona-wire-core
 - [persona-wire-core::application](persona_wire_core/application.md): Application layer — use cases and registries.
@@ -124,6 +124,7 @@
 - [persona-wire-core::domain::port::projection_renderer](persona_wire_core/domain__port__projection_renderer.md): `ProjectionRenderer` — Driven Port for projection rendering.
 - [persona-wire-core::infrastructure](persona_wire_core/infrastructure.md): Infrastructure layer — drives Storage and Rendering as adapters.
 - [persona-wire-core::infrastructure::adapter](persona_wire_core/infrastructure__adapter.md): Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.
+- [persona-wire-core::infrastructure::filter](persona_wire_core/infrastructure__filter.md): Unified adapter filter vocabulary + shared parser.
 - [persona-wire-core::infrastructure::projection](persona_wire_core/infrastructure__projection.md): Projection Adapters — concrete [`ProjectionRenderer`] implementations.
 - [persona-wire-core::infrastructure::projection::static](persona_wire_core/infrastructure__projection__static.md): `StaticProjection` — core 同梱 default Adapter for [`ProjectionRenderer`].
 - [persona-wire-core::infrastructure::rendering](persona_wire_core/infrastructure__rendering.md): Rendering adapter — render extracted graph subsets into output forms.
@@ -131,15 +132,15 @@
 - [persona-wire-core::infrastructure::template](persona_wire_core/infrastructure__template.md): Template Engine Plugin trait — Plugin 軸 2 / 3。
 - [persona-wire-core::infrastructure::wire_uri](persona_wire_core/infrastructure__wire_uri.md): WireUri — Wire 内で扱う URI の typed view (Layer 6 Adapter dispatch の共通入力)。
 
-## persona-wire-credentials 0.12.1
+## persona-wire-credentials 0.14.0
 
 - [persona-wire-credentials overview](persona_wire_credentials/index.md): Provider-chain credential resolution for persona-wire Adapters
 
-## persona-wire-mcp 0.12.1
+## persona-wire-mcp 0.14.0
 
 - [persona-wire-mcp overview](persona_wire_mcp/index.md): persona-wire MCP server library — the transport layer that wraps
 
-## persona-wire-transport-http 0.12.1
+## persona-wire-transport-http 0.14.0
 
 - [persona-wire-transport-http overview](persona_wire_transport_http/index.md): Shared HTTP transport for persona-wire Adapters (`persona-wire-transport-http`).
 

@@ -226,7 +226,7 @@ CLI と同等 flow を MCP Tool 経由で:
 
 - `wire_doctor(persona_id=Some(_))` は **graph.edges_zero probe を skip** する
   (Phase A 時点で個別 persona は graph axis の edge-based 接続対象でない設計、
-  mia 等の persona-scoped doctor が `BROKEN` 取る false-positive を構造除去)。
+  persona-scoped doctor が `BROKEN` 取る false-positive を構造除去)。
   graph-wide (`persona_id=None`) は従来通り全 probe 実行。
 - `workflow_def` Node は **graph axis の検知集合から phase-invariant 除外**
   (Workflow Entity は trigger/action で動作完結し edge を持たないのが正常)。

@@ -1537,17 +1537,17 @@ mod tests {
     #[test]
     fn insert_node_normalizes_stringified_object_metadata() {
         let s = setup();
-        let mut n = bare_node("shi_like", "persona");
+        let mut n = bare_node("alice_like", "persona");
         n.metadata =
-            serde_json::Value::String(r#"{"display":"shi_like","first_person":"しー"}"#.into());
+            serde_json::Value::String(r#"{"display":"alice_like","first_person":"ありす"}"#.into());
         s.insert_node(&n).unwrap();
         let got = s
-            .get_node(&ulid_from_seed("shi_like"))
+            .get_node(&ulid_from_seed("alice_like"))
             .unwrap()
             .expect("exists");
         assert_eq!(
             got.metadata,
-            json!({"display": "shi_like", "first_person": "しー"}),
+            json!({"display": "alice_like", "first_person": "ありす"}),
             "string-encoded metadata should be parsed back into an object"
         );
     }

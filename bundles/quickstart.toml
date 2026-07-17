@@ -8,7 +8,7 @@
 #   persona-wire bundle install --ref quickstart
 #
 # Re-installing under the default `--mode=increment` is non-destructive:
-# entity names auto-suffix (`shi-1` / `personas_overview-1` / ...).
+# entity names auto-suffix (`alice-1` / `personas_overview-1` / ...).
 
 [bundle]
 name = "quickstart"
@@ -16,9 +16,9 @@ version = "0.1.0"
 description = "Minimal persona + spec + projection scaffold."
 
 [[nodes]]
-name = "shi"
+name = "alice"
 node_type = "persona"
-metadata = { owner = "ytk", role = "companion" }
+metadata = { owner = "owner_a", role = "companion" }
 
 [[specs]]
 name = "active_personas"

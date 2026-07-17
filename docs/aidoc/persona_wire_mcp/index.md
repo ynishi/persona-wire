@@ -1,4 +1,4 @@
-# persona-wire-mcp 0.12.1
+# persona-wire-mcp 0.14.0
 
 persona-wire MCP server library — the transport layer that wraps
 [`persona_wire_core`] for consumption by MCP clients (Claude Code,

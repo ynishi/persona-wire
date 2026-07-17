@@ -11,13 +11,21 @@ Bundled scheme:
   std::fs::read (json/toml parsing is a future extension; currently the
   contents are returned as a string).
 
-  Query param extensions (R5):
+  Query param extensions (R5, now routed through the unified
+  [`crate::infrastructure::filter`] vocabulary via
+  [`Adapter::filter_caps`] / [`crate::infrastructure::filter::WireFilters::parse`]):
   - `?tail=last_section` — the trailing section (split at markdown `## `
     h2 boundaries; returns everything from the last h2 onward)
   - `?tail_n=<N>` — the last N lines (line-based; capped at
     [`TAIL_N_MAX`] = 1000 lines as a context size guard)
+  - `?lines=<FROM>-<TO>` — a 1-origin inclusive line range; `TO` beyond
+    the total line count clamps gracefully, `FROM` beyond the total
+    returns an empty body. Mutually exclusive with `?tail` / `?tail_n`
+    (fails loud if both are present).
   - no query param → fetch the whole file (backward-compat)
-  - unknown / unparsable values → graceful fail = whole-file fetch
+  - unknown / unparsable values → **fail loud** (`Err`), per the unified
+    filter error policy (behavior changed from the earlier graceful
+    whole-file fallback; see `filter` module docs)
 
   Metadata (R4):
   - `size_bytes` — size of the whole file in bytes (the original file
@@ -107,7 +115,7 @@ query param on its `source_uri`:
 
 ## Types
 
-- `FileAdapter` — (no documentation)
+- `FileAdapter` — Bundled `file://` / `file:` scheme [`Adapter`] backed by `std::fs`. See
 
 ## Traits
 

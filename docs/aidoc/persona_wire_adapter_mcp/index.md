@@ -1,4 +1,4 @@
-# persona-wire-adapter-mcp 0.12.1
+# persona-wire-adapter-mcp 0.14.0
 
 persona-wire Adapter for any MCP server (scheme `mcp://`).
 

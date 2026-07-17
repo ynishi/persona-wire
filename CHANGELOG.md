@@ -148,7 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - §6 Skill body gains the exclude-only signature snippet for the
     "render everything except a few noisy slots" use case.
   - §6c Migration extends the `projection_names: ["axis"]` subset note
-    with the symmetric exclude usage (e.g. `["tick_log", "friend_map"]`
+    with the symmetric exclude usage (e.g. `["tick_log", "contact_map"]`
     at work-mode wake).
 
 ## [0.9.0] - 2026-06-29
@@ -188,7 +188,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `metadata.maintenance_exempt = false` (the `wiring_mapper` read-side
   default). The `wire_doctor` graph axis then surfaced these nodes as
   orphans even though the bundle author had asked them to be treated
-  as self-attached. Surface caught by the 2026-06-27 mia.anchor_files
+  as self-attached. Surface caught by the 2026-06-27 anchor_files
   configuration round-trip (post-v0.8.0 self-detect).
   - `WiringEntry` gains a first-class `maintenance_exempt:
     Option<bool>` field. When the caller opts in, the dispatch loop
@@ -473,8 +473,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`wire_doctor` graph axis false-positive 2 件除去** (issues `9f70b493` / `f3bb100e`) — persona-scoped mode (`wire_doctor(persona_id=Some(_))`) で `graph.edges_zero` probe を skip するよう変更 (Phase A 時点で個別 persona は graph axis の edge-based 接続対象でない設計判断、 mia 等が `BROKEN` verdict を取る false-positive を構造除去)。 加えて `workflow_def` Node (= Workflow Entity は trigger/action で動作完結し edge を持たないのが正常) を graph axis の検知対象集合から phase-invariant に除外 — `graph.orphan_node` / `graph.edges_zero` / `graph_scan_summary` (= `wire_close` 経路) すべてで sweep。 `mia.workflow.session_close` 等が orphan 警告で報告される現象を解消。
-- **`wire_doctor(persona="mia")` が `HEALTHY` 着地** — 上記 2 件の sibling fix により、 wiring を意図的に持たない Phase A persona の doctor は `error=0 warn=0 info=0` を返す。 旧挙動 (`BROKEN` verdict + `graph.edges_zero` error + `mia.workflow.session_close` orphan warn) は仕様判断の outdated に起因した false-positive。
+- **`wire_doctor` graph axis false-positive 2 件除去** (issues `9f70b493` / `f3bb100e`) — persona-scoped mode (`wire_doctor(persona_id=Some(_))`) で `graph.edges_zero` probe を skip するよう変更 (Phase A 時点で個別 persona は graph axis の edge-based 接続対象でない設計判断、 wiring を持たない persona が `BROKEN` verdict を取る false-positive を構造除去)。 加えて `workflow_def` Node (= Workflow Entity は trigger/action で動作完結し edge を持たないのが正常) を graph axis の検知対象集合から phase-invariant に除外 — `graph.orphan_node` / `graph.edges_zero` / `graph_scan_summary` (= `wire_close` 経路) すべてで sweep。 `<persona>.workflow.session_close` 等が orphan 警告で報告される現象を解消。
+- **persona-scoped `wire_doctor` が `HEALTHY` 着地** — 上記 2 件の sibling fix により、 wiring を意図的に持たない Phase A persona の doctor は `error=0 warn=0 info=0` を返す。 旧挙動 (`BROKEN` verdict + `graph.edges_zero` error + `<persona>.workflow.session_close` orphan warn) は仕様判断の outdated に起因した false-positive。
 
 ### Changed
 
@@ -518,7 +518,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`wire_doctor` refactored to 2-axis integrated health report** — now delegates axis 1 (graph connectivity) to `wire_graph_check` and axis 2 (workflow coverage) to `wire_workflow_check`. `WireDoctorOutput` gains nested `graph_check: WireGraphCheckOutput` and `workflow_check: WireWorkflowCheckOutput` fields. Backward-compat flat fields `orphan_node_count` / `total_node_count` / `total_edge_count` are retained as top-level mirrors of `graph_check.*` (Crux #3). The `wire_doctor` MCP tool now returns structured JSON (graph_check + workflow_check sub-objects) instead of plain Markdown. The `report_markdown` field in the response still contains a human-readable 2-axis summary.
 
-- **`docs/onboarding.md` §2 + §5 補強** (issue `15a46ce6` follow-up doc) — §2 末尾に「wiring entries that carry `metadata.source_uri` or `metadata.maintenance_exempt: true` are recognised as self-attached and are excluded from the `wire_doctor` / `wire_close` orphan count」 1 文追加、 §5 smoke 節に healthy graph の report literal (`orphan nodes (no edges, not self-attached): 0`) と non-zero count 時の typical cause 説明追加。 dogfood 使用者 (mia 自走 smoke 等) が diagnostic シグナルを誤読する 2 次事故源 (= 「全件 orphan flag = misconfigured」 と判定する drift) を doc 側で予防。 MCP resource `wire-guide://onboarding` は次回 `cargo install` 経由 binary embed 反映。
+- **`docs/onboarding.md` §2 + §5 補強** (issue `15a46ce6` follow-up doc) — §2 末尾に「wiring entries that carry `metadata.source_uri` or `metadata.maintenance_exempt: true` are recognised as self-attached and are excluded from the `wire_doctor` / `wire_close` orphan count」 1 文追加、 §5 smoke 節に healthy graph の report literal (`orphan nodes (no edges, not self-attached): 0`) と non-zero count 時の typical cause 説明追加。 dogfood 使用者 (persona 自走 smoke 等) が diagnostic シグナルを誤読する 2 次事故源 (= 「全件 orphan flag = misconfigured」 と判定する drift) を doc 側で予防。 MCP resource `wire-guide://onboarding` は次回 `cargo install` 経由 binary embed 反映。
 - **`graph_scan_summary` orphan 判定 refine** — `metadata.source_uri` を持つ wiring entry (= Layer 6 Adapter 経由で外部 SoT を fetch する node) と `metadata.maintenance_exempt: true` を持つ node を orphan カウントから除外。 onboarding §2 「Add an edge ... optional but recommended」 規約と整合 (edges は traceability 目的の optional な装飾、 wiring entry は単体で `source_uri` 経由 fetch 動作する)。 report literal も「`orphan nodes (no edges, not self-attached): N`」 に refine、 意味を明示。 影響範囲: `wire_doctor` + `wire_close` 両方の `orphan_node_count` 数値が refine (= edges optional 規約下で全件 orphan 報告される false-positive 除去)。
 
 ### Deprecated
@@ -534,8 +534,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`wire_node_delete` docstring + MCP description を実装 (storage cascade) に整合** (issue `bdb786f4`、 commit `a2d2b6d`) — storage 側は edges table FK NOT-NULL + 同 Tx cascade-delete で dangling 状態を作らない実装が正、 docstring / MCP description の「edges are NOT cascade-deleted」 宣言が嘘だったのを doc 側で寄せて訂正。 `graph.dangling_edge` Probe は external DB drift / migration corruption / 直 SQL writes 検知用の defensive sensor として保持、 module docstring + test NOTE も同 framing に書き換え。
 
-- **node `metadata` stringified-JSON drift at storage boundary** (issue `22dcf208`) — `SqliteStorage::insert_node` / `update_node_metadata` now route every metadata payload through a `normalize_metadata_storage` helper before writing the row. `Value::Object` passes through unchanged; `Value::String(s)` is re-parsed and the result must itself be a JSON object (otherwise `WireError::InvalidMetadata`); other shapes (`Null` / `Bool` / `Number` / `Array`) are rejected outright. Closes the silent path that let one historical persona node end up stored as a string-encoded JSON literal while the other personas were stored as objects (shape drift discovered while triaging the `ceee21d9` follow-up). The batch entry point `wire_nodes_create_batch` shares the same guard because it iterates `insert_node` row-by-row. New `WireError::InvalidMetadata(String)` variant is added to `domain/error.rs`. Read path (`row_to_node`) remains best-effort to preserve legacy compatibility for rows written before this guard; surviving stringified rows are healed by case-by-case data fixes (e.g. the shi persona node).
-- **`wire_doctor` false-positive orphan flag** (issue `15a46ce6`) — wiring entry (= `metadata.source_uri` を持つ outline_node) が edge 不在で orphan 判定されていた drift を fix。 2026-06-19 shi dogfood session で 41/41 全件 orphan flag が再現、 実体は wire_query / wire_prompt_context で正常 fetch 動作確認済の構造だった。 上記 `graph_scan_summary` refine で構造除去、 dogfood 使用者が diagnostic シグナル誤読する 2 次事故源を解消。 regression test: `graph_scan_excludes_self_attached_wiring_from_orphans`。
+- **node `metadata` stringified-JSON drift at storage boundary** (issue `22dcf208`) — `SqliteStorage::insert_node` / `update_node_metadata` now route every metadata payload through a `normalize_metadata_storage` helper before writing the row. `Value::Object` passes through unchanged; `Value::String(s)` is re-parsed and the result must itself be a JSON object (otherwise `WireError::InvalidMetadata`); other shapes (`Null` / `Bool` / `Number` / `Array`) are rejected outright. Closes the silent path that let one historical persona node end up stored as a string-encoded JSON literal while the other personas were stored as objects (shape drift discovered while triaging the `ceee21d9` follow-up). The batch entry point `wire_nodes_create_batch` shares the same guard because it iterates `insert_node` row-by-row. New `WireError::InvalidMetadata(String)` variant is added to `domain/error.rs`. Read path (`row_to_node`) remains best-effort to preserve legacy compatibility for rows written before this guard; surviving stringified rows are healed by case-by-case data fixes (e.g. the one legacy persona node observed in dogfood).
+- **`wire_doctor` false-positive orphan flag** (issue `15a46ce6`) — wiring entry (= `metadata.source_uri` を持つ outline_node) が edge 不在で orphan 判定されていた drift を fix。 2026-06-19 dogfood session で 41/41 全件 orphan flag が再現、 実体は wire_query / wire_prompt_context で正常 fetch 動作確認済の構造だった。 上記 `graph_scan_summary` refine で構造除去、 dogfood 使用者が diagnostic シグナル誤読する 2 次事故源を解消。 regression test: `graph_scan_excludes_self_attached_wiring_from_orphans`。
 
 ### Security
 
@@ -577,7 +577,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `NamedProjection` gains three optional fields: `template_engine: Option<String>`, `projection_kind: Option<String>`, `projection_config: Option<serde_json::Value>`. When all are `None`, behaviour is identical to v0.2.1.
   - `projections` SQLite table gains three nullable `TEXT` columns. An idempotent migration (`PRAGMA table_info` + conditional `ALTER TABLE ADD COLUMN`) upgrades pre-existing stores on first open — no manual step required.
   - Storage round-trip test added covering the three hint fields.
-- **P3a Phase 2 (d) — `wire_node_update` surface for in-place metadata patching**: wiring entries (e.g. `<persona>.<axis>` outline_nodes) can now have their `metadata.source_uri` (and other metadata fields) tuned without a delete + re-create cycle. Backs the "append `&limit=10` to mini-app:// source_uri" operational UC observed when `/wake mia` injected 30 mailbox rows past the useful horizon.
+- **P3a Phase 2 (d) — `wire_node_update` surface for in-place metadata patching**: wiring entries (e.g. `<persona>.<axis>` outline_nodes) can now have their `metadata.source_uri` (and other metadata fields) tuned without a delete + re-create cycle. Backs the "append `&limit=10` to mini-app:// source_uri" operational UC observed when a `/wake` run injected 30 mailbox rows past the useful horizon.
   - `wire_node_update(id, metadata_patch, mode)` use_case in `application::use_cases`, with `mode = Merge` (RFC 7396 shallow merge: top-level keys overwrite; `null` deletes the matching key) and `mode = Replace` (full metadata swap). Other node fields (`type` / `sot_ref` / lifecycle) intentionally remain immutable on this path.
   - MCP tool `wire_node_update` exposes the same surface (params: `id`, `metadata_patch`, optional `mode`).
   - CLI `persona-wire node update --id <id> --metadata-patch <json> [--mode merge|replace]`.
@@ -715,7 +715,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--persona` → `--persona-id` (canonical) + `persona` alias for backward compat
   - `--json` → `--spec` (canonical) + `json` alias for backward compat
 - **Storage path resolution**: 3-tier priority (`PERSONA_WIRE_DB` env > `--db` flag > `~/.persona-wire/store.db`) — eliminates CWD-relative pollution caused by `.mcp.json`-driven startup.
-- **Test fixtures**: persona-specific literals (`shi` / `mia` / `misaki` / `ytk`) → generic placeholders (`alpha` / `beta` / `gamma` / `user_a`) across 6 test / source files.
+- **Test fixtures**: persona-specific literals → generic placeholders (`alpha` / `beta` / `gamma` / `user_a`) across 6 test / source files.
 - **`Specification::not()` inherent method**: removed in favour of `impl std::ops::Not` (clippy `should_implement_trait` resolution).
 
 ### Fixed

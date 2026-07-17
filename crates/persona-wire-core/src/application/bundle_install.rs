@@ -81,7 +81,7 @@ pub struct SpecEntry {
     /// round-trips this through `serde_json::Value` → [`Specification`]
     /// so TOML callers write the existing externally-tagged serde shape,
     /// e.g. `spec = { TypeIs = "persona" }` or
-    /// `spec = { MetadataEq = { path = "owner", value = "ytk" } }`.
+    /// `spec = { MetadataEq = { path = "owner", value = "owner_a" } }`.
     pub spec: toml::Value,
 }
 
@@ -119,7 +119,7 @@ pub struct EdgeEntry {
 /// `persona` / `axis` (= slot) / `source_uri`. Conflict resolution
 /// operates on the synthesized node name; the auto-increment suffix
 /// goes on the slot half so the persona half stays readable
-/// (`shi.mailbox` → `shi.mailbox-1`).
+/// (`alice.mailbox` → `alice.mailbox-1`).
 #[derive(Debug, Deserialize)]
 pub struct WiringEntry {
     pub persona_id: String,
@@ -392,7 +392,7 @@ pub fn install_bundle(
     // Wirings are persisted as `outline_node` Nodes whose name is
     // `format!("{persona}.{slot}")`. Conflict resolution operates on the
     // composite name; auto-increment appends `-N` to the whole synthesized
-    // name (`shi.mailbox-1`), the persona / slot field stay verbatim in
+    // name (`alice.mailbox-1`), the persona / slot field stay verbatim in
     // metadata so the entity carrier keeps its identity even after rename.
     for entry in &manifest.wirings {
         let composed = format!("{}.{}", entry.persona_id, entry.slot);
@@ -847,17 +847,17 @@ spec = { TypeIs = "persona" }
         let s = setup();
         let body = r#"
 [[nodes]]
-name = "shi"
+name = "alice"
 node_type = "persona"
-metadata = { owner = "ytk" }
+metadata = { owner = "owner_a" }
 
 [[nodes]]
-name = "dolly"
+name = "bob"
 node_type = "persona"
 
 [[edges]]
-from_name = "shi"
-to_name = "dolly"
+from_name = "alice"
+to_name = "bob"
 edge_type = "routes_to"
 "#;
         let bundle = register_bundle(&s, "b", body);
@@ -869,9 +869,9 @@ edge_type = "routes_to"
         // re-install → node names auto-increment, edge from/to rewritten
         let r2 = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
         let final_names: Vec<_> = r2.installed.iter().map(|i| i.final_name.clone()).collect();
-        assert!(final_names.contains(&"shi-1".to_string()));
-        assert!(final_names.contains(&"dolly-1".to_string()));
-        assert!(final_names.contains(&"shi-1->dolly-1".to_string()));
+        assert!(final_names.contains(&"alice-1".to_string()));
+        assert!(final_names.contains(&"bob-1".to_string()));
+        assert!(final_names.contains(&"alice-1->bob-1".to_string()));
     }
 
     #[test]
@@ -920,12 +920,12 @@ spec = { TypeIs = "persona" }
         let s = setup();
         let body = r#"
 [[wirings]]
-persona_id = "shi"
+persona_id = "alice"
 slot = "mailbox"
-source_uri = "mini-app://mailbox?alias=for_shi"
+source_uri = "mini-app://mailbox?alias=for_alice"
 
 [[wirings]]
-persona_id = "shi"
+persona_id = "alice"
 slot = "news"
 source_uri = "mini-app://news"
 projection_ref = "news_overview"
@@ -935,14 +935,14 @@ projection_ref = "news_overview"
         assert_eq!(r.installed.len(), 2, "report: {:?}", r);
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.installed[0].kind, "wiring");
-        assert_eq!(r.installed[0].final_name, "shi.mailbox");
-        assert_eq!(r.installed[1].final_name, "shi.news");
+        assert_eq!(r.installed[0].final_name, "alice.mailbox");
+        assert_eq!(r.installed[1].final_name, "alice.news");
 
         // re-install → auto-increment composite names
         let r2 = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
         let final_names: Vec<_> = r2.installed.iter().map(|i| i.final_name.clone()).collect();
-        assert!(final_names.contains(&"shi.mailbox-1".to_string()));
-        assert!(final_names.contains(&"shi.news-1".to_string()));
+        assert!(final_names.contains(&"alice.mailbox-1".to_string()));
+        assert!(final_names.contains(&"alice.news-1".to_string()));
     }
 
     #[test]
@@ -951,25 +951,25 @@ projection_ref = "news_overview"
         // top-level `maintenance_exempt = true` value at TOML
         // deserialize boundary because the WiringEntry struct did not
         // declare the field. Misaki caught it during the
-        // mia.anchor_files configuration round-trip
+        // carol.anchor_files configuration round-trip
         // (`wire_context_get` showed `maintenance_exempt: false` after
         // a bundle install that explicitly set it true).
         let s = setup();
         let body = r#"
 [[wirings]]
-persona_id = "mia"
+persona_id = "carol"
 slot = "anchor_files"
-source_uri = "mini-app://anchor_file?alias=for_mia_anchors"
-projection_ref = "mia.section.anchor_files"
+source_uri = "mini-app://anchor_file?alias=for_carol_anchors"
+projection_ref = "carol.section.anchor_files"
 maintenance_exempt = true
 "#;
-        let bundle = register_bundle(&s, "mia.anchor_files.v1", body);
+        let bundle = register_bundle(&s, "carol.anchor_files.v1", body);
         let r = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
         assert_eq!(r.installed.len(), 1, "report: {:?}", r);
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
 
         let node_id = s
-            .lookup_node_id_by_name("mia.anchor_files")
+            .lookup_node_id_by_name("carol.anchor_files")
             .unwrap()
             .expect("wiring node row");
         let node = s.get_node(&node_id).unwrap().expect("get_node");
@@ -992,14 +992,14 @@ maintenance_exempt = true
         let s = setup();
         let body = r#"
 [[wirings]]
-persona_id = "shi"
+persona_id = "alice"
 slot = "mailbox"
-source_uri = "mini-app://mailbox?alias=for_shi"
+source_uri = "mini-app://mailbox?alias=for_alice"
 "#;
-        let bundle = register_bundle(&s, "shi.mailbox.v1", body);
+        let bundle = register_bundle(&s, "alice.mailbox.v1", body);
         install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
         let node_id = s
-            .lookup_node_id_by_name("shi.mailbox")
+            .lookup_node_id_by_name("alice.mailbox")
             .unwrap()
             .expect("wiring node row");
         let node = s.get_node(&node_id).unwrap().expect("get_node");
@@ -1017,18 +1017,18 @@ source_uri = "mini-app://mailbox?alias=for_shi"
         let s = setup();
         let body = r#"
 [[wirings]]
-persona_id = "shi"
+persona_id = "alice"
 slot = "issues"
 source_uri = "github://ynishi/persona-wire"
 auth = "github-alt"
 "#;
-        let bundle = register_bundle(&s, "shi.issues.v1", body);
+        let bundle = register_bundle(&s, "alice.issues.v1", body);
         let r = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
         assert_eq!(r.installed.len(), 1, "report: {:?}", r);
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
 
         let node_id = s
-            .lookup_node_id_by_name("shi.issues")
+            .lookup_node_id_by_name("alice.issues")
             .unwrap()
             .expect("wiring node row");
         let node = s.get_node(&node_id).unwrap().expect("get_node");
@@ -1048,14 +1048,14 @@ auth = "github-alt"
         let s = setup();
         let body = r#"
 [[wirings]]
-persona_id = "shi"
+persona_id = "alice"
 slot = "mailbox"
-source_uri = "mini-app://mailbox?alias=for_shi"
+source_uri = "mini-app://mailbox?alias=for_alice"
 "#;
-        let bundle = register_bundle(&s, "shi.mailbox.noauth.v1", body);
+        let bundle = register_bundle(&s, "alice.mailbox.noauth.v1", body);
         install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
         let node_id = s
-            .lookup_node_id_by_name("shi.mailbox")
+            .lookup_node_id_by_name("alice.mailbox")
             .unwrap()
             .expect("wiring node row");
         let node = s.get_node(&node_id).unwrap().expect("get_node");
@@ -1071,8 +1071,8 @@ source_uri = "mini-app://mailbox?alias=for_shi"
         let s = setup();
         let body = r#"
 [[workflows]]
-id = "shi-wake"
-persona_id = "shi"
+id = "alice-wake"
+persona_id = "alice"
 trigger = { kind = "on_demand" }
 action = { kind = "no_op" }
 "#;
@@ -1081,13 +1081,13 @@ action = { kind = "no_op" }
         assert_eq!(r.installed.len(), 1, "report: {:?}", r);
         assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
         assert_eq!(r.installed[0].kind, "workflow");
-        assert_eq!(r.installed[0].final_name, "shi-wake");
+        assert_eq!(r.installed[0].final_name, "alice-wake");
 
         // re-install → workflow id collision triggers auto-increment via
         // node name (workflow_def Node name == workflow id).
         let r2 = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
         assert_eq!(r2.installed.len(), 1, "report: {:?}", r2);
-        assert_eq!(r2.installed[0].final_name, "shi-wake-1");
+        assert_eq!(r2.installed[0].final_name, "alice-wake-1");
     }
 
     #[test]

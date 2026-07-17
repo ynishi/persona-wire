@@ -298,6 +298,3 @@ P5-a + P5-a' で onboarding §6b の UC1/UC2 が caller 側 1 行で書ける + 
 - 既存 primitive: `Specification` / `NamedProjection` / Layer 6 Adapter
 - Probe registry SoT: `application::doctor::probes::workflow_*` (Rustdoc)
 
----
-
-これは叩き台です。 修正があれば指摘してください。 全然違っていれば破棄します。

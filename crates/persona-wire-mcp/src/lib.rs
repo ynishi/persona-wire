@@ -348,7 +348,7 @@ pub struct WireSlotDeleteParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WireFetchParams {
     /// Raw scheme-tagged URI to fetch (e.g. `"file:~/notes.md"`,
-    /// `"mini-app://mailbox?alias=for_shi"`). Mutually exclusive with
+    /// `"mini-app://mailbox?alias=for_alice"`). Mutually exclusive with
     /// `persona_id` + `slot`.
     #[serde(default)]
     pub source_uri: Option<String>,
@@ -933,7 +933,7 @@ impl WireServer {
         let mode_str = p.mode.as_deref().unwrap_or("merge");
         let mode = WireNodeUpdateMode::parse(mode_str).map_err(|e| e.to_string())?;
         // rmcp harness が top-level Value field を文字列化する挙動を吸収
-        // (mia 2026-06-14 Finding 1 sibling — `normalize_metadata` 経由で recover)。
+        // (2026-06-14 Finding 1 sibling — `normalize_metadata` 経由で recover)。
         let patch = normalize_metadata(Some(p.metadata_patch));
         let s = self.storage.lock().map_err(|e| e.to_string())?;
         let out = wire_node_update(

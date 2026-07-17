@@ -486,8 +486,8 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_with_alias_no_params() {
-        let spec = parse_mini_app_uri("mia_active_context?alias=active", None).unwrap();
-        assert_eq!(spec.table, "mia_active_context");
+        let spec = parse_mini_app_uri("carol_active_context?alias=active", None).unwrap();
+        assert_eq!(spec.table, "carol_active_context");
         assert_eq!(spec.alias.as_deref(), Some("active"));
         assert_eq!(spec.limit, None);
         assert_eq!(spec.params, serde_json::json!({}));
@@ -496,13 +496,13 @@ mod tests {
     #[test]
     fn parse_mini_app_uri_with_alias_and_params() {
         let spec =
-            parse_mini_app_uri("mailbox?alias=unread_for&persona=mia&kind=info", None).unwrap();
+            parse_mini_app_uri("mailbox?alias=unread_for&persona=carol&kind=info", None).unwrap();
         assert_eq!(spec.table, "mailbox");
         assert_eq!(spec.alias.as_deref(), Some("unread_for"));
         assert_eq!(spec.limit, None);
         assert_eq!(
             spec.params,
-            serde_json::json!({"persona": "mia", "kind": "info"})
+            serde_json::json!({"persona": "carol", "kind": "info"})
         );
     }
 
@@ -512,11 +512,11 @@ mod tests {
         // passed in as `limit_override`; parse_mini_app_uri simply threads it
         // through to the spec.
         let spec =
-            parse_mini_app_uri("mia_trigger?alias=due&persona=mia&limit=5", Some(5)).unwrap();
-        assert_eq!(spec.table, "mia_trigger");
+            parse_mini_app_uri("carol_trigger?alias=due&persona=carol&limit=5", Some(5)).unwrap();
+        assert_eq!(spec.table, "carol_trigger");
         assert_eq!(spec.alias.as_deref(), Some("due"));
         assert_eq!(spec.limit, Some(5));
-        assert_eq!(spec.params, serde_json::json!({"persona": "mia"}));
+        assert_eq!(spec.params, serde_json::json!({"persona": "carol"}));
     }
 
     #[test]

@@ -237,19 +237,19 @@ mod tests {
     #[test]
     fn extract_helpers_read_canonical_keys() {
         let n = raw_node(
-            "shi.mailbox",
+            "alice.mailbox",
             json!({
-                "persona": "shi",
+                "persona": "alice",
                 "axis": "mailbox",
-                "source_uri": "mini-app://mailbox?alias=for_shi",
+                "source_uri": "mini-app://mailbox?alias=for_alice",
                 "maintenance_exempt": true,
             }),
         );
-        assert_eq!(extract_persona(&n), Some("shi"));
+        assert_eq!(extract_persona(&n), Some("alice"));
         assert_eq!(extract_slot(&n), Some("mailbox"));
         assert_eq!(
             extract_source_uri(&n),
-            Some("mini-app://mailbox?alias=for_shi")
+            Some("mini-app://mailbox?alias=for_alice")
         );
         assert!(extract_maintenance_exempt(&n));
     }
@@ -295,18 +295,18 @@ mod tests {
 
     #[test]
     fn node_to_wiring_strict_round_trip() {
-        let persona = PersonaId::new("shi").unwrap();
+        let persona = PersonaId::new("alice").unwrap();
         let slot = Slot::new("mailbox").unwrap();
-        let source = Source::new("mini-app://mailbox?alias=for_shi").unwrap();
+        let source = Source::new("mini-app://mailbox?alias=for_alice").unwrap();
         let meta = wiring_metadata_object(&persona, &slot, &source, None);
-        let node = raw_node("shi.mailbox", meta);
-        let projection_ref = Some(ProjectionName::new("shi.section.mailbox").unwrap());
+        let node = raw_node("alice.mailbox", meta);
+        let projection_ref = Some(ProjectionName::new("alice.section.mailbox").unwrap());
         let w = node_to_wiring(&node, projection_ref.clone()).unwrap();
         assert_eq!(w.persona_id(), &persona);
         assert_eq!(w.slot(), &slot);
         assert_eq!(w.source(), &source);
         assert_eq!(w.projection_ref(), projection_ref.as_ref());
-        assert_eq!(w.storage_node_id(), "shi.mailbox");
+        assert_eq!(w.storage_node_id(), "alice.mailbox");
     }
 
     #[test]

@@ -62,8 +62,8 @@ fn full_pipeline_init_seed_register_render_close() {
 
     storage
         .insert_edge(&Edge {
-            id: ulid_from_seed("e_shi_mia"),
-            name: Some("e_shi_mia".into()),
+            id: ulid_from_seed("e_alice_carol"),
+            name: Some("e_alice_carol".into()),
             src_node: ulid_from_seed("alpha"),
             tgt_node: ulid_from_seed("beta"),
             kind: "routes_to".into(),
@@ -75,8 +75,8 @@ fn full_pipeline_init_seed_register_render_close() {
         .unwrap();
     storage
         .insert_edge(&Edge {
-            id: ulid_from_seed("e_shi_misaki"),
-            name: Some("e_shi_misaki".into()),
+            id: ulid_from_seed("e_alice_dave"),
+            name: Some("e_alice_dave".into()),
             src_node: ulid_from_seed("alpha"),
             tgt_node: ulid_from_seed("gamma"),
             kind: "routes_to".into(),
@@ -88,8 +88,8 @@ fn full_pipeline_init_seed_register_render_close() {
         .unwrap();
     storage
         .insert_edge(&Edge {
-            id: ulid_from_seed("e_mia_review"),
-            name: Some("e_mia_review".into()),
+            id: ulid_from_seed("e_carol_review"),
+            name: Some("e_carol_review".into()),
             src_node: ulid_from_seed("beta"),
             tgt_node: ulid_from_seed("note1"),
             kind: "triggers_review_of".into(),

@@ -1,4 +1,4 @@
-# persona-wire-adapter-rss 0.12.1
+# persona-wire-adapter-rss 0.14.0
 
 persona-wire Adapter for RSS/Atom/JSON feeds (scheme `rss://`).
 
@@ -25,9 +25,13 @@ rss://<host>/<path>[?scheme=http][?limit=N]
   plain HTTP (any other `scheme` value is ignored and falls back to
   `https`, matching the forward-compatible convention below).
 - `?limit=N` caps the number of items returned (default
-  [`DEFAULT_LIMIT`]). A non-numeric or zero value fails loud.
-- Unknown query keys are silently ignored (same forward-compatible
-  convention as `persona-wire-adapter-obsidian`).
+  [`DEFAULT_LIMIT`]). Parsed via the shared
+  [`WireFilters::parse`]; unbounded declaration
+  ([`FilterCap::Limit { max: None }`]). Non-numeric or zero fails loud;
+  unknown filter-vocabulary keys (`?query=` etc.) fail loud too.
+- Adapter-specific addressing keys (currently only `?scheme=`) are
+  silently ignored when unknown (same forward-compatible convention as
+  `persona-wire-adapter-obsidian`).
 - An empty host is an error.
 
 ## Output shape

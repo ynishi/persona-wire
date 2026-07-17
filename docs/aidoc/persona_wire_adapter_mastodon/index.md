@@ -1,4 +1,4 @@
-# persona-wire-adapter-mastodon 0.12.1
+# persona-wire-adapter-mastodon 0.14.0
 
 persona-wire Adapter for Mastodon (scheme `mastodon://`).
 

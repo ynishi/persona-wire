@@ -1,4 +1,4 @@
-# persona-wire-adapter-apple-notes 0.12.1
+# persona-wire-adapter-apple-notes 0.14.0
 
 persona-wire Adapter for the local Notes.app database (scheme `applenotes://`).
 

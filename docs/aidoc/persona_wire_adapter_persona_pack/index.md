@@ -1,4 +1,4 @@
-# persona-wire-adapter-persona-pack 0.12.1
+# persona-wire-adapter-persona-pack 0.14.0
 
 `persona-wire-adapter-persona-pack` — persona-pack SDK access の ACL Facade。
 
@@ -16,7 +16,7 @@ persona-pack は persona の Pack TOML を扱う外部 crate。 そこに
 - path = `/projections` (現状唯一の resource、 将来分岐余地)
 - query = (なし、 将来 `?axis=<name>` 等の subset selection を carry)
 
-例: `persona-pack://dolly/projections`
+例: `persona-pack://bob/projections`
 
 ## Wire 側が定義する return JSON shape (ACL boundary)
 

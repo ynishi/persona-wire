@@ -29,6 +29,7 @@ P3a stage: registry skeleton + builder + lookup surface のみ。 use_cases.rs
 
 ## Types
 
+- `AdapterInfo` — `wire_doctor` display row for one registered [`Adapter`]: its scheme plus
 - `PluginRegistry` — 3 軸 Plugin を統合管理する immutable registry。
 - `PluginRegistryBuilder` — builder。 同一 scheme / id / kind の重複登録は `build()` 時に fail-fast。
 

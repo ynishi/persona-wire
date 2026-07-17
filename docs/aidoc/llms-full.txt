@@ -1,5 +1,5 @@
 <!-- persona_wire/index.md -->
-# persona-wire 0.12.1
+# persona-wire 0.14.0
 
 persona-wire — CLI + migration hub for the 15-crate persona-wire
 workspace. persona-wire is a graph engine over persona × SoT ×
@@ -132,7 +132,7 @@ accepts NULL leaves the schema untouched.
 
 
 <!-- persona_wire_adapter_activitypub/index.md -->
-# persona-wire-adapter-activitypub 0.12.1
+# persona-wire-adapter-activitypub 0.14.0
 
 persona-wire Adapter for the Fediverse (scheme `activitypub://`).
 
@@ -210,7 +210,7 @@ silently disagree with the source instance).
 
 
 <!-- persona_wire_adapter_apple_notes/index.md -->
-# persona-wire-adapter-apple-notes 0.12.1
+# persona-wire-adapter-apple-notes 0.14.0
 
 persona-wire Adapter for the local Notes.app database (scheme `applenotes://`).
 
@@ -267,7 +267,7 @@ AppleScript fallback.
 
 
 <!-- persona_wire_adapter_bluesky/index.md -->
-# persona-wire-adapter-bluesky 0.12.1
+# persona-wire-adapter-bluesky 0.14.0
 
 persona-wire Adapter for Bluesky (scheme `bluesky://`).
 
@@ -376,7 +376,7 @@ Bluesky API's own behavior); missing string fields are `null`.
 
 
 <!-- persona_wire_adapter_github/index.md -->
-# persona-wire-adapter-github 0.12.1
+# persona-wire-adapter-github 0.14.0
 
 persona-wire Adapter for GitHub (scheme `github://`).
 
@@ -504,7 +504,7 @@ post-fetch. If the filtered count still falls short, the loop follows the
 
 
 <!-- persona_wire_adapter_mastodon/index.md -->
-# persona-wire-adapter-mastodon 0.12.1
+# persona-wire-adapter-mastodon 0.14.0
 
 persona-wire Adapter for Mastodon (scheme `mastodon://`).
 
@@ -623,7 +623,7 @@ instance's local/public timeline.
 
 
 <!-- persona_wire_adapter_matrix/index.md -->
-# persona-wire-adapter-matrix 0.12.1
+# persona-wire-adapter-matrix 0.14.0
 
 persona-wire Adapter for Matrix (scheme `matrix://`).
 
@@ -726,7 +726,7 @@ are Matrix spec, not this crate's concern to re-flatten).
 
 
 <!-- persona_wire_adapter_mcp/index.md -->
-# persona-wire-adapter-mcp 0.12.1
+# persona-wire-adapter-mcp 0.14.0
 
 persona-wire Adapter for any MCP server (scheme `mcp://`).
 
@@ -768,7 +768,7 @@ pooling is out of scope for the single-shot Wire use case.
 
 
 <!-- persona_wire_adapter_mini_app/index.md -->
-# persona-wire-adapter-mini-app 0.12.1
+# persona-wire-adapter-mini-app 0.14.0
 
 persona-wire Adapter for mini-app SoT (scheme `mini-app://`).
 
@@ -796,7 +796,7 @@ wire は filter / MiniJinja / ListFilter 意味論を一切解釈しない。
 
 
 <!-- persona_wire_adapter_notion/index.md -->
-# persona-wire-adapter-notion 0.12.1
+# persona-wire-adapter-notion 0.14.0
 
 persona-wire Adapter for Notion (scheme `notion://`).
 
@@ -955,7 +955,7 @@ every page.
 
 
 <!-- persona_wire_adapter_obsidian/index.md -->
-# persona-wire-adapter-obsidian 0.12.1
+# persona-wire-adapter-obsidian 0.14.0
 
 persona-wire Adapter for Obsidian vault (scheme `obsidian://`).
 
@@ -989,7 +989,7 @@ obsidian:///<vault-root>/<note>[?frontmatter={on|off}&links={off|edge}]
 
 
 <!-- persona_wire_adapter_persona_pack/index.md -->
-# persona-wire-adapter-persona-pack 0.12.1
+# persona-wire-adapter-persona-pack 0.14.0
 
 `persona-wire-adapter-persona-pack` — persona-pack SDK access の ACL Facade。
 
@@ -1007,7 +1007,7 @@ persona-pack は persona の Pack TOML を扱う外部 crate。 そこに
 - path = `/projections` (現状唯一の resource、 将来分岐余地)
 - query = (なし、 将来 `?axis=<name>` 等の subset selection を carry)
 
-例: `persona-pack://dolly/projections`
+例: `persona-pack://bob/projections`
 
 ## Wire 側が定義する return JSON shape (ACL boundary)
 
@@ -1037,7 +1037,7 @@ persona-pack 上流の TOML field 名 (`target` / `strategy` 等) や `extra` ta
 
 
 <!-- persona_wire_adapter_rss/index.md -->
-# persona-wire-adapter-rss 0.12.1
+# persona-wire-adapter-rss 0.14.0
 
 persona-wire Adapter for RSS/Atom/JSON feeds (scheme `rss://`).
 
@@ -1064,9 +1064,13 @@ rss://<host>/<path>[?scheme=http][?limit=N]
   plain HTTP (any other `scheme` value is ignored and falls back to
   `https`, matching the forward-compatible convention below).
 - `?limit=N` caps the number of items returned (default
-  [`DEFAULT_LIMIT`]). A non-numeric or zero value fails loud.
-- Unknown query keys are silently ignored (same forward-compatible
-  convention as `persona-wire-adapter-obsidian`).
+  [`DEFAULT_LIMIT`]). Parsed via the shared
+  [`WireFilters::parse`]; unbounded declaration
+  ([`FilterCap::Limit { max: None }`]). Non-numeric or zero fails loud;
+  unknown filter-vocabulary keys (`?query=` etc.) fail loud too.
+- Adapter-specific addressing keys (currently only `?scheme=`) are
+  silently ignored when unknown (same forward-compatible convention as
+  `persona-wire-adapter-obsidian`).
 - An empty host is an error.
 
 ## Output shape
@@ -1083,7 +1087,7 @@ rss://<host>/<path>[?scheme=http][?limit=N]
 
 
 <!-- persona_wire_adapter_slack/index.md -->
-# persona-wire-adapter-slack 0.12.1
+# persona-wire-adapter-slack 0.14.0
 
 persona-wire Adapter for Slack (scheme `slack://`).
 
@@ -1280,7 +1284,7 @@ Every upstream request is sent with `limit = min(spec.limit, MAX_LIMIT)`
 
 
 <!-- persona_wire_adapter_sqlite_x/index.md -->
-# persona-wire-adapter-sqlite-x 0.12.1
+# persona-wire-adapter-sqlite-x 0.14.0
 
 persona-wire Adapter for raw SQLite SoT (scheme `sqlite://`).
 
@@ -1324,7 +1328,7 @@ caller (template / projection) 側で必要なら decode する。
 
 
 <!-- persona_wire_adapter_todoist/index.md -->
-# persona-wire-adapter-todoist 0.12.1
+# persona-wire-adapter-todoist 0.14.0
 
 persona-wire Adapter for Todoist (scheme `todoist://`).
 
@@ -1442,7 +1446,7 @@ larger requests.
 
 
 <!-- persona_wire_core/index.md -->
-# persona-wire-core 0.12.1
+# persona-wire-core 0.14.0
 
 # persona-wire-core
 
@@ -1752,6 +1756,7 @@ and which are persona-wire's own extension.
 - [`domain::port::projection_renderer`](domain__port__projection_renderer.md): `ProjectionRenderer` — Driven Port for projection rendering.
 - [`infrastructure`](infrastructure.md): Infrastructure layer — drives Storage and Rendering as adapters.
 - [`infrastructure::adapter`](infrastructure__adapter.md): Layer 6 Adapter (SoT) — reflects concept-doc §3 Layer 6 + §5 #3 / §P3b.
+- [`infrastructure::filter`](infrastructure__filter.md): Unified adapter filter vocabulary + shared parser.
 - [`infrastructure::projection`](infrastructure__projection.md): Projection Adapters — concrete [`ProjectionRenderer`] implementations.
 - [`infrastructure::projection::static`](infrastructure__projection__static.md): `StaticProjection` — core 同梱 default Adapter for [`ProjectionRenderer`].
 - [`infrastructure::rendering`](infrastructure__rendering.md): Rendering adapter — render extracted graph subsets into output forms.
@@ -2128,8 +2133,8 @@ workflow.trigger_infra_missing — trigger.kind=cron で cron 指定なし、
 または kind=on_event で event 文字列なし (error)。
 
 design.md §7 entry。 「受け手不在 / 永遠未 fire」 の構造的検出。
-NOTE: `on_event` の hook 実在検査 (agent-profiles 側の登録) は本 Probe
-scope 外、 将来 carry。 ここでは event 文字列の完備性のみ。
+NOTE: `on_event` の hook 実在検査 (external hook registration 側) は本
+Probe scope 外、 将来 carry。 ここでは event 文字列の完備性のみ。
 
 ## Types
 
@@ -2158,6 +2163,7 @@ design.md §5 (verdict) / §8 (output 形式) に対応。
 ## Functions
 
 - `aggregate_verdict` — design §5: error >= 1 → BROKEN / warn >= 1 → DEGRADED / 全 PASS → HEALTHY。
+- `render_adapters` — Renders the `## Adapters` section (adapter-filter-if Phase 1): one line
 - `to_markdown` — (no documentation)
 
 ## Types
@@ -2220,6 +2226,7 @@ P3a stage: registry skeleton + builder + lookup surface のみ。 use_cases.rs
 
 ## Types
 
+- `AdapterInfo` — `wire_doctor` display row for one registered [`Adapter`]: its scheme plus
 - `PluginRegistry` — 3 軸 Plugin を統合管理する immutable registry。
 - `PluginRegistryBuilder` — builder。 同一 scheme / id / kind の重複登録は `build()` 時に fail-fast。
 
@@ -2437,6 +2444,7 @@ Use cases — orchestration of Domain + Infrastructure for wire_* flows.
 - `wire_doctor` — Finding-driven 2-axis (graph / workflow) health diagnostic (design §3-§8).
 - `wire_edge_delete` — Delete an edge by id.
 - `wire_edges_create_batch` — Insert a batch of edges by iterating `insert_edge` 1 row at a time. Same
+- `wire_fetch` — Raw adapter preview — routes a URI through the same `PluginRegistry`
 - `wire_init` — Run every registered NamedProjection against the current graph and return
 - `wire_node_delete` — Delete a node by id. Edges referencing the node (as src or tgt) are
 - `wire_node_update` — Update a node's `metadata` in place.
@@ -2445,6 +2453,8 @@ Use cases — orchestration of Domain + Infrastructure for wire_* flows.
 - `wire_prompt_context` — 全 builtin slot (or projection_names で subset) を iterate し、 各 slot の
 - `wire_query` — Ad-hoc query: evaluate `spec` (inline or by registered name) against the
 - `wire_render` — Render a single registered NamedProjection by name. Counterpart to
+- `wire_slot_delete` — Counterpart to [`wire_slot_register`] — removes the wiring node, the
+- `wire_slot_register` — One-shot slot setup — a macro over the three registrations the onboarding
 - `wire_spec_delete` — Delete a Specification by ULID id or name. Projections referencing it via
 - `wire_workflow_fire` — Resolve the workflows that would fire for the given input. **Does not**
 - `wire_workflow_list` — List registered Workflows (= Nodes of type `workflow_def`), with optional
@@ -2464,6 +2474,8 @@ Use cases — orchestration of Domain + Infrastructure for wire_* flows.
 - `WireDeleteOutput` — (no documentation)
 - `WireDoctorOutput` — Finding-driven 2-axis (graph / workflow) health diagnostic output.
 - `WireEdgesCreateBatchInput` — (no documentation)
+- `WireFetchInput` — Input for [`wire_fetch`] — either a raw `source_uri`, or a
+- `WireFetchOutput` — (no documentation)
 - `WireInitInput` — (no documentation)
 - `WireInitOutput` — (no documentation)
 - `WireNodeUpdateInput` — (no documentation)
@@ -2477,6 +2489,10 @@ Use cases — orchestration of Domain + Infrastructure for wire_* flows.
 - `WireQueryOutput` — (no documentation)
 - `WireRenderInput` — (no documentation)
 - `WireRenderOutput` — (no documentation)
+- `WireSlotDeleteInput` — (no documentation)
+- `WireSlotDeleteOutput` — (no documentation)
+- `WireSlotRegisterInput` — Input for [`wire_slot_register`] — the minimal real information a slot
+- `WireSlotRegisterOutput` — (no documentation)
 - `WireWorkflowFireInput` — (no documentation)
 - `WireWorkflowFireOutput` — (no documentation)
 - `WireWorkflowListInput` — (no documentation)
@@ -2524,14 +2540,17 @@ of the bare `"axis"` literal.
 
 Round-trip property: `node_to_wiring(wiring_to_node(w, opts)?)? == w`
 for any [`Wiring`] constructed through this module's parsers (modulo the
-`projection_ref` carry, which is stored separately at the
-`ProjectionRegistry` boundary, not on the wiring Node).
+`projection_ref` carry — resolved at the `ProjectionRegistry` boundary
+via the naming convention, or overridden by the optional
+`metadata.projection_ref` key when a wiring binds a projection
+explicitly; see [`META_PROJECTION_REF`]).
 
 ## Functions
 
 - `extract_auth` — Borrow the `auth` field (credential reference key, never a secret) as
 - `extract_maintenance_exempt` — Read the `maintenance_exempt` flag, defaulting to `false` when missing
 - `extract_persona` — Borrow the `persona` field as `&str` if present and a string.
+- `extract_projection_ref` — Borrow the explicit `projection_ref` binding as `&str` if present and a
 - `extract_slot` — Borrow the slot field (legacy key `axis`) as `&str` if present and a
 - `extract_slot_typed` — Validate-and-extract the slot as a typed [`Slot`] VO. Returns `Ok(None)`
 - `extract_source_uri` — Borrow the `source_uri` field as `&str` if present and a string.
@@ -2543,6 +2562,7 @@ for any [`Wiring`] constructed through this module's parsers (modulo the
 - `META_AUTH` — `metadata.auth` key — optional credential **reference key** (never a
 - `META_MAINTENANCE_EXEMPT` — `metadata.maintenance_exempt` key — opt-out flag for session-cyclic
 - `META_PERSONA` — `metadata.persona` key (PersonaId, natural composite key part 1).
+- `META_PROJECTION_REF` — `metadata.projection_ref` key — optional explicit NamedProjection binding.
 - `META_SLOT` — `metadata.axis` key — legacy storage name for the [`Slot`] (natural
 - `META_SOURCE_URI` — `metadata.source_uri` key ([`Source`] URI).
 - `WIRING_TYPE` — Storage `Node.r#type` literal for a Wiring entry. Single SoT — internal
@@ -3238,6 +3258,7 @@ Infrastructure layer — drives Storage and Rendering as adapters.
 - [`rendering`] — Prompt / Markdown / JSON / ASCII rendering adapter (thin wrapper over `template`)
 - [`template`]  — Template Engine Plugin trait (`HandlebarsEngine` default impl)
 - [`adapter`]   — Layer 6 SoT Adapter Plugin trait (`FileAdapter`; mini-app は外部 crate `persona-wire-adapter-mini-app`)
+- [`filter`]    — Unified cross-cutting adapter filter vocabulary (`FilterCap` / `WireFilters`) shared by every `Adapter::filter_caps` opt-in
 
 
 <!-- persona_wire_core/infrastructure__adapter.md -->
@@ -3254,13 +3275,21 @@ Bundled scheme:
   std::fs::read (json/toml parsing is a future extension; currently the
   contents are returned as a string).
 
-  Query param extensions (R5):
+  Query param extensions (R5, now routed through the unified
+  [`crate::infrastructure::filter`] vocabulary via
+  [`Adapter::filter_caps`] / [`crate::infrastructure::filter::WireFilters::parse`]):
   - `?tail=last_section` — the trailing section (split at markdown `## `
     h2 boundaries; returns everything from the last h2 onward)
   - `?tail_n=<N>` — the last N lines (line-based; capped at
     [`TAIL_N_MAX`] = 1000 lines as a context size guard)
+  - `?lines=<FROM>-<TO>` — a 1-origin inclusive line range; `TO` beyond
+    the total line count clamps gracefully, `FROM` beyond the total
+    returns an empty body. Mutually exclusive with `?tail` / `?tail_n`
+    (fails loud if both are present).
   - no query param → fetch the whole file (backward-compat)
-  - unknown / unparsable values → graceful fail = whole-file fetch
+  - unknown / unparsable values → **fail loud** (`Err`), per the unified
+    filter error policy (behavior changed from the earlier graceful
+    whole-file fallback; see `filter` module docs)
 
   Metadata (R4):
   - `size_bytes` — size of the whole file in bytes (the original file
@@ -3350,7 +3379,7 @@ query param on its `source_uri`:
 
 ## Types
 
-- `FileAdapter` — (no documentation)
+- `FileAdapter` — Bundled `file://` / `file:` scheme [`Adapter`] backed by `std::fs`. See
 
 ## Traits
 
@@ -3359,6 +3388,56 @@ query param on its `source_uri`:
 ## Constants
 
 - `TAIL_N_MAX` — Upper bound for `N` in `?tail_n=<N>` (context size guard).
+
+
+<!-- persona_wire_core/infrastructure__filter.md -->
+# persona-wire-core::infrastructure::filter
+
+Unified adapter filter vocabulary + shared parser.
+
+## Architecture
+
+Before this module, cross-cutting query params (`?limit=`, `?tail=`,
+`?since=`) were parsed independently by each adapter (`FileAdapter`'s
+`parse_tail_mode`, the todoist/notion/slack adapters' own ad-hoc
+`limit` parsing, ...), so the same semantic filter grew 3 slightly
+different error dialects across the workspace: some silently ignored
+bad input, some clamped, some fail-loud'd with adapter-specific message
+shapes. [`FilterCap`] / [`WireFilters`] / [`WireFilters::parse`]
+consolidate that into **one closed vocabulary** (7 known keys) and
+**one error policy** (see the table below), so every adapter that opts
+in via [`crate::infrastructure::adapter::Adapter::filter_caps`] gets
+identical parsing behavior for free.
+
+## Filter vs Addressing
+
+A `source_uri` query string carries two orthogonal kinds of keys:
+- **Filter keys** — cross-cutting, adapter-agnostic slicing/selection
+  (`limit` / `lines` / `tail` / `tail_n` / `since` / `until` / `query`).
+  This module owns their grammar and error policy.
+- **Addressing keys** — adapter-specific identity/routing params
+  (`kind`, `state`, `auth`, `project_id`, ...). These stay entirely
+  inside each adapter's own parser; [`WireFilters::parse`] never
+  inspects or rejects them (see the "unknown query keys are silently
+  ignored" convention documented in
+  [`crate::infrastructure::adapter`]).
+
+## Unified error policy
+
+| condition | behavior |
+|---|---|
+| filter key absent | field stays `None` (default) |
+| value present but wrong type (`limit=abc`, `lines=x-y`, `tail_n=abc`, `tail=unknown`) | `Err` (fail loud) |
+| value well-typed but exceeds a declared cap (`limit=5000` w/ `max=Some(40)`, `tail_n=5000` w/ `n_max=1000`) | clamp to the cap + `tracing::warn!` |
+| `limit=0` (list-shaped filter with no useful semantics for zero) | `Err` |
+| `lines=FROM-TO` with `FROM > TO`, or `FROM == 0` (1-origin violation) | `Err` |
+| filter key present in the URI but not declared in `caps` | `Err` ("not supported by this adapter") |
+
+## Types
+
+- `FilterCap` — A cross-cutting filter capability an [`Adapter`](crate::infrastructure::adapter::Adapter)
+- `TailSpec` — Tail-slicing variant for [`WireFilters::tail`] (promoted from the
+- `WireFilters` — Parsed cross-cutting filters for one `source_uri` fetch, produced by
 
 
 <!-- persona_wire_core/infrastructure__projection.md -->
@@ -3495,7 +3574,7 @@ ACL Facade 観点:
 
 
 <!-- persona_wire_credentials/index.md -->
-# persona-wire-credentials 0.12.1
+# persona-wire-credentials 0.14.0
 
 Provider-chain credential resolution for persona-wire Adapters
 (`persona-wire-credentials`).
@@ -3545,7 +3624,7 @@ a token.
 
 
 <!-- persona_wire_mcp/index.md -->
-# persona-wire-mcp 0.12.1
+# persona-wire-mcp 0.14.0
 
 persona-wire MCP server library — the transport layer that wraps
 [`persona_wire_core`] for consumption by MCP clients (Claude Code,
@@ -3574,7 +3653,7 @@ the operator's on-disk DB and hand it to `serve_stdio`.
 
 
 <!-- persona_wire_transport_http/index.md -->
-# persona-wire-transport-http 0.12.1
+# persona-wire-transport-http 0.14.0
 
 Shared HTTP transport for persona-wire Adapters (`persona-wire-transport-http`).
 

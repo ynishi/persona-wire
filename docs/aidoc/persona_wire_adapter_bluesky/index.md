@@ -1,4 +1,4 @@
-# persona-wire-adapter-bluesky 0.12.1
+# persona-wire-adapter-bluesky 0.14.0
 
 persona-wire Adapter for Bluesky (scheme `bluesky://`).
 

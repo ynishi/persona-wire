@@ -14,7 +14,7 @@
 //! - path = `/projections` (現状唯一の resource、 将来分岐余地)
 //! - query = (なし、 将来 `?axis=<name>` 等の subset selection を carry)
 //!
-//! 例: `persona-pack://dolly/projections`
+//! 例: `persona-pack://bob/projections`
 //!
 //! ## Wire 側が定義する return JSON shape (ACL boundary)
 //!
@@ -209,13 +209,13 @@ mod tests {
     async fn fetch_with_real_pack_extracts_overlay_table() {
         use std::fs;
         let tmp = tempfile::tempdir().unwrap();
-        let persona_id = "shi";
+        let persona_id = "alice";
         let persona_dir = tmp.path().join(persona_id);
         fs::create_dir_all(&persona_dir).unwrap();
         let toml = r#"
 [meta]
-id = "shi"
-name = "shi"
+id = "alice"
+name = "alice"
 origin = "hand"
 
 [prompt]

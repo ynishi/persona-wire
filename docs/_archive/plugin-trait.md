@@ -184,7 +184,7 @@ P3a Phase 1 (本 land) は trait + registry skeleton のみ。 NamedProjection s
 
 ```jsonc
 {
-  "id": "shi_workflow_context",
+  "id": "alice_workflow_context",
   "spec_ref": "...",
   "template": "Hello {{persona.name}}, today: {{trigger.name}}",
   "template_engine": "handlebars",   // ← Phase 2 新規 (省略時 "handlebars")

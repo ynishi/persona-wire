@@ -166,15 +166,15 @@ mod tests {
 
     #[test]
     fn parses_full_uri() {
-        let u = WireUri::parse("persona-pack://dolly/projections?axis=active#frag").unwrap();
+        let u = WireUri::parse("persona-pack://bob/projections?axis=active#frag").unwrap();
         assert_eq!(u.scheme(), "persona-pack");
-        assert_eq!(u.host(), Some("dolly"));
+        assert_eq!(u.host(), Some("bob"));
         assert_eq!(u.path(), "/projections");
         assert_eq!(u.query_get("axis"), Some("active"));
         assert_eq!(u.fragment(), Some("frag"));
         assert_eq!(
             u.as_raw(),
-            "persona-pack://dolly/projections?axis=active#frag"
+            "persona-pack://bob/projections?axis=active#frag"
         );
     }
 
@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn parses_host_only() {
-        let u = WireUri::parse("persona-pack://dolly").unwrap();
-        assert_eq!(u.host(), Some("dolly"));
+        let u = WireUri::parse("persona-pack://bob").unwrap();
+        assert_eq!(u.host(), Some("bob"));
         assert_eq!(u.path(), "");
     }
 

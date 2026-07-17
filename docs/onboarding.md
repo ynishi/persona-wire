@@ -431,8 +431,8 @@ The mini-app installation owns two alias storages:
   a scope across all tables**, so multiple tables sharing the same
   alias name in the same scope is rejected with `ALIAS_ALREADY_EXISTS`.
   Use a `<table>_for_<persona>` / `<persona>_<purpose>` convention
-  to avoid collisions (the mailbox / friend_map smoke uses
-  `for_shi` / `friend_for_shi`).
+  to avoid collisions (the mailbox / contact_map smoke uses
+  `for_alice` / `friend_for_alice`).
 - **per-table** (`<base>/<table>/<table>.db` → `_aliases`): legacy
   layout. Still resolved via fallback when the legacy URI form
   (`?scope=` omitted) does not find the alias in the User-scope
@@ -489,18 +489,18 @@ mini-app://<table>?alias=<name>[&<k>=<v>]*[&limit=<n>][&scope=<scope>][&root=<di
 ```jsonc
 // 1. Register the alias in global storage.
 // mcp__mini-app__alias_create({
-//   table: "mailbox", name: "for_shi", scope: "user",
-//   filter: { "type": "eq", "field": "to", "value": "shi" }, limit: 30
+//   table: "mailbox", name: "for_alice", scope: "user",
+//   filter: { "type": "eq", "field": "to", "value": "alice" }, limit: 30
 // })
 
 // 2. Reference it from a wiring entry. `?scope=user` is optional —
 //    the legacy URI form (no `?scope=`) falls back to global first.
-{ "name": "shi.mailbox",
+{ "name": "alice.mailbox",
   "type": "outline_node",
   "metadata": {
-    "persona":    "shi",
+    "persona":    "alice",
     "axis":       "mailbox",
-    "source_uri": "mini-app://mailbox?alias=for_shi"
+    "source_uri": "mini-app://mailbox?alias=for_alice"
   } }
 ```
 
@@ -1022,7 +1022,7 @@ collapses to three steps:
 only at close, full set at wake), so the same wiring serves both ends
 of the session without skill-side branching. `projection_exclude_names`
 (v0.9.0+) covers the opposite case — render every wired axis except
-the noisy ones (e.g. `["tick_log", "friend_map"]` at work-mode wake,
+the noisy ones (e.g. `["tick_log", "contact_map"]` at work-mode wake,
 without enumerating the full remainder on the include side).
 
 ## 7. Add another persona
@@ -1051,19 +1051,19 @@ description = "Minimal persona + spec + projection scaffold."
 # parses successfully and dispatches as a no-op.
 
 [[nodes]]
-name = "shi"
+name = "alice"
 node_type = "persona"
-metadata = { owner = "ytk", role = "companion" }
+metadata = { owner = "owner_a", role = "companion" }
 
 [[edges]]
-from_name = "shi"     # resolves against same-bundle nodes first, then graph
-to_name   = "dolly"
+from_name = "alice"     # resolves against same-bundle nodes first, then graph
+to_name   = "bob"
 edge_type = "routes_to"
 
 [[specs]]
 name = "active_personas"
 spec = { TypeIs = "persona" }                       # externally-tagged enum
-# spec = { MetadataEq = { path = "owner", value = "ytk" } }
+# spec = { MetadataEq = { path = "owner", value = "owner_a" } }
 # spec = { And = [ { TypeIs = "persona" }, { Not = { TypeIs = "channel" } } ] }
 
 [[projections]]
@@ -1073,17 +1073,17 @@ template = "## Personas\n{{#each nodes}}- {{name}}\n{{/each}}"
 target_form = "prompt"                              # prompt | markdown | json | ascii
 
 [[wirings]]
-persona_id = "shi"
+persona_id = "alice"
 slot = "mailbox"
-source_uri = "mini-app://mailbox?alias=for_shi"
+source_uri = "mini-app://mailbox?alias=for_alice"
 projection_ref = "personas_overview"                # optional — stored as
                                                     # metadata.projection_ref; the render
                                                     # path resolves it in preference to the
                                                     # <persona>.section.<slot> convention (§2)
 
 [[workflows]]
-id = "shi-wake"
-persona_id = "shi"
+id = "alice-wake"
+persona_id = "alice"
 trigger = { kind = "on_demand" }                    # or { kind = "on_event", event = "..." }
 action = { kind = "no_op" }                         # or { kind = "emit_projection", projection_names = ["..."] }
 ```
@@ -1114,8 +1114,8 @@ persona-wire bundle delete --ref quickstart             # install history retain
 Name collisions are resolved per `--mode`:
 
 - `increment` (default) — non-destructive auto-suffix. An entity named
-  `shi` collides with the existing `shi` row → installs as `shi-1`. A
-  second re-install becomes `shi-2`. Internal references inside the
+  `alice` collides with the existing `alice` row → installs as `alice-1`. A
+  second re-install becomes `alice-2`. Internal references inside the
   same manifest (`projections.spec_ref`, `edges.from_name` /
   `to_name`) are rewritten to the post-rename names so re-installing
   never produces a half-broken graph.
@@ -1141,7 +1141,7 @@ by the CLI):
   "installed": [
     { "kind": "spec",       "original_name": "active_personas",   "final_name": "active_personas",   "id": "..." },
     { "kind": "projection", "original_name": "personas_overview", "final_name": "personas_overview", "id": "..." },
-    { "kind": "node",       "original_name": "shi",               "final_name": "shi",               "id": "..." }
+    { "kind": "node",       "original_name": "alice",             "final_name": "alice",             "id": "..." }
   ],
   "skipped": [],
   "errors":  []

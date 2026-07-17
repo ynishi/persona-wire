@@ -124,8 +124,8 @@ async fn e2e_plain_eq_alias_renders_active_rows() {
 }
 
 // ---------------------------------------------------------------------------
-// E2E 2 — template alias + params: `?alias=for_to&to=mia` should render
-// MiniJinja-resolved `{"type":"eq","field":"to","value":"mia"}`.
+// E2E 2 — template alias + params: `?alias=for_to&to=carol` should render
+// MiniJinja-resolved `{"type":"eq","field":"to","value":"carol"}`.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]
@@ -138,9 +138,9 @@ async fn e2e_template_alias_renders_with_params() {
         table,
         &schema_for(table, TO_BODY_SCHEMA),
         vec![
-            json!({"to": "mia", "body": "M1"}),
-            json!({"to": "shi", "body": "S1"}),
-            json!({"to": "mia", "body": "M2"}),
+            json!({"to": "carol", "body": "M1"}),
+            json!({"to": "alice", "body": "S1"}),
+            json!({"to": "carol", "body": "M2"}),
         ],
         "for_to",
         r#"{"type":"eq","field":"to","value":"{{ to }}"}"#,
@@ -154,9 +154,9 @@ async fn e2e_template_alias_renders_with_params() {
         &mut client,
         persona_id,
         "inbox",
-        // `?to=mia` 以外の query は params 拡張なし。 wire の URI parse が
+        // `?to=carol` 以外の query は params 拡張なし。 wire の URI parse が
         // alias / limit reserved key 以外を params に集めて MiniJinja に渡す。
-        &format!("mini-app://{table}?alias=for_to&to=mia"),
+        &format!("mini-app://{table}?alias=for_to&to=carol"),
         &each_body_template("Inbox"),
     );
 
@@ -357,11 +357,11 @@ async fn e2e_multi_slot_alias_and_plain_coexist() {
         table_inbox,
         &schema_for(table_inbox, TO_BODY_SCHEMA),
         vec![
-            json!({"to": "mia", "body": "MX1"}),
-            json!({"to": "shi", "body": "SX1"}),
+            json!({"to": "carol", "body": "MX1"}),
+            json!({"to": "alice", "body": "SX1"}),
         ],
-        "for_mia",
-        r#"{"type":"eq","field":"to","value":"mia"}"#,
+        "for_carol",
+        r#"{"type":"eq","field":"to","value":"carol"}"#,
         None,
     )
     .await;
@@ -380,7 +380,7 @@ async fn e2e_multi_slot_alias_and_plain_coexist() {
         &mut client,
         persona_id,
         "inbox",
-        &format!("mini-app://{table_inbox}?alias=for_mia"),
+        &format!("mini-app://{table_inbox}?alias=for_carol"),
         &each_body_template("Inbox"),
     );
 

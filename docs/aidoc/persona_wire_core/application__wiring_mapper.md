@@ -34,14 +34,17 @@ of the bare `"axis"` literal.
 
 Round-trip property: `node_to_wiring(wiring_to_node(w, opts)?)? == w`
 for any [`Wiring`] constructed through this module's parsers (modulo the
-`projection_ref` carry, which is stored separately at the
-`ProjectionRegistry` boundary, not on the wiring Node).
+`projection_ref` carry — resolved at the `ProjectionRegistry` boundary
+via the naming convention, or overridden by the optional
+`metadata.projection_ref` key when a wiring binds a projection
+explicitly; see [`META_PROJECTION_REF`]).
 
 ## Functions
 
 - `extract_auth` — Borrow the `auth` field (credential reference key, never a secret) as
 - `extract_maintenance_exempt` — Read the `maintenance_exempt` flag, defaulting to `false` when missing
 - `extract_persona` — Borrow the `persona` field as `&str` if present and a string.
+- `extract_projection_ref` — Borrow the explicit `projection_ref` binding as `&str` if present and a
 - `extract_slot` — Borrow the slot field (legacy key `axis`) as `&str` if present and a
 - `extract_slot_typed` — Validate-and-extract the slot as a typed [`Slot`] VO. Returns `Ok(None)`
 - `extract_source_uri` — Borrow the `source_uri` field as `&str` if present and a string.
@@ -53,6 +56,7 @@ for any [`Wiring`] constructed through this module's parsers (modulo the
 - `META_AUTH` — `metadata.auth` key — optional credential **reference key** (never a
 - `META_MAINTENANCE_EXEMPT` — `metadata.maintenance_exempt` key — opt-out flag for session-cyclic
 - `META_PERSONA` — `metadata.persona` key (PersonaId, natural composite key part 1).
+- `META_PROJECTION_REF` — `metadata.projection_ref` key — optional explicit NamedProjection binding.
 - `META_SLOT` — `metadata.axis` key — legacy storage name for the [`Slot`] (natural
 - `META_SOURCE_URI` — `metadata.source_uri` key ([`Source`] URI).
 - `WIRING_TYPE` — Storage `Node.r#type` literal for a Wiring entry. Single SoT — internal

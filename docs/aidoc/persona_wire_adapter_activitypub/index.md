@@ -1,4 +1,4 @@
-# persona-wire-adapter-activitypub 0.12.1
+# persona-wire-adapter-activitypub 0.14.0
 
 persona-wire Adapter for the Fediverse (scheme `activitypub://`).
 

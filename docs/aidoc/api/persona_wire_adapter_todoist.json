@@ -1,6 +1,6 @@
 {
   "crate": "persona-wire-adapter-todoist",
-  "version": "0.12.1",
+  "version": "0.14.0",
   "items": [
     {
       "path": "persona_wire_adapter_todoist::API_BASE",

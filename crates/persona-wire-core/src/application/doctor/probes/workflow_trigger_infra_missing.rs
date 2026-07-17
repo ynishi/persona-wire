@@ -2,8 +2,8 @@
 //! または kind=on_event で event 文字列なし (error)。
 //!
 //! design.md §7 entry。 「受け手不在 / 永遠未 fire」 の構造的検出。
-//! NOTE: `on_event` の hook 実在検査 (agent-profiles 側の登録) は本 Probe
-//! scope 外、 将来 carry。 ここでは event 文字列の完備性のみ。
+//! NOTE: `on_event` の hook 実在検査 (external hook registration 側) は本
+//! Probe scope 外、 将来 carry。 ここでは event 文字列の完備性のみ。
 
 use crate::application::doctor::finding::{Axis, Finding, Kind, Location, Severity};
 use crate::application::doctor::probe::{FindingSink, Probe, ProbeCtx};
