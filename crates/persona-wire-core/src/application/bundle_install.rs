@@ -950,10 +950,10 @@ projection_ref = "news_overview"
         // Regression test for issue e8b444a6 — v0.8.0 dropped the
         // top-level `maintenance_exempt = true` value at TOML
         // deserialize boundary because the WiringEntry struct did not
-        // declare the field. Misaki caught it during the
-        // carol.anchor_files configuration round-trip
-        // (`wire_context_get` showed `maintenance_exempt: false` after
-        // a bundle install that explicitly set it true).
+        // declare the field. Caught during the carol.anchor_files
+        // configuration round-trip (`wire_context_get` showed
+        // `maintenance_exempt: false` after a bundle install that
+        // explicitly set it true).
         let s = setup();
         let body = r#"
 [[wirings]]
