@@ -172,10 +172,12 @@ always single-row.
 - `file://<path>` or `file:<path>` — `std::fs::read`. `~/` is expanded.
   Directory paths return the newest mtime child (handy for
   `handoff/YYYY-MM-DD.md` patterns).
-- `obsidian:///<vault-root>/<note>[?frontmatter={on|off}&links={off|edge}]` —
+- `obsidian:///<vault-root>/<note>[?frontmatter={on|off}&links={off|edge}][&lines=FROM-TO]` —
   reads a Markdown note from a local Obsidian vault directory via `tokio::fs`,
   parses YAML / TOML frontmatter via `gray_matter`, and optionally extracts
   `[[wiki-link]]` references when `?links=edge` is set (default `off`).
+  `?lines=FROM-TO` (1-origin inclusive) slices the returned `body` after the
+  frontmatter split; wiki-links are extracted from the sliced view.
   Returns `{ vault_path, note_path, frontmatter, body, wiki_links? }`.
   Example: `obsidian:////Users/me/vault/daily.md?frontmatter=on&links=edge`.
 - `sqlite://<path>[?query=<SQL>|?table=<name>][&limit=N]` — read-only
@@ -261,7 +263,9 @@ always single-row.
   page / database via *Add connections* in Notion. `limit` is capped
   at 100.
 - `slack://channels[?types=..][&limit=N][&exclude_archived=true|false]` /
-  `slack://history/<channel_id>[?limit=N][&oldest=<ts>][&latest=<ts>]` /
+  `slack://history/<channel_id>[?limit=N][&since=<ts>][&until=<ts>]` (legacy
+  spellings `&oldest=` / `&latest=` stay accepted; mixing a key with its
+  legacy twin fails loud) /
   `slack://user/<user_id>` — fetches conversation lists, channel
   history, or user info via the Slack Web API. Bearer auth (a bot
   token, `xoxb-...`) is mandatory and sent via the Authorization

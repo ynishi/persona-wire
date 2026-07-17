@@ -6,7 +6,7 @@
 //! ## URI form
 //!
 //! ```text
-//! obsidian:///<vault-root>/<note>[?frontmatter={on|off}&links={off|edge}]
+//! obsidian:///<vault-root>/<note>[?frontmatter={on|off}&links={off|edge}][&lines=FROM-TO]
 //! ```
 //!
 //! - `<vault-root>` — path to the Obsidian vault directory (absolute or `~/`-prefixed)
@@ -32,6 +32,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use gray_matter::{engine::YAML, Matter};
+use persona_wire_core::infrastructure::filter::{FilterCap, WireFilters};
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
 use persona_wire_core::{WireError, WireResult};
 use serde::Serialize;
@@ -357,7 +358,15 @@ impl Adapter for ObsidianAdapter {
         "obsidian"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::LineRange]
+    }
+
     async fn fetch(&self, uri: &WireUri) -> WireResult<Value> {
+        // Unified filter vocabulary gate (GH #6 Phase 3): `?lines=FROM-TO`
+        // slices the note body via the shared text engine. `?frontmatter=`
+        // / `?links=` stay adapter-owned addressing keys.
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
         let spec = parse_obsidian_uri(uri.as_raw())?;
         let full_path = spec.vault_root.join(&spec.note_path);
 
@@ -374,6 +383,11 @@ impl Adapter for ObsidianAdapter {
             (Value::Null, raw)
         };
 
+        // Slice the body AFTER the frontmatter split — `?lines=` addresses
+        // the markdown body a consumer reads, not the raw file (frontmatter
+        // stays whole in its own field either way).
+        let body = filters.apply_to_text(&body);
+
         let mut result = json!({
             "vault_path": spec.vault_root.to_string_lossy(),
             "note_path": spec.note_path.to_string_lossy(),
@@ -381,7 +395,9 @@ impl Adapter for ObsidianAdapter {
             "body": body,
         });
 
-        // Add wiki_links only when ?links=edge is specified (default: field omitted).
+        // Add wiki_links only when ?links=edge is specified (default: field
+        // omitted). Links are extracted from the (possibly sliced) returned
+        // body so the edge list matches what the consumer actually sees.
         if spec.extract_wiki_links {
             let wiki_links = extract_wiki_links_from_body(result["body"].as_str().unwrap_or(""));
             result["wiki_links"] =
@@ -468,6 +484,82 @@ mod tests {
         assert!(v["frontmatter"].is_null(), "frontmatter should be null");
         let body = v["body"].as_str().unwrap();
         assert!(body.contains("No frontmatter here."));
+    }
+
+    // ---- ?lines= (FilterCap::LineRange, GH #6 Phase 3) ----
+
+    /// `?lines=FROM-TO` slices the markdown body (1-origin inclusive),
+    /// leaving frontmatter whole in its own field.
+    #[tokio::test]
+    async fn fetch_lines_slices_body_after_frontmatter_split() {
+        let dir = tempfile::tempdir().unwrap();
+        write_note(
+            dir.path(),
+            "sliced.md",
+            "---\ntitle: T\n---\nl1\nl2\nl3\nl4\nl5\n",
+        );
+        let v = ObsidianAdapter
+            .fetch(&wire_uri(&make_uri_query(
+                dir.path(),
+                "sliced.md",
+                "lines=2-4",
+            )))
+            .await
+            .unwrap();
+        assert_eq!(v["frontmatter"]["title"], "T", "frontmatter stays whole");
+        assert_eq!(v["body"], "l2\nl3\nl4");
+    }
+
+    /// `?links=edge` extracts wiki-links from the sliced body — the edge
+    /// list matches the returned view, not the full note.
+    #[tokio::test]
+    async fn fetch_lines_wiki_links_extracted_from_sliced_body() {
+        let dir = tempfile::tempdir().unwrap();
+        write_note(
+            dir.path(),
+            "linked.md",
+            "[[Kept Link]]\nplain\n[[Dropped Link]]\n",
+        );
+        let v = ObsidianAdapter
+            .fetch(&wire_uri(&make_uri_query(
+                dir.path(),
+                "linked.md",
+                "lines=1-2&links=edge",
+            )))
+            .await
+            .unwrap();
+        let links = v["wiki_links"].as_array().unwrap();
+        assert_eq!(links.len(), 1, "links: {links:?}");
+        assert_eq!(links[0]["target"], "Kept Link");
+    }
+
+    /// Undeclared vocabulary keys fail loud (unified filter gate) — the
+    /// adapter declares LineRange only, so `?limit=` is rejected.
+    #[tokio::test]
+    async fn fetch_undeclared_filter_key_fails_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        write_note(dir.path(), "note.md", "body\n");
+        let err = ObsidianAdapter
+            .fetch(&wire_uri(&make_uri_query(dir.path(), "note.md", "limit=3")))
+            .await
+            .expect_err("undeclared ?limit= must be rejected");
+        assert!(err.to_string().contains("limit"), "err: {err}");
+    }
+
+    /// Malformed `?lines=` value fails loud with the shared error shape.
+    #[tokio::test]
+    async fn fetch_malformed_lines_value_fails_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        write_note(dir.path(), "note.md", "body\n");
+        let err = ObsidianAdapter
+            .fetch(&wire_uri(&make_uri_query(
+                dir.path(),
+                "note.md",
+                "lines=abc",
+            )))
+            .await
+            .expect_err("malformed lines must be rejected");
+        assert!(err.to_string().contains("lines"), "err: {err}");
     }
 
     /// (d) Custom key in frontmatter is accessible in the returned JSON.

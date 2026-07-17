@@ -120,6 +120,24 @@ pub enum TailSpec {
 }
 
 impl WireFilters {
+    /// Applies the document-shaped text filters (`line_range` / `tail`) to
+    /// `body` and returns the resulting substring. `line_range` takes
+    /// precedence over `tail` (parse validates the two are mutually
+    /// exclusive); neither present returns `body` unchanged
+    /// (backward-compat whole-body fetch).
+    ///
+    /// Shared text-slicing engine for every adapter declaring
+    /// [`FilterCap::LineRange`] / [`FilterCap::Tail`] — promoted from the
+    /// former `FileAdapter`-private helpers so document adapters (file /
+    /// obsidian / future ones) share one semantics (GH #6 Phase 3).
+    pub fn apply_to_text(&self, body: &str) -> String {
+        if let Some((from, to)) = self.line_range {
+            apply_lines(body, from, to)
+        } else {
+            apply_tail(body, self.tail.as_ref())
+        }
+    }
+
     /// Parses the closed filter-key vocabulary out of `uri`'s query
     /// params, honoring only the capabilities declared in `caps`. See the
     /// module-level error policy table for the exact per-key behavior.
@@ -292,6 +310,54 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Applies `tail` to `body` and returns the resulting substring.
+///
+/// - `None`                    — returns `body` unchanged
+/// - [`TailSpec::LastSection`] — returns from the last `## ` h2 heading line to the end
+/// - [`TailSpec::LastN`]       — returns the last N lines joined with `"\n"`
+fn apply_tail(body: &str, tail: Option<&TailSpec>) -> String {
+    match tail {
+        None => body.to_string(),
+        Some(TailSpec::LastSection) => {
+            let pos = last_h2_pos(body);
+            body[pos..].to_string()
+        }
+        Some(TailSpec::LastN(n)) => {
+            let lines: Vec<&str> = body.lines().collect();
+            let skip = lines.len().saturating_sub(*n);
+            lines[skip..].join("\n")
+        }
+    }
+}
+
+/// Applies `?lines=FROM-TO` (1-origin inclusive) to `body`. `to` is clamped
+/// to the total line count (graceful over-range); `from` beyond the total
+/// line count returns an empty string.
+fn apply_lines(body: &str, from: usize, to: usize) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let total = lines.len();
+    if from > total {
+        return String::new();
+    }
+    let start = from - 1;
+    let end = to.min(total);
+    lines[start..end].join("\n")
+}
+
+/// Returns the byte position of the last markdown h2 heading (a line starting
+/// with `## `) in `body`. Returns `0` when none is found (= return the whole body).
+fn last_h2_pos(body: &str) -> usize {
+    let needle = "\n## ";
+    if let Some(pos) = body.rfind(needle) {
+        // Return from the byte after `\n` (= the leading `#`)
+        return pos + 1;
+    }
+    if body.starts_with("## ") {
+        return 0;
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +382,101 @@ mod tests {
         );
         assert_eq!(FilterCap::SinceUntil.to_string(), "since-until");
         assert_eq!(FilterCap::TextQuery.to_string(), "query");
+    }
+
+    // ---- apply_to_text: shared text-slicing engine ----
+    // (moved from the FileAdapter-private helpers with the GH #6 Phase 3
+    // promotion; behavior must stay byte-identical)
+
+    #[test]
+    fn apply_to_text_no_filter_returns_body_unchanged() {
+        let body = "a\nb\nc\n";
+        assert_eq!(WireFilters::default().apply_to_text(body), body);
+    }
+
+    #[test]
+    fn apply_to_text_lines_normal_range() {
+        let f = WireFilters {
+            line_range: Some((2, 4)),
+            ..Default::default()
+        };
+        assert_eq!(f.apply_to_text("a\nb\nc\nd\ne\n"), "b\nc\nd");
+    }
+
+    #[test]
+    fn apply_to_text_lines_to_beyond_total_clamps() {
+        let f = WireFilters {
+            line_range: Some((1, 100)),
+            ..Default::default()
+        };
+        assert_eq!(f.apply_to_text("a\nb\nc\n"), "a\nb\nc");
+    }
+
+    #[test]
+    fn apply_to_text_lines_from_beyond_total_returns_empty() {
+        let f = WireFilters {
+            line_range: Some((10, 20)),
+            ..Default::default()
+        };
+        assert_eq!(f.apply_to_text("a\nb\n"), "");
+    }
+
+    #[test]
+    fn apply_to_text_tail_last_n_returns_last_lines() {
+        let f = WireFilters {
+            tail: Some(TailSpec::LastN(3)),
+            ..Default::default()
+        };
+        assert_eq!(f.apply_to_text("a\nb\nc\nd\ne\n"), "c\nd\ne");
+    }
+
+    #[test]
+    fn apply_to_text_tail_last_n_exceeding_line_count_returns_all() {
+        let f = WireFilters {
+            tail: Some(TailSpec::LastN(1000)),
+            ..Default::default()
+        };
+        assert_eq!(f.apply_to_text("x\ny\n"), "x\ny");
+    }
+
+    #[test]
+    fn apply_to_text_tail_last_section_returns_from_last_h2() {
+        let f = WireFilters {
+            tail: Some(TailSpec::LastSection),
+            ..Default::default()
+        };
+        let body = "# Title\n\n## S1\n\nContent\n\n## S2\n\nEnd\n";
+        assert!(f.apply_to_text(body).starts_with("## S2"));
+    }
+
+    #[test]
+    fn apply_to_text_tail_last_section_no_h2_returns_whole_body() {
+        let f = WireFilters {
+            tail: Some(TailSpec::LastSection),
+            ..Default::default()
+        };
+        let body = "No heading here\n";
+        assert_eq!(f.apply_to_text(body), body);
+    }
+
+    #[test]
+    fn apply_to_text_tail_last_section_h2_at_start() {
+        let f = WireFilters {
+            tail: Some(TailSpec::LastSection),
+            ..Default::default()
+        };
+        let body = "## Only\n\nContent\n";
+        assert_eq!(f.apply_to_text(body), body);
+    }
+
+    #[test]
+    fn apply_to_text_line_range_takes_precedence_over_tail() {
+        let f = WireFilters {
+            line_range: Some((1, 1)),
+            tail: Some(TailSpec::LastN(2)),
+            ..Default::default()
+        };
+        assert_eq!(f.apply_to_text("a\nb\nc\n"), "a");
     }
 
     // ---- parse: per-filter normal path ----

@@ -115,7 +115,7 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use crate::domain::error::{WireError, WireResult};
-use crate::infrastructure::filter::{FilterCap, TailSpec, WireFilters};
+use crate::infrastructure::filter::{FilterCap, WireFilters};
 use crate::infrastructure::wire_uri::WireUri;
 use async_trait::async_trait;
 
@@ -277,63 +277,12 @@ impl Adapter for FileAdapter {
 }
 
 /// Applies the parsed [`WireFilters`] to `body` and returns the resulting
-/// substring. `line_range` takes precedence over `tail` (callers validate
-/// the two are mutually exclusive before reaching here); no filter present
-/// returns `body` unchanged (backward-compat whole-body fetch).
+/// substring. Thin delegate to [`WireFilters::apply_to_text`] — the
+/// text-slicing engine moved to the shared filter module so document
+/// adapters outside this crate (obsidian / future ones) reuse the same
+/// semantics (GH #6 Phase 3).
 fn apply_filters(body: &str, filters: &WireFilters) -> String {
-    if let Some((from, to)) = filters.line_range {
-        apply_lines(body, from, to)
-    } else {
-        apply_tail(body, filters.tail.as_ref())
-    }
-}
-
-/// Applies `tail` to `body` and returns the resulting substring.
-///
-/// - `None`                          — returns `body` unchanged
-/// - [`TailSpec::LastSection`] — returns from the last `## ` h2 heading line to the end
-/// - [`TailSpec::LastN`]       — returns the last N lines joined with `"\n"`
-fn apply_tail(body: &str, tail: Option<&TailSpec>) -> String {
-    match tail {
-        None => body.to_string(),
-        Some(TailSpec::LastSection) => {
-            let pos = last_h2_pos(body);
-            body[pos..].to_string()
-        }
-        Some(TailSpec::LastN(n)) => {
-            let lines: Vec<&str> = body.lines().collect();
-            let skip = lines.len().saturating_sub(*n);
-            lines[skip..].join("\n")
-        }
-    }
-}
-
-/// Applies `?lines=FROM-TO` (1-origin inclusive) to `body`. `to` is clamped
-/// to the total line count (graceful over-range); `from` beyond the total
-/// line count returns an empty string.
-fn apply_lines(body: &str, from: usize, to: usize) -> String {
-    let lines: Vec<&str> = body.lines().collect();
-    let total = lines.len();
-    if from > total {
-        return String::new();
-    }
-    let start = from - 1;
-    let end = to.min(total);
-    lines[start..end].join("\n")
-}
-
-/// Returns the byte position of the last markdown h2 heading (a line starting
-/// with `## `) in `body`. Returns `0` when none is found (= return the whole body).
-fn last_h2_pos(body: &str) -> usize {
-    let needle = "\n## ";
-    if let Some(pos) = body.rfind(needle) {
-        // Return from the byte after `\n` (= the leading `#`)
-        return pos + 1;
-    }
-    if body.starts_with("## ") {
-        return 0;
-    }
-    0
+    filters.apply_to_text(body)
 }
 
 /// Extracts Unix epoch seconds from `std::fs::Metadata`. Returns `0` when unavailable.
@@ -426,6 +375,7 @@ fn newest_child(dir: &std::path::Path) -> WireResult<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::filter::TailSpec;
 
     // ---- helpers ----
 
@@ -657,65 +607,22 @@ mod tests {
         );
     }
 
-    // ---- unit tests: pure functions ----
+    // ---- unit tests: apply_filters delegate ----
+    // (text-slicing engine unit tests live in `infrastructure::filter`
+    // next to `WireFilters::apply_to_text` — GH #6 Phase 3 promotion)
 
     #[test]
-    fn last_h2_pos_finds_last_section() {
-        let body = "# Title\n\n## S1\n\nContent\n\n## S2\n\nEnd\n";
-        let pos = last_h2_pos(body);
-        assert!(body[pos..].starts_with("## S2"), "pos={pos}");
-    }
-
-    #[test]
-    fn last_h2_pos_no_h2_returns_zero() {
-        let body = "No heading here\n";
-        assert_eq!(last_h2_pos(body), 0);
-    }
-
-    #[test]
-    fn last_h2_pos_h2_at_start() {
-        let body = "## Only\n\nContent\n";
-        assert_eq!(last_h2_pos(body), 0);
-    }
-
-    #[test]
-    fn apply_tail_none_returns_body() {
-        let body = "a\nb\nc\n";
-        assert_eq!(apply_tail(body, None), body);
-    }
-
-    #[test]
-    fn apply_tail_last_n_returns_last_lines() {
-        let body = "a\nb\nc\nd\ne\n";
-        let result = apply_tail(body, Some(&TailSpec::LastN(3)));
-        assert_eq!(result, "c\nd\ne");
-    }
-
-    #[test]
-    fn apply_tail_last_n_returns_all_when_n_exceeds_line_count() {
-        let body = "x\ny\n";
-        let result = apply_tail(body, Some(&TailSpec::LastN(1000)));
-        assert_eq!(result, "x\ny");
-    }
-
-    // ---- apply_lines: pure function boundary checks ----
-
-    #[test]
-    fn apply_lines_normal_range() {
-        let body = "a\nb\nc\nd\ne\n";
-        assert_eq!(apply_lines(body, 2, 4), "b\nc\nd");
-    }
-
-    #[test]
-    fn apply_lines_to_beyond_total_clamps() {
-        let body = "a\nb\nc\n";
-        assert_eq!(apply_lines(body, 1, 100), "a\nb\nc");
-    }
-
-    #[test]
-    fn apply_lines_from_beyond_total_returns_empty() {
-        let body = "a\nb\n";
-        assert_eq!(apply_lines(body, 10, 20), "");
+    fn apply_filters_delegates_to_shared_engine() {
+        let filters = WireFilters {
+            line_range: Some((2, 4)),
+            ..Default::default()
+        };
+        assert_eq!(apply_filters("a\nb\nc\nd\ne\n", &filters), "b\nc\nd");
+        let tail = WireFilters {
+            tail: Some(TailSpec::LastN(2)),
+            ..Default::default()
+        };
+        assert_eq!(apply_filters("a\nb\nc\n", &tail), "b\nc");
     }
 
     // ---- R4 tests (metadata expose — main style: nested metadata object) ----

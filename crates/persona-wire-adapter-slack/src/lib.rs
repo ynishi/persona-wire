@@ -18,9 +18,12 @@
 //!
 //! ```text
 //! slack://channels[?types=public_channel|private_channel|mpim|im][&limit=N][&exclude_archived=true|false]
-//! slack://history/<channel_id>[?limit=N][&oldest=<ts>][&latest=<ts>]
+//! slack://history/<channel_id>[?limit=N][&since=<ts>][&until=<ts>]
 //! slack://user/<user_id>
 //! ```
+//!
+//! (`?oldest=<ts>` / `?latest=<ts>` remain accepted as legacy spellings of
+//! `since` / `until` — see the History bullet below.)
 //!
 //! - `host` selects the endpoint kind (`channels` / `history` / `user`); an
 //!   empty or invalid value **fails loud** — a typo here would otherwise
@@ -36,16 +39,23 @@
 //!   `channel_id`); a missing id, or any additional path segment, fails
 //!   loud (the id's own format is not further validated — a malformed id
 //!   surfaces as a normal Slack API error, e.g. `channel_not_found`).
-//!   `?oldest=<ts>` / `?latest=<ts>` (Slack Unix-seconds-with-microseconds
-//!   timestamps, e.g. `1512085950.000216`) are percent-decoded once at parse
-//!   time and passed through to the Slack API verbatim — this adapter does
-//!   not validate their format.
+//!   `?since=<ts>` / `?until=<ts>` (unified `FilterCap::SinceUntil`
+//!   vocabulary, GH #6 Phase 3) map onto Slack's `oldest` / `latest`
+//!   request params (Slack Unix-seconds-with-microseconds timestamps, e.g.
+//!   `1512085950.000216`) and are passed through to the Slack API verbatim
+//!   — this adapter does not validate their format. The legacy
+//!   adapter-owned spellings `?oldest=` / `?latest=` keep working
+//!   (percent-decoded once at parse time); supplying a vocabulary key AND
+//!   its legacy twin (`since`+`oldest`, or `until`+`latest`) is ambiguous
+//!   and fails loud.
 //! - For `kind=user`, the path must be exactly one segment (the `user_id`);
 //!   same missing/extra-segment rule as `kind=history`.
 //! - `types` / `exclude_archived` are unknown query keys for `kind=history`
 //!   / `kind=user` (not even read); `oldest` / `latest` are unknown query
-//!   keys for `kind=channels` / `kind=user` (not even read) (module docs
-//!   "URI grammar").
+//!   keys for `kind=channels` / `kind=user` (not even read), and the
+//!   vocabulary twins `since` / `until` **fail loud** outside
+//!   `kind=history` (silently ignoring a requested filter is the Phase 2
+//!   anti-pattern the unified gate removes).
 //! - `limit` caps the number of items returned (default [`DEFAULT_LIMIT`]).
 //!   A non-numeric or zero value fails loud; there is no upper bound at
 //!   parse time. [`MAX_LIMIT`] (Slack's own `conversations.list` /
@@ -233,7 +243,7 @@ impl Adapter for SlackAdapter {
     }
 
     fn filter_caps(&self) -> &'static [FilterCap] {
-        &[FilterCap::Limit { max: None }]
+        &[FilterCap::Limit { max: None }, FilterCap::SinceUntil]
     }
 
     /// Fetch `spec.kind` items, driving the `next_cursor` pagination loop
@@ -242,7 +252,7 @@ impl Adapter for SlackAdapter {
     /// output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
         let filters = WireFilters::parse(uri, self.filter_caps())?;
-        let spec = parse_slack_uri(uri, filters.limit.unwrap_or(DEFAULT_LIMIT))?;
+        let spec = parse_slack_uri(uri, &filters)?;
         let client = slack_http_client(uri)?;
         match &spec.kind {
             SlackKind::Channels => drive_channels_loop(&client, &spec).await,
@@ -320,12 +330,17 @@ struct SlackUriSpec {
 
 /// Parse a `WireUri` (already split into typed components by the registry)
 /// into a [`SlackUriSpec`]. See the module-level "URI grammar" section for
-/// the exact rules and failure conditions. Cross-cutting filters
-/// (`?limit=`) are parsed separately via [`WireFilters::parse`] and passed
-/// in as `limit`. `?oldest=` / `?latest=` are adapter-specific addressing
-/// keys (History only) and stay inline here (Phase 3 candidate for
-/// `SinceUntil` absorption).
-fn parse_slack_uri(uri: &WireUri, limit: usize) -> WireResult<SlackUriSpec> {
+/// the exact rules and failure conditions. Cross-cutting filters are parsed
+/// separately via [`WireFilters::parse`] and passed in: `limit` caps the
+/// item count; `since` / `until` (unified `FilterCap::SinceUntil` vocabulary,
+/// GH #6 Phase 3) map onto Slack's `oldest` / `latest` request params for
+/// `kind=history`. The legacy adapter-owned `?oldest=` / `?latest=` keys
+/// keep working for URI compatibility; supplying both a vocabulary key and
+/// its legacy twin (`since`+`oldest`, or `until`+`latest`) is ambiguous and
+/// fails loud, and `since` / `until` on non-history kinds fails loud (the
+/// upstream endpoints have no time-range concept there).
+fn parse_slack_uri(uri: &WireUri, filters: &WireFilters) -> WireResult<SlackUriSpec> {
+    let limit = filters.limit.unwrap_or(DEFAULT_LIMIT);
     let kind = match uri.host() {
         Some("channels") => {
             let path = uri.path();
@@ -353,29 +368,39 @@ fn parse_slack_uri(uri: &WireUri, limit: usize) -> WireResult<SlackUriSpec> {
     };
 
     // `types` / `exclude_archived` are unknown query keys for kinds other
-    // than Channels; `oldest` / `latest` are unknown query keys for kinds
-    // other than History. Neither is even read outside its owning kind
-    // (module docs "URI grammar").
+    // than Channels; `oldest` / `latest` (and their unified vocabulary
+    // twins `since` / `until`) only make sense for History. Neither is
+    // even read outside its owning kind (module docs "URI grammar").
     let (types, exclude_archived, oldest, latest) = match &kind {
-        SlackKind::Channels => {
-            let types = parse_types(uri.query_get("types"))?;
-            let exclude_archived = parse_exclude_archived(uri.query_get("exclude_archived"))?;
-            (Some(types), Some(exclude_archived), None, None)
+        SlackKind::Channels | SlackKind::User(_) => {
+            reject_since_until_outside_history(&kind, filters)?;
+            match &kind {
+                SlackKind::Channels => {
+                    let types = parse_types(uri.query_get("types"))?;
+                    let exclude_archived =
+                        parse_exclude_archived(uri.query_get("exclude_archived"))?;
+                    (Some(types), Some(exclude_archived), None, None)
+                }
+                _ => (None, None, None, None),
+            }
         }
         SlackKind::History(_) => {
-            let oldest = uri.query_get("oldest").map(|s| {
+            let legacy_oldest = uri.query_get("oldest").map(|s| {
                 percent_encoding::percent_decode_str(s)
                     .decode_utf8_lossy()
                     .into_owned()
             });
-            let latest = uri.query_get("latest").map(|s| {
+            let legacy_latest = uri.query_get("latest").map(|s| {
                 percent_encoding::percent_decode_str(s)
                     .decode_utf8_lossy()
                     .into_owned()
             });
+            let oldest =
+                merge_vocab_and_legacy("since", filters.since.clone(), "oldest", legacy_oldest)?;
+            let latest =
+                merge_vocab_and_legacy("until", filters.until.clone(), "latest", legacy_latest)?;
             (None, None, oldest, latest)
         }
-        SlackKind::User(_) => (None, None, None, None),
     };
 
     Ok(SlackUriSpec {
@@ -386,6 +411,45 @@ fn parse_slack_uri(uri: &WireUri, limit: usize) -> WireResult<SlackUriSpec> {
         latest,
         limit,
     })
+}
+
+/// Merges a unified-vocabulary time bound (`since` / `until`) with its
+/// legacy adapter-owned twin (`oldest` / `latest`). Exactly-one wins;
+/// both present is ambiguous and fails loud (which value did the caller
+/// mean?); neither yields `None`.
+fn merge_vocab_and_legacy(
+    vocab_key: &str,
+    vocab: Option<String>,
+    legacy_key: &str,
+    legacy: Option<String>,
+) -> WireResult<Option<String>> {
+    match (vocab, legacy) {
+        (Some(_), Some(_)) => Err(WireError::Storage(format!(
+            "slack adapter: both ?{vocab_key}= and ?{legacy_key}= supplied — they map to the \
+             same Slack request param; pass exactly one"
+        ))),
+        (v, l) => Ok(v.or(l)),
+    }
+}
+
+/// Rejects `?since=` / `?until=` for kinds without a time-range concept
+/// (`channels` / `user`). The unified vocabulary gate accepts the keys
+/// scheme-wide (the capability is declared once per adapter), so the
+/// kind-scoped validity check lives here — silently ignoring a filter the
+/// caller asked for is the Phase 2 anti-pattern this layer removes.
+fn reject_since_until_outside_history(kind: &SlackKind, filters: &WireFilters) -> WireResult<()> {
+    if filters.since.is_some() || filters.until.is_some() {
+        let kind_label = match kind {
+            SlackKind::Channels => "channels",
+            SlackKind::User(_) => "user",
+            SlackKind::History(_) => unreachable!("history handles since/until"),
+        };
+        return Err(WireError::Storage(format!(
+            "slack adapter: ?since=/?until= are only valid for slack://history/<channel_id> \
+             (kind '{kind_label}' has no time-range concept)"
+        )));
+    }
+    Ok(())
 }
 
 /// Parses the single required path segment (the id) for `kind_label`
@@ -809,18 +873,23 @@ mod tests {
 
     // ---- parse_slack_uri ----
 
-    /// Helper: parse with the adapter's default limit (matches the pre-Phase-2
-    /// default when no `?limit=` was supplied).
+    /// Helper: parse exactly like `Adapter::fetch` does — run the real
+    /// `WireFilters::parse` gate against the adapter's declared caps, then
+    /// hand the filters to `parse_slack_uri` (so tests exercise the same
+    /// since/until plumbing as production).
     fn parse(uri: &str) -> WireResult<SlackUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_slack_uri(&wire, DEFAULT_LIMIT)
+        let filters = WireFilters::parse(&wire, SlackAdapter.filter_caps())?;
+        parse_slack_uri(&wire, &filters)
     }
 
-    /// Helper: parse with an explicit limit (simulates
+    /// Helper: parse with an explicit limit override (simulates
     /// `filters.limit = Some(n)` after `WireFilters::parse`).
     fn parse_with_limit(uri: &str, limit: usize) -> WireResult<SlackUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_slack_uri(&wire, limit)
+        let mut filters = WireFilters::parse(&wire, SlackAdapter.filter_caps())?;
+        filters.limit = Some(limit);
+        parse_slack_uri(&wire, &filters)
     }
 
     #[test]
@@ -962,6 +1031,54 @@ mod tests {
         assert_eq!(spec.latest.as_deref(), Some("1512085960.5"));
     }
 
+    // ---- ?since= / ?until= (FilterCap::SinceUntil, GH #6 Phase 3) ----
+
+    #[test]
+    fn parse_slack_uri_since_until_map_to_oldest_latest() {
+        let spec = parse("slack://history/C1?since=1512085950.000216&until=1512085960.5").unwrap();
+        assert_eq!(spec.oldest.as_deref(), Some("1512085950.000216"));
+        assert_eq!(spec.latest.as_deref(), Some("1512085960.5"));
+    }
+
+    #[test]
+    fn parse_slack_uri_since_with_legacy_oldest_is_ambiguous() {
+        let err = parse("slack://history/C1?since=1&oldest=2").expect_err("ambiguous must reject");
+        assert!(
+            err.to_string().contains("since") && err.to_string().contains("oldest"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slack_uri_until_with_legacy_latest_is_ambiguous() {
+        let err = parse("slack://history/C1?until=1&latest=2").expect_err("ambiguous must reject");
+        assert!(
+            err.to_string().contains("until") && err.to_string().contains("latest"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slack_uri_since_on_channels_fails_loud() {
+        let err = parse("slack://channels?since=1").expect_err("since on channels must reject");
+        assert!(err.to_string().contains("history"), "err: {err}");
+    }
+
+    #[test]
+    fn parse_slack_uri_until_on_user_fails_loud() {
+        let err = parse("slack://user/U1?until=2").expect_err("until on user must reject");
+        assert!(err.to_string().contains("history"), "err: {err}");
+    }
+
+    #[test]
+    fn parse_slack_uri_mixed_since_with_legacy_latest_is_allowed() {
+        // Mixing axes (since + latest) is NOT ambiguous — each bound has
+        // exactly one source.
+        let spec = parse("slack://history/C1?since=1&latest=2").unwrap();
+        assert_eq!(spec.oldest.as_deref(), Some("1"));
+        assert_eq!(spec.latest.as_deref(), Some("2"));
+    }
+
     #[test]
     fn parse_slack_uri_limit_forwarded() {
         let spec = parse_with_limit("slack://channels", 5).unwrap();
@@ -982,10 +1099,10 @@ mod tests {
     }
 
     #[test]
-    fn filter_caps_declares_limit_unbounded() {
+    fn filter_caps_declares_limit_unbounded_and_since_until() {
         assert_eq!(
             SlackAdapter.filter_caps(),
-            &[FilterCap::Limit { max: None }]
+            &[FilterCap::Limit { max: None }, FilterCap::SinceUntil]
         );
     }
 
