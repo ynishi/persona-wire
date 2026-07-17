@@ -246,3 +246,82 @@ fn bundle_skip_mode_is_idempotent_for_fixed_names() {
     assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
     assert_eq!(r.skipped.len(), 3);
 }
+
+/// A bundle `[[wirings]]` entry that binds a **non-convention**
+/// `projection_ref` must render through the referenced projection after
+/// install — the field is stored as `metadata.projection_ref` and the
+/// render path resolves it in preference to the `<persona>.section.<slot>`
+/// naming convention.
+#[tokio::test]
+async fn bundle_wiring_with_explicit_projection_ref_renders_after_install() {
+    use persona_wire_core::application::plugin_registry::PluginRegistry;
+    use persona_wire_core::application::use_cases::{wire_prompt_context, WirePromptContextInput};
+
+    let dir = std::env::temp_dir().join(format!("bundle-projref-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.md");
+    std::fs::write(&file, "bundle body").unwrap();
+
+    let body = format!(
+        r#"
+[bundle]
+name = "projref"
+version = "0.1.0"
+
+[[specs]]
+name = "any_wiring"
+spec = {{ TypeIs = "outline_node" }}
+
+[[projections]]
+name = "shared_overview"
+spec_ref = "any_wiring"
+template = "SHARED: {{{{#each entries}}}}{{{{this.fetched_data.body}}}}{{{{/each}}}}"
+target_form = "markdown"
+
+[[wirings]]
+persona_id = "gamma"
+slot = "notes"
+source_uri = "file:{}"
+projection_ref = "shared_overview"
+"#,
+        file.display()
+    );
+
+    let s = setup();
+    let reg = BundleRegistry::new(&s);
+    reg.register(
+        &BundleName::new("projref").unwrap(),
+        &BundleVersion::new("0.1.0").unwrap(),
+        None,
+        &body,
+    )
+    .unwrap();
+    let bundle = reg
+        .resolve(&BundleRef::parse("projref").unwrap())
+        .unwrap()
+        .unwrap();
+    let report = install_bundle(&bundle, ConflictMode::Increment, &s).unwrap();
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+    let storage = std::sync::Arc::new(std::sync::Mutex::new(s));
+    let registry = PluginRegistry::default_for_wire().unwrap();
+    let out = wire_prompt_context(
+        WirePromptContextInput {
+            persona_id: "gamma".into(),
+            projection_names: None,
+            projection_exclude_names: None,
+        },
+        storage,
+        &registry,
+    )
+    .await
+    .unwrap();
+    assert!(
+        out.prompt_context.contains("SHARED: bundle body"),
+        "rendered: {} / warnings: {:?}",
+        out.prompt_context,
+        out.warnings
+    );
+    assert_eq!(out.projections[0].name, "shared_overview");
+    std::fs::remove_dir_all(&dir).ok();
+}

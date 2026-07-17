@@ -447,8 +447,16 @@ fn collect_slot(
     };
     let auth = crate::application::wiring_mapper::extract_auth(&node).map(str::to_owned);
 
-    let projection_name =
-        crate::application::projection_naming::workflow_emit_projection_name(persona_id, slot);
+    // Explicit `metadata.projection_ref` wins over the naming convention —
+    // this is what lets one registered projection serve multiple personas
+    // and makes the bundle `[[wirings]].projection_ref` field functional.
+    // Absent → `<persona>.section.<slot>` convention (the common case).
+    let projection_name = match crate::application::wiring_mapper::extract_projection_ref(&node) {
+        Some(explicit) => explicit.to_owned(),
+        None => {
+            crate::application::projection_naming::workflow_emit_projection_name(persona_id, slot)
+        }
+    };
     let (base_template, base_target, base_engine, base_kind, base_config) =
         match proj_reg.get(&projection_name)? {
             Some(proj) => {
@@ -535,6 +543,7 @@ async fn render_collected_slot_async(
             serde_json::Value::Null
         }
     };
+    let fetched_is_null = fetched.is_null();
     let entries = vec![serde_json::json!({
         "wiring_entry": {
             "slot": c.slot,
@@ -559,6 +568,19 @@ async fn render_collected_slot_async(
         c.projection_config.as_ref(),
     )
     .await?;
+    // Adapter returned data but the template produced nothing — the typical
+    // cause is a field-path typo against the adapter's return shape (e.g.
+    // `fetched_data.content` vs the file adapter's `fetched_data.body`).
+    // Handlebars resolves missing paths to empty strings, so without this
+    // warning the mistake is invisible. Preview the raw shape via wire_fetch.
+    if !fetched_is_null && rendered.trim().is_empty() {
+        warnings.push(format!(
+            "slot '{}' rendered empty output despite non-null fetched_data — \
+             check the template's field paths against `wire_fetch` output \
+             (projection '{}')",
+            c.slot, c.projection_name
+        ));
+    }
     Ok(RenderedProjection {
         name: c.projection_name.clone(),
         target_form: c.target_form,
@@ -610,6 +632,298 @@ fn append_query_param(raw_uri: &str, key: &str, value: &str) -> String {
         Some(f) => format!("{merged}#{f}"),
         None => merged,
     }
+}
+
+// ---- wire_slot_register / wire_slot_delete (one-shot slot setup) ----
+
+/// Input for [`wire_slot_register`] — the minimal real information a slot
+/// needs. Everything else (node name, spec body, projection name) is derived
+/// from the `(persona_id, slot)` pair by the same conventions the render
+/// path applies.
+#[derive(Debug)]
+pub struct WireSlotRegisterInput {
+    pub persona_id: String,
+    pub slot: String,
+    pub source_uri: String,
+    /// Handlebars template rendered against the `wire_prompt_context` data
+    /// shape (`entries[].fetched_data` — preview via [`wire_fetch`]).
+    pub template: String,
+    pub target_form: TargetForm,
+    /// `Some(_)` overwrites the flag; `None` leaves an existing value alone.
+    pub maintenance_exempt: Option<bool>,
+    /// Optional credential reference key (never a secret) — stored as
+    /// `metadata.auth`, merged into the fetch URI at render time.
+    pub auth: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct WireSlotRegisterOutput {
+    /// Wiring node name (`<persona>.<slot>`).
+    pub node_name: String,
+    /// Wiring node ULID (fresh on create; preserved on upsert).
+    pub node_id: String,
+    /// `true` when the wiring node was created; `false` when an existing
+    /// node's metadata was updated in place.
+    pub node_created: bool,
+    /// Auto-registered boilerplate spec name (`<persona>.spec.<slot>`).
+    pub spec_name: String,
+    /// Registered projection name (`<persona>.section.<slot>`).
+    pub projection_name: String,
+}
+
+/// One-shot slot setup — a macro over the three registrations the onboarding
+/// guide walks through by hand (`wire_node_create` + `wire_spec_register` +
+/// `wire_projection_register`), collapsing the caller-facing surface to the
+/// five values that carry real information: persona / slot / source_uri /
+/// template / target_form.
+///
+/// Derivations (single SoT with the render path):
+/// - node name = `<persona>.<slot>` (`Wiring::storage_node_id` form)
+/// - spec name = `<persona>.spec.<slot>`, body = the standard 3-clause shape
+///   (`TypeIs(outline_node) AND persona AND axis`)
+/// - projection name = `<persona>.section.<slot>`
+///   (`projection_naming::workflow_emit_projection_name`)
+///
+/// Upsert semantics: the spec / projection registries already upsert by
+/// name; the wiring node is matched by name and its canonical metadata keys
+/// are merged in place (ULID preserved, passthrough keys kept). Re-invoking
+/// with changed values tunes the slot without a delete + recreate dance.
+pub fn wire_slot_register(
+    input: WireSlotRegisterInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireSlotRegisterOutput> {
+    use crate::application::wiring_mapper;
+    use crate::domain::entity::{PersonaId, Slot, Source};
+
+    // VO validation up front — fail before any write.
+    let persona = PersonaId::new(input.persona_id.clone())?;
+    let slot = Slot::new(input.slot.clone())?;
+    let source = Source::new(input.source_uri.clone())?;
+
+    let node_name = format!("{}.{}", persona.as_str(), slot.as_str());
+    let spec_name = format!("{}.spec.{}", persona.as_str(), slot.as_str());
+    let projection_name = crate::application::projection_naming::workflow_emit_projection_name(
+        persona.as_str(),
+        slot.as_str(),
+    );
+
+    // 1) Wiring node — upsert by name (merge canonical keys, keep the rest).
+    let mut extras = serde_json::Map::new();
+    if let Some(flag) = input.maintenance_exempt {
+        extras.insert(
+            wiring_mapper::META_MAINTENANCE_EXEMPT.to_string(),
+            serde_json::Value::Bool(flag),
+        );
+    }
+    if let Some(auth) = &input.auth {
+        extras.insert(
+            wiring_mapper::META_AUTH.to_string(),
+            serde_json::Value::String(auth.clone()),
+        );
+    }
+    let canonical = wiring_mapper::wiring_metadata_object(&persona, &slot, &source, Some(extras));
+
+    let (node_id, node_created) = match storage.get_node_by_name(&node_name)? {
+        Some(existing) => {
+            let mut base = match existing.metadata {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
+            if let serde_json::Value::Object(patch) = &canonical {
+                for (k, v) in patch {
+                    base.insert(k.clone(), v.clone());
+                }
+            }
+            let updated =
+                storage.update_node_metadata(&existing.id, &serde_json::Value::Object(base))?;
+            if !updated {
+                return Err(WireError::Storage(format!(
+                    "wire_slot_register: node '{node_name}' vanished between read and write"
+                )));
+            }
+            (existing.id, false)
+        }
+        None => {
+            let node = Node {
+                id: crate::domain::graph::Ulid::new(),
+                name: node_name.clone(),
+                r#type: wiring_mapper::WIRING_TYPE.to_string(),
+                sot_ref: None,
+                confidence: None,
+                applicability: None,
+                last_verified_at: None,
+                review_due: None,
+                version: 1,
+                prev_id: None,
+                metadata: canonical,
+            };
+            storage.insert_node(&node)?;
+            (node.id, true)
+        }
+    };
+
+    // 2) Boilerplate spec — the standard 3-clause per-slot shape. Registered
+    //    for compatibility with the granular surface (`wire_query` /
+    //    `wire_render` / `wire_projection_register.spec_ref`); the
+    //    prompt-context hot path resolves by name convention and does not
+    //    evaluate it.
+    let spec = Specification::And(vec![
+        Specification::TypeIs(wiring_mapper::WIRING_TYPE.to_string()),
+        Specification::MetadataEq {
+            path: wiring_mapper::META_PERSONA.to_string(),
+            value: serde_json::json!(persona.as_str()),
+        },
+        Specification::MetadataEq {
+            path: wiring_mapper::META_SLOT.to_string(),
+            value: serde_json::json!(slot.as_str()),
+        },
+    ]);
+    SpecRegistry::new(storage).register(&spec_name, &spec)?;
+
+    // 3) Projection — convention name, referencing the auto spec.
+    let projection = crate::domain::entity::projection::Projection::from_parts(
+        projection_name.clone(),
+        spec_name.clone(),
+        input.template,
+        input.target_form,
+        crate::domain::entity::projection::PluginDispatch::Default,
+    )?;
+    ProjectionRegistry::new(storage).register(&projection)?;
+
+    Ok(WireSlotRegisterOutput {
+        node_name,
+        node_id: node_id.to_string(),
+        node_created,
+        spec_name,
+        projection_name,
+    })
+}
+
+#[derive(Debug)]
+pub struct WireSlotDeleteInput {
+    pub persona_id: String,
+    pub slot: String,
+}
+
+#[derive(Debug)]
+pub struct WireSlotDeleteOutput {
+    pub node_name: String,
+    pub node_deleted: bool,
+    pub spec_name: String,
+    pub spec_deleted: bool,
+    pub projection_name: String,
+    pub projection_deleted: bool,
+}
+
+/// Counterpart to [`wire_slot_register`] — removes the wiring node, the
+/// auto-registered spec, and the convention-named projection. Idempotent:
+/// missing artifacts report `false` instead of erroring.
+pub fn wire_slot_delete(
+    input: WireSlotDeleteInput,
+    storage: &SqliteStorage,
+) -> WireResult<WireSlotDeleteOutput> {
+    let node_name = format!("{}.{}", input.persona_id, input.slot);
+    let spec_name = format!("{}.spec.{}", input.persona_id, input.slot);
+    let projection_name = crate::application::projection_naming::workflow_emit_projection_name(
+        &input.persona_id,
+        &input.slot,
+    );
+
+    let node_deleted = match storage.lookup_node_id_by_name(&node_name)? {
+        Some(id) => storage.delete_node(&id)?,
+        None => false,
+    };
+    let spec_deleted = match storage.resolve_specification_id_or_name(&spec_name)? {
+        Some(id) => storage.delete_specification(&id)?,
+        None => false,
+    };
+    let projection_deleted = match storage.resolve_projection_id_or_name(&projection_name)? {
+        Some(id) => storage.delete_projection(&id)?,
+        None => false,
+    };
+
+    Ok(WireSlotDeleteOutput {
+        node_name,
+        node_deleted,
+        spec_name,
+        spec_deleted,
+        projection_name,
+        projection_deleted,
+    })
+}
+
+// ---- wire_fetch (raw adapter preview) ----
+
+/// Input for [`wire_fetch`] — either a raw `source_uri`, or a
+/// `(persona_id, slot)` pair resolving an existing wiring entry (which also
+/// applies the entry's `metadata.auth` merge, matching what the render path
+/// fetches). Exactly one of the two forms must be supplied.
+#[derive(Debug)]
+pub struct WireFetchInput {
+    pub source_uri: Option<String>,
+    pub persona_id: Option<String>,
+    pub slot: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct WireFetchOutput {
+    /// The stored / supplied URI (auth merge, when any, is not echoed —
+    /// mirrors `wiring_entry.source_uri` staying unmerged in render context).
+    pub source_uri: String,
+    /// The adapter's return value verbatim — exactly what templates see as
+    /// `entries[].fetched_data`.
+    pub fetched_data: serde_json::Value,
+}
+
+/// Raw adapter preview — routes a URI through the same `PluginRegistry`
+/// dispatch the render path uses and returns the adapter output verbatim.
+/// This closes the template-authoring loop: preview the `fetched_data`
+/// shape, then write the handlebars against it. Adapter errors fail loud
+/// (no silent `Null` fallback — unlike the render path's best-effort mode,
+/// a preview call wants to see the failure).
+pub async fn wire_fetch(
+    input: WireFetchInput,
+    storage: std::sync::Arc<std::sync::Mutex<SqliteStorage>>,
+    registry: &PluginRegistry,
+) -> WireResult<WireFetchOutput> {
+    let (stored_uri, fetch_uri) = match (&input.source_uri, &input.persona_id, &input.slot) {
+        (Some(uri), None, None) => (uri.clone(), uri.clone()),
+        (None, Some(persona), Some(slot)) => {
+            let node_name = format!("{persona}.{slot}");
+            let node = {
+                let s = storage
+                    .lock()
+                    .map_err(|_| WireError::Storage("storage mutex poisoned".to_string()))?;
+                s.get_node_by_name(&node_name)?.ok_or_else(|| {
+                    WireError::Domain(DomainError::NotFound(format!("wiring entry: {node_name}")))
+                })?
+            };
+            let source_uri = crate::application::wiring_mapper::extract_source_uri(&node)
+                .ok_or_else(|| {
+                    WireError::Domain(DomainError::InvalidMetadata(format!(
+                        "wiring entry '{node_name}' lacks metadata.source_uri"
+                    )))
+                })?
+                .to_owned();
+            let auth = crate::application::wiring_mapper::extract_auth(&node);
+            let merged = merge_auth_query(&source_uri, auth);
+            (source_uri, merged)
+        }
+        _ => {
+            return Err(WireError::Other(
+                "wire_fetch: supply either `source_uri` alone, or `persona_id` + `slot`"
+                    .to_string(),
+            ))
+        }
+    };
+
+    let (adapter, uri) = registry.route(&fetch_uri)?;
+    let fetched_data = adapter.fetch(&uri).await?;
+
+    Ok(WireFetchOutput {
+        source_uri: stored_uri,
+        fetched_data,
+    })
 }
 
 /// Iterate every registered node type and collect nodes matching `spec`.
@@ -1027,11 +1341,19 @@ fn list_persona_wirings(
         let Some(source_uri) = wiring_mapper::extract_source_uri(node) else {
             continue;
         };
-        let derived = workflow_emit_projection_name(context.persona_id().as_str(), slot);
-        let projection_ref = if registry.get(&derived)?.is_some() {
-            Some(derived)
-        } else {
-            None
+        // Explicit `metadata.projection_ref` is reported verbatim (it is what
+        // the render path will use); otherwise the convention-derived name is
+        // reported only when actually registered.
+        let projection_ref = match wiring_mapper::extract_projection_ref(node) {
+            Some(explicit) => Some(explicit.to_owned()),
+            None => {
+                let derived = workflow_emit_projection_name(context.persona_id().as_str(), slot);
+                if registry.get(&derived)?.is_some() {
+                    Some(derived)
+                } else {
+                    None
+                }
+            }
         };
         out.push(WiringSummary {
             slot: slot.to_owned(),
@@ -3187,5 +3509,463 @@ mod tests {
             .unwrap()
             .expect("wiring entry should collect");
         assert_eq!(collected.auth, None);
+    }
+
+    // ---- wire_slot_register / wire_slot_delete ----
+
+    fn slot_register_input(
+        persona: &str,
+        slot: &str,
+        uri: &str,
+        template: &str,
+    ) -> WireSlotRegisterInput {
+        WireSlotRegisterInput {
+            persona_id: persona.into(),
+            slot: slot.into(),
+            source_uri: uri.into(),
+            template: template.into(),
+            target_form: TargetForm::Markdown,
+            maintenance_exempt: None,
+            auth: None,
+        }
+    }
+
+    #[test]
+    fn wire_slot_register_creates_node_spec_and_projection() {
+        use crate::application::wiring_mapper;
+
+        let s = setup();
+        let out = wire_slot_register(
+            slot_register_input("alpha", "notes", "file:~/notes.md", "## Notes\n{{count}}"),
+            &s,
+        )
+        .unwrap();
+
+        assert_eq!(out.node_name, "alpha.notes");
+        assert!(out.node_created);
+        assert_eq!(out.spec_name, "alpha.spec.notes");
+        assert_eq!(out.projection_name, "alpha.section.notes");
+
+        let node = s.get_node_by_name("alpha.notes").unwrap().expect("node");
+        assert_eq!(wiring_mapper::extract_persona(&node), Some("alpha"));
+        assert_eq!(wiring_mapper::extract_slot(&node), Some("notes"));
+        assert_eq!(
+            wiring_mapper::extract_source_uri(&node),
+            Some("file:~/notes.md")
+        );
+
+        let spec = SpecRegistry::new(&s)
+            .get("alpha.spec.notes")
+            .unwrap()
+            .expect("spec");
+        assert!(matches!(spec, Specification::And(parts) if parts.len() == 3));
+
+        let proj = ProjectionRegistry::new(&s)
+            .get("alpha.section.notes")
+            .unwrap()
+            .expect("projection");
+        assert_eq!(proj.template().as_str(), "## Notes\n{{count}}");
+        assert_eq!(proj.spec_ref().as_str(), "alpha.spec.notes");
+    }
+
+    #[test]
+    fn wire_slot_register_upserts_in_place_preserving_node_id() {
+        use crate::application::wiring_mapper;
+
+        let s = setup();
+        let first = wire_slot_register(
+            slot_register_input("alpha", "notes", "file:~/a.md", "v1 {{count}}"),
+            &s,
+        )
+        .unwrap();
+        // Attach a passthrough metadata key to prove merge keeps it.
+        let node = s.get_node_by_name("alpha.notes").unwrap().unwrap();
+        let mut meta = node.metadata.as_object().cloned().unwrap();
+        meta.insert("custom_flag".into(), json!(true));
+        s.update_node_metadata(&node.id, &serde_json::Value::Object(meta))
+            .unwrap();
+
+        let second = wire_slot_register(
+            WireSlotRegisterInput {
+                maintenance_exempt: Some(true),
+                ..slot_register_input("alpha", "notes", "file:~/b.md", "v2 {{count}}")
+            },
+            &s,
+        )
+        .unwrap();
+
+        assert!(!second.node_created, "second call must be an upsert");
+        assert_eq!(first.node_id, second.node_id, "node ULID preserved");
+
+        let node = s.get_node_by_name("alpha.notes").unwrap().unwrap();
+        assert_eq!(
+            wiring_mapper::extract_source_uri(&node),
+            Some("file:~/b.md"),
+            "canonical key overwritten"
+        );
+        assert!(
+            wiring_mapper::extract_maintenance_exempt(&node),
+            "maintenance_exempt applied"
+        );
+        assert_eq!(
+            node.metadata.get("custom_flag"),
+            Some(&json!(true)),
+            "passthrough key kept"
+        );
+
+        let proj = ProjectionRegistry::new(&s)
+            .get("alpha.section.notes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(proj.template().as_str(), "v2 {{count}}");
+    }
+
+    #[test]
+    fn wire_slot_register_rejects_invalid_slot() {
+        let s = setup();
+        let err = wire_slot_register(slot_register_input("alpha", "a.b", "file:~/x.md", "t"), &s)
+            .expect_err("dotted slot must reject");
+        assert!(err.to_string().contains("."), "err: {err}");
+        // Nothing was written.
+        assert!(s.get_node_by_name("alpha.a.b").unwrap().is_none());
+    }
+
+    #[test]
+    fn wire_slot_delete_removes_all_three_and_is_idempotent() {
+        let s = setup();
+        wire_slot_register(
+            slot_register_input("alpha", "notes", "file:~/n.md", "{{count}}"),
+            &s,
+        )
+        .unwrap();
+
+        let del = wire_slot_delete(
+            WireSlotDeleteInput {
+                persona_id: "alpha".into(),
+                slot: "notes".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert!(del.node_deleted && del.spec_deleted && del.projection_deleted);
+        assert!(s.get_node_by_name("alpha.notes").unwrap().is_none());
+        assert!(SpecRegistry::new(&s)
+            .get("alpha.spec.notes")
+            .unwrap()
+            .is_none());
+        assert!(ProjectionRegistry::new(&s)
+            .get("alpha.section.notes")
+            .unwrap()
+            .is_none());
+
+        let again = wire_slot_delete(
+            WireSlotDeleteInput {
+                persona_id: "alpha".into(),
+                slot: "notes".into(),
+            },
+            &s,
+        )
+        .unwrap();
+        assert!(
+            !again.node_deleted && !again.spec_deleted && !again.projection_deleted,
+            "second delete reports false everywhere"
+        );
+    }
+
+    // ---- collect_slot: explicit projection_ref ----
+
+    #[test]
+    fn collect_slot_honors_explicit_projection_ref_over_convention() {
+        use crate::application::wiring_mapper;
+
+        let s = setup();
+        let mut node = bare_node("p.mailbox", wiring_mapper::WIRING_TYPE);
+        node.metadata = json!({
+            "persona": "p",
+            "axis": "mailbox",
+            "source_uri": "mini-app://mailbox",
+            "projection_ref": "shared.section.mailbox",
+        });
+        s.insert_node(&node).unwrap();
+        // Register BOTH names — the explicit ref must win.
+        register_stub_projection(&s, "p.section.mailbox");
+        register_stub_projection(&s, "shared.section.mailbox");
+
+        let proj_reg = ProjectionRegistry::new(&s);
+        let overlays = std::collections::BTreeMap::new();
+        let mut warnings = Vec::new();
+        let collected = collect_slot("mailbox", "p", &s, &proj_reg, &overlays, &mut warnings)
+            .unwrap()
+            .expect("wiring entry should collect");
+        assert_eq!(collected.projection_name, "shared.section.mailbox");
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn collect_slot_missing_explicit_projection_ref_warns_and_skips() {
+        use crate::application::wiring_mapper;
+
+        let s = setup();
+        let mut node = bare_node("p.mailbox", wiring_mapper::WIRING_TYPE);
+        node.metadata = json!({
+            "persona": "p",
+            "axis": "mailbox",
+            "source_uri": "mini-app://mailbox",
+            "projection_ref": "nowhere.section.mailbox",
+        });
+        s.insert_node(&node).unwrap();
+        // Convention name IS registered — but the explicit ref points elsewhere,
+        // so the slot must NOT silently fall back (that would rebuild the trap).
+        register_stub_projection(&s, "p.section.mailbox");
+
+        let proj_reg = ProjectionRegistry::new(&s);
+        let overlays = std::collections::BTreeMap::new();
+        let mut warnings = Vec::new();
+        let collected =
+            collect_slot("mailbox", "p", &s, &proj_reg, &overlays, &mut warnings).unwrap();
+        assert!(collected.is_none(), "slot must skip");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("nowhere.section.mailbox")),
+            "warning names the missing explicit ref: {warnings:?}"
+        );
+    }
+
+    // ---- wire_fetch ----
+
+    #[tokio::test]
+    async fn wire_fetch_returns_raw_adapter_output_for_file_uri() {
+        let dir = std::env::temp_dir().join(format!("wire-fetch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("body.md");
+        std::fs::write(&file, "hello wire_fetch").unwrap();
+
+        let s = std::sync::Arc::new(std::sync::Mutex::new(setup()));
+        let registry = default_registry();
+        let out = wire_fetch(
+            WireFetchInput {
+                source_uri: Some(format!("file:{}", file.display())),
+                persona_id: None,
+                slot: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.fetched_data["body"], json!("hello wire_fetch"));
+        assert_eq!(out.fetched_data["scheme"], json!("file"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn wire_fetch_resolves_wiring_entry_by_persona_and_slot() {
+        let dir = std::env::temp_dir().join(format!("wire-fetch-slot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.md");
+        std::fs::write(&file, "slot preview").unwrap();
+
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input(
+                "alpha",
+                "notes",
+                &format!("file:{}", file.display()),
+                "{{count}}",
+            ),
+            &storage,
+        )
+        .unwrap();
+
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = default_registry();
+        let out = wire_fetch(
+            WireFetchInput {
+                source_uri: None,
+                persona_id: Some("alpha".into()),
+                slot: Some("notes".into()),
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.fetched_data["body"], json!("slot preview"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn wire_fetch_rejects_ambiguous_or_empty_input() {
+        let s = std::sync::Arc::new(std::sync::Mutex::new(setup()));
+        let registry = default_registry();
+        let err = wire_fetch(
+            WireFetchInput {
+                source_uri: None,
+                persona_id: None,
+                slot: None,
+            },
+            s.clone(),
+            &registry,
+        )
+        .await
+        .expect_err("empty input must reject");
+        assert!(err.to_string().contains("wire_fetch"), "err: {err}");
+
+        let err = wire_fetch(
+            WireFetchInput {
+                source_uri: Some("file:~/x.md".into()),
+                persona_id: Some("alpha".into()),
+                slot: Some("notes".into()),
+            },
+            s,
+            &registry,
+        )
+        .await
+        .expect_err("both forms at once must reject");
+        assert!(err.to_string().contains("wire_fetch"), "err: {err}");
+    }
+
+    // ---- empty-render warning ----
+
+    #[tokio::test]
+    async fn wire_prompt_context_warns_on_empty_render_with_non_null_fetch() {
+        let dir = std::env::temp_dir().join(format!("wire-empty-warn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.md");
+        std::fs::write(&file, "real content").unwrap();
+
+        let storage = setup();
+        // Template references a field path that does not exist in the file
+        // adapter's return shape — renders to empty (the dogfooded mistake).
+        wire_slot_register(
+            slot_register_input(
+                "alpha",
+                "notes",
+                &format!("file:{}", file.display()),
+                "{{#each entries}}{{this.fetched_data.content}}{{/each}}",
+            ),
+            &storage,
+        )
+        .unwrap();
+
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = default_registry();
+        let out = wire_prompt_context(
+            WirePromptContextInput {
+                persona_id: "alpha".into(),
+                projection_names: None,
+                projection_exclude_names: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.warnings.iter().any(|w| w.contains("rendered empty")),
+            "warnings: {:?}",
+            out.warnings
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn wire_prompt_context_no_warning_when_template_renders_content() {
+        let dir = std::env::temp_dir().join(format!("wire-nonempty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.md");
+        std::fs::write(&file, "real content").unwrap();
+
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input(
+                "alpha",
+                "notes",
+                &format!("file:{}", file.display()),
+                "{{#each entries}}{{this.fetched_data.body}}{{/each}}",
+            ),
+            &storage,
+        )
+        .unwrap();
+
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = default_registry();
+        let out = wire_prompt_context(
+            WirePromptContextInput {
+                persona_id: "alpha".into(),
+                projection_names: None,
+                projection_exclude_names: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.warnings.is_empty(),
+            "no warnings expected: {:?}",
+            out.warnings
+        );
+        assert!(out.prompt_context.contains("real content"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- end-to-end: explicit projection_ref renders through shared projection ----
+
+    #[tokio::test]
+    async fn wire_prompt_context_renders_through_explicit_projection_ref() {
+        use crate::application::wiring_mapper;
+        use crate::domain::entity::projection::{PluginDispatch, Projection};
+
+        let dir = std::env::temp_dir().join(format!("wire-projref-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shared.md");
+        std::fs::write(&file, "shared body").unwrap();
+
+        let storage = setup();
+        // A shared, non-convention projection…
+        ProjectionRegistry::new(&storage)
+            .register(
+                &Projection::from_parts(
+                    "shared.section.notes",
+                    "unused_spec_ref",
+                    "SHARED: {{#each entries}}{{this.fetched_data.body}}{{/each}}",
+                    TargetForm::Markdown,
+                    PluginDispatch::Default,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        // …bound explicitly from the wiring entry (bundle [[wirings]] shape).
+        let mut node = bare_node("beta.notes", wiring_mapper::WIRING_TYPE);
+        node.metadata = json!({
+            "persona": "beta",
+            "axis": "notes",
+            "source_uri": format!("file:{}", file.display()),
+            "projection_ref": "shared.section.notes",
+        });
+        storage.insert_node(&node).unwrap();
+
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = default_registry();
+        let out = wire_prompt_context(
+            WirePromptContextInput {
+                persona_id: "beta".into(),
+                projection_names: None,
+                projection_exclude_names: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.prompt_context.contains("SHARED: shared body"),
+            "rendered: {}",
+            out.prompt_context
+        );
+        assert_eq!(out.projections[0].name, "shared.section.notes");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

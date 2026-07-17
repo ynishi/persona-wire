@@ -51,12 +51,14 @@ use persona_wire_core::application::projection_registry::ProjectionRegistry;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_context_get, wire_doctor, wire_edge_delete, wire_edges_create_batch,
-    wire_init, wire_node_delete, wire_node_update, wire_nodes_create_batch, wire_projection_delete,
-    wire_prompt_context, wire_query, wire_render, wire_spec_delete, wire_workflow_fire,
-    wire_workflow_list, wire_workflow_register, WireCloseInput, WireContextGetInput,
-    WireDeleteInput, WireEdgesCreateBatchInput, WireInitInput, WireNodeUpdateInput,
+    wire_fetch, wire_init, wire_node_delete, wire_node_update, wire_nodes_create_batch,
+    wire_projection_delete, wire_prompt_context, wire_query, wire_render, wire_slot_delete,
+    wire_slot_register, wire_spec_delete, wire_workflow_fire, wire_workflow_list,
+    wire_workflow_register, WireCloseInput, WireContextGetInput, WireDeleteInput,
+    WireEdgesCreateBatchInput, WireFetchInput, WireInitInput, WireNodeUpdateInput,
     WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
-    WireRenderInput, WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
+    WireRenderInput, WireSlotDeleteInput, WireSlotRegisterInput, WireWorkflowFireInput,
+    WireWorkflowListInput, WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
 use persona_wire_core::domain::entity::TargetForm;
@@ -307,6 +309,57 @@ pub struct WirePromptContextParams {
 pub struct WireContextGetParams {
     /// The persona whose `ContextWiring` consistency boundary to read.
     pub persona_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireSlotRegisterParams {
+    /// Persona the slot belongs to (e.g. `"alpha"`).
+    pub persona_id: String,
+    /// Slot name (no dots — e.g. `"mailbox"`, `"gh_issues"`).
+    pub slot: String,
+    /// Scheme-tagged Source URI the slot fetches at render time
+    /// (e.g. `"mini-app://mailbox?alias=for_alpha"`, `"file:~/notes.md"`).
+    pub source_uri: String,
+    /// Handlebars template rendered against the wire_prompt_context data
+    /// shape — iterate `{{#each entries}}{{this.fetched_data...}}{{/each}}`.
+    /// Preview the fetched_data shape via `wire_fetch` first.
+    pub template: String,
+    /// One of prompt | markdown | json | ascii. Defaults to `"markdown"`.
+    #[serde(default)]
+    pub target_form: Option<String>,
+    /// Optional session-maintenance opt-out flag (`metadata.maintenance_exempt`).
+    /// Omitted = leave an existing value alone (create default: unset).
+    #[serde(default)]
+    pub maintenance_exempt: Option<bool>,
+    /// Optional credential reference key (never a secret) — stored as
+    /// `metadata.auth` and merged into the fetch URI as `?auth=<key>`.
+    #[serde(default)]
+    pub auth: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireSlotDeleteParams {
+    /// Persona the slot belongs to.
+    pub persona_id: String,
+    /// Slot name registered via `wire_slot_register` (or the granular tools).
+    pub slot: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireFetchParams {
+    /// Raw scheme-tagged URI to fetch (e.g. `"file:~/notes.md"`,
+    /// `"mini-app://mailbox?alias=for_shi"`). Mutually exclusive with
+    /// `persona_id` + `slot`.
+    #[serde(default)]
+    pub source_uri: Option<String>,
+    /// Resolve an existing wiring entry's source_uri (applies its
+    /// `metadata.auth` merge, matching what the render path fetches).
+    /// Requires `slot`; mutually exclusive with `source_uri`.
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// Slot name of the wiring entry to preview. Requires `persona_id`.
+    #[serde(default)]
+    pub slot: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1067,6 +1120,98 @@ impl WireServer {
         .map_err(|e| e.to_string())
     }
 
+    /// One-shot slot setup: wiring node + boilerplate spec + projection.
+    #[tool(
+        name = "wire_slot_register",
+        description = "One-shot slot setup — registers the wiring node (`<persona>.<slot>` with metadata persona/axis/source_uri), the boilerplate per-slot Specification (`<persona>.spec.<slot>`), and the NamedProjection (`<persona>.section.<slot>`) in a single call. Upsert semantics: re-invoking with changed values tunes the slot in place (node ULID preserved, passthrough metadata kept). Equivalent to the granular wire_node_create + wire_spec_register + wire_projection_register walkthrough in the onboarding guide. Preview the adapter's fetched_data shape via wire_fetch before writing the template."
+    )]
+    async fn wire_slot_register_tool(
+        &self,
+        Parameters(p): Parameters<WireSlotRegisterParams>,
+    ) -> Result<String, String> {
+        let tf = TargetForm::parse(p.target_form.as_deref().unwrap_or("markdown"))
+            .map_err(|e| e.to_string())?;
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_slot_register(
+            WireSlotRegisterInput {
+                persona_id: p.persona_id,
+                slot: p.slot,
+                source_uri: p.source_uri,
+                template: p.template,
+                target_form: tf,
+                maintenance_exempt: p.maintenance_exempt,
+                auth: p.auth,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "node_name": out.node_name,
+            "node_id": out.node_id,
+            "node_created": out.node_created,
+            "spec_name": out.spec_name,
+            "projection_name": out.projection_name,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    /// Remove the three artifacts a slot registration created.
+    #[tool(
+        name = "wire_slot_delete",
+        description = "Counterpart to wire_slot_register — deletes the wiring node (`<persona>.<slot>`), the boilerplate spec (`<persona>.spec.<slot>`), and the projection (`<persona>.section.<slot>`). Idempotent: missing artifacts report deleted=false instead of erroring."
+    )]
+    async fn wire_slot_delete_tool(
+        &self,
+        Parameters(p): Parameters<WireSlotDeleteParams>,
+    ) -> Result<String, String> {
+        let s = self.storage.lock().map_err(|e| e.to_string())?;
+        let out = wire_slot_delete(
+            WireSlotDeleteInput {
+                persona_id: p.persona_id,
+                slot: p.slot,
+            },
+            &s,
+        )
+        .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "node_name": out.node_name,
+            "node_deleted": out.node_deleted,
+            "spec_name": out.spec_name,
+            "spec_deleted": out.spec_deleted,
+            "projection_name": out.projection_name,
+            "projection_deleted": out.projection_deleted,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    /// Raw adapter preview — see the exact fetched_data a template receives.
+    #[tool(
+        name = "wire_fetch",
+        description = "Raw adapter preview: routes a scheme-tagged URI through the same PluginRegistry dispatch the render path uses and returns the adapter output verbatim (= exactly what templates see as `entries[].fetched_data`). Supply either `source_uri` alone, or `persona_id` + `slot` to preview an existing wiring entry (applies its metadata.auth merge). Adapter errors fail loud instead of the render path's best-effort Null. Use this to discover field paths before writing a projection template."
+    )]
+    async fn wire_fetch_tool(
+        &self,
+        Parameters(p): Parameters<WireFetchParams>,
+    ) -> Result<String, String> {
+        let storage = self.storage.clone();
+        let out = wire_fetch(
+            WireFetchInput {
+                source_uri: p.source_uri,
+                persona_id: p.persona_id,
+                slot: p.slot,
+            },
+            storage,
+            &self.registry,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "source_uri": out.source_uri,
+            "fetched_data": out.fetched_data,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
     /// Delete a NamedProjection by name.
     #[tool(
         name = "wire_projection_delete",
@@ -1475,12 +1620,16 @@ impl ServerHandler for WireServer {
         .with_instructions(
             "persona-wire MCP server. Graph engine over persona × SoT × workflow \
              context routing. Tools: wire_init / wire_close / wire_doctor / \
-             wire_query / wire_render / wire_prompt_context / wire_node_create / \
+             wire_query / wire_render / wire_prompt_context / wire_fetch / \
+             wire_slot_register / wire_slot_delete / wire_node_create / \
              wire_edge_create / wire_nodes_create_batch / wire_edges_create_batch / \
              wire_spec_register / wire_projection_register / wire_node_delete / \
              wire_edge_delete / wire_spec_delete / wire_projection_delete / \
              wire_workflow_register / wire_workflow_list / wire_workflow_fire / \
              wire_workflow_delete. \
+             Quick slot setup: wire_fetch(source_uri) to preview the adapter's \
+             fetched_data shape → wire_slot_register(persona_id, slot, source_uri, \
+             template) → wire_prompt_context(persona_id) to verify. \
              For the full end-to-end onboarding walkthrough (setup → wire entries → \
              spec / projection → optional persona-pack overlay → wire_prompt_context \
              call → Skill / Prompt wiring) read the bundled resource at \

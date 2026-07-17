@@ -32,8 +32,10 @@
 //!
 //! Round-trip property: `node_to_wiring(wiring_to_node(w, opts)?)? == w`
 //! for any [`Wiring`] constructed through this module's parsers (modulo the
-//! `projection_ref` carry, which is stored separately at the
-//! `ProjectionRegistry` boundary, not on the wiring Node).
+//! `projection_ref` carry — resolved at the `ProjectionRegistry` boundary
+//! via the naming convention, or overridden by the optional
+//! `metadata.projection_ref` key when a wiring binds a projection
+//! explicitly; see [`META_PROJECTION_REF`]).
 
 use serde_json::{Map, Value};
 
@@ -72,6 +74,14 @@ pub const META_MAINTENANCE_EXEMPT: &str = "maintenance_exempt";
 /// declares its own.
 pub const META_AUTH: &str = "auth";
 
+/// `metadata.projection_ref` key — optional explicit NamedProjection binding.
+/// When present, `use_cases::collect_slot` resolves the projection through
+/// this name instead of the `<persona>.section.<slot>` convention
+/// (`projection_naming`), letting one registered projection serve multiple
+/// personas and making the bundle `[[wirings]].projection_ref` field
+/// functional. Absent → convention fallback (the common case).
+pub const META_PROJECTION_REF: &str = "projection_ref";
+
 // -- Node → Entity (extract helpers, tolerant) ------------------------------
 
 /// Borrow the `persona` field as `&str` if present and a string.
@@ -108,6 +118,15 @@ pub fn extract_auth(node: &Node) -> Option<&str> {
     node.metadata.get(META_AUTH).and_then(Value::as_str)
 }
 
+/// Borrow the explicit `projection_ref` binding as `&str` if present and a
+/// string. `None` when absent — the common case, which falls back to the
+/// `<persona>.section.<slot>` naming convention at resolve time.
+pub fn extract_projection_ref(node: &Node) -> Option<&str> {
+    node.metadata
+        .get(META_PROJECTION_REF)
+        .and_then(Value::as_str)
+}
+
 /// Validate-and-extract the slot as a typed [`Slot`] VO. Returns `Ok(None)`
 /// when the key is missing; `Err(DomainError::InvalidMetadata)` when the
 /// value is present but violates [`Slot`] invariants.
@@ -122,10 +141,12 @@ pub fn extract_slot_typed(node: &Node) -> WireResult<Option<Slot>> {
 
 /// Strict mapper: build a typed [`Wiring`] from a wiring [`Node`].
 ///
-/// `projection_ref` is supplied by the caller because the wiring Node does
-/// **not** persist the projection ref — that lives at the
-/// `ProjectionRegistry` boundary, looked up via `projection_naming` rules.
-/// Pass `None` when the projection ref is not (yet) known.
+/// `projection_ref` is supplied by the caller: in the common case the
+/// wiring Node does not persist a projection ref (it is looked up at the
+/// `ProjectionRegistry` boundary via `projection_naming` rules), and a
+/// wiring may override that with an explicit `metadata.projection_ref`
+/// ([`extract_projection_ref`]) — either way the caller resolves first and
+/// passes the result here. Pass `None` when the ref is not (yet) known.
 ///
 /// Errors with `DomainError::InvalidMetadata` when required keys
 /// (`persona` / `axis` / `source_uri`) are missing or violate the VO
@@ -249,6 +270,17 @@ mod tests {
     fn extract_auth_returns_none_when_absent() {
         let n = raw_node("a.b", json!({}));
         assert_eq!(extract_auth(&n), None);
+    }
+
+    #[test]
+    fn extract_projection_ref_reads_present_key_and_defaults_none() {
+        let with = raw_node("a.b", json!({"projection_ref": "shared.section.mailbox"}));
+        assert_eq!(
+            extract_projection_ref(&with),
+            Some("shared.section.mailbox")
+        );
+        let without = raw_node("a.b", json!({}));
+        assert_eq!(extract_projection_ref(&without), None);
     }
 
     #[test]

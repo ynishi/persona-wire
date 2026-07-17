@@ -76,6 +76,28 @@ guide resource at `wire-guide://onboarding`.
 
 ## 2. Set up a persona's wiring entries (one Node per Slot)
 
+> **Quick path — `wire_slot_register` (one call per slot).** The three
+> registrations this section and §3 walk through by hand (wiring node +
+> Specification + NamedProjection) collapse into a single tool call:
+>
+> ```jsonc
+> // MCP: wire_slot_register
+> { "persona_id": "alpha",
+>   "slot":       "notes",
+>   "source_uri": "file:~/persona/alpha/notes.md",
+>   "template":   "## Notes\n{{#each entries}}{{this.fetched_data.body}}{{/each}}",
+>   "target_form": "markdown" }          // optional, default markdown
+> ```
+>
+> It derives the node name (`alpha.notes`), the boilerplate spec
+> (`alpha.spec.notes`), and the projection name (`alpha.section.notes`)
+> with the exact conventions the render path applies, and upserts in
+> place on re-invocation (node ULID preserved). `wire_slot_delete`
+> removes all three. Before writing the template, preview the adapter's
+> return shape with `wire_fetch` (see §3). The granular tools below
+> remain the right surface for advanced shapes (custom specs, shared
+> projections, edges).
+
 Pick the Slots you want (`active` / `ng` / `trigger` / `handoff` / `toolmap`
 is one common shape, but anything works). The Slot name lives on the
 node's `metadata.axis` (legacy literal key). For each Slot create one node
@@ -84,6 +106,16 @@ with a `source_uri`. Add an edge from the persona node for traceability
 or `metadata.maintenance_exempt: true` are recognised as **self-attached**
 and are excluded from the `wire_doctor` / `wire_close` orphan count, so an
 edge-less wiring entry will not be flagged as a graph-health issue).
+
+**Explicit projection binding (optional)**: a wiring entry may carry
+`metadata.projection_ref = "<projection name>"`. When present, the render
+path (`wire_prompt_context`) resolves that projection instead of the
+`<persona>.section.<slot>` naming convention — this is how one registered
+projection template can serve multiple personas, and it is the same field
+the Bundle `[[wirings]]` section ships. When the explicitly referenced
+projection is not registered, the slot is skipped with a warning naming
+the missing ref (no silent fallback to the convention). Absent → the
+naming convention applies (the common case).
 
 **Identity model (v0.7+)**: `wire_node_create` / `wire_edge_create` /
 `wire_spec_register` / `wire_projection_register` accept a human-readable
@@ -559,6 +591,31 @@ will not show a different row count on its own.
 There is no hard-coded projection list inside the crate. Every projection
 is data, registered through the same tool surface.
 
+### Template authoring loop — preview the shape first (`wire_fetch`)
+
+Handlebars resolves missing field paths to empty strings, so a template
+written against a guessed adapter shape renders **silently empty** (e.g.
+`{{this.fetched_data.content}}` against a `file:` source, whose actual
+body key is `body`). Close the loop by previewing the raw adapter output
+before writing the template:
+
+```jsonc
+// MCP: wire_fetch — raw URI form
+{ "source_uri": "file:~/persona/alpha/notes.md" }
+//   → { "source_uri": "...", "fetched_data": { "scheme": "file",
+//       "kind": "file", "path": "...", "body": "…file text…", ... } }
+
+// MCP: wire_fetch — preview an existing wiring entry (applies its
+// metadata.auth merge, matching exactly what the render path fetches)
+{ "persona_id": "alpha", "slot": "notes" }
+```
+
+`fetched_data` is verbatim what the template sees as
+`entries[].fetched_data` — write the handlebars against it, register, then
+verify with `wire_prompt_context`. As a second net, `wire_prompt_context`
+pushes a warning when a slot renders fully-empty output despite the
+adapter returning non-null data.
+
 ```jsonc
 // MCP: wire_spec_register — picks one wiring entry per axis
 {
@@ -877,6 +934,35 @@ trigger surfaces:
 
 All four share one wire call; the loop / cadence lives in the Trigger.
 
+### Named context views — `on_demand` workflow, fired by id
+
+When a caller wants "give me `<persona>`'s `<job>` context" as **one named
+handle** — without re-listing the slot subset on every call — register an
+`on_demand` workflow whose action is `emit_projection` over the subset,
+then fire it by id. This is the canonical named-view path; no dedicated
+view entity is needed:
+
+```jsonc
+// One-time registration: bind the name to (persona × slot subset).
+// MCP: wire_workflow_register
+{ "id":         "alpha.workflow.review_ctx",
+  "persona_id": "alpha",
+  "trigger":    "{\"kind\":\"on_demand\"}",
+  "action":     "{\"kind\":\"emit_projection\",\"projection_names\":[\"active\",\"gh_issues\"]}" }
+
+// Every retrieval afterwards: one name → rendered payload.
+// MCP: wire_workflow_fire
+{ "id": "alpha.workflow.review_ctx" }
+//   → { "fired": [ { "result": { "prompt_context": "## Active set\n…" } } ] }
+```
+
+The fire result carries the same `prompt_context` payload an equivalent
+`wire_prompt_context(persona_id, projection_names=[...])` call produces
+(`emit_projection` delegates to it internally). `projection_names`
+entries are **slot names** (see the two conventions above). Bundles ship
+these bindings via the `[[workflows]]` section, so a named view installs
+together with the specs / projections / wirings it depends on.
+
 ### Implemented — `wire_workflow_*` + `wire_doctor` coverage audit
 
 The trigger / action portion (`wire_workflow_fire` /
@@ -990,7 +1076,10 @@ target_form = "prompt"                              # prompt | markdown | json |
 persona_id = "shi"
 slot = "mailbox"
 source_uri = "mini-app://mailbox?alias=for_shi"
-projection_ref = "personas_overview"                # optional
+projection_ref = "personas_overview"                # optional — stored as
+                                                    # metadata.projection_ref; the render
+                                                    # path resolves it in preference to the
+                                                    # <persona>.section.<slot> convention (§2)
 
 [[workflows]]
 id = "shi-wake"
