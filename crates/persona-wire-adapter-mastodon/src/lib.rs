@@ -117,7 +117,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
@@ -146,11 +146,18 @@ impl Adapter for MastodonAdapter {
         "mastodon"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit {
+            max: Some(MASTODON_LIMIT_MAX),
+        }]
+    }
+
     /// Fetch `spec.kind`'s timeline for the instance derived from `uri`. See
     /// the module docs for URI grammar, auth resolution (asymmetric per
     /// timeline), and output shape.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let spec = parse_mastodon_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_mastodon_uri(uri, filters.limit.unwrap_or(DEFAULT_LIMIT))?;
         let service_key = resolve_service_key(uri, DEFAULT_SERVICE_KEY);
         let client = mastodon_http_client(service_key, spec.kind)?;
         let raw = client.get_json(&spec.endpoint_url()).await?;
@@ -208,8 +215,10 @@ impl MastodonUriSpec {
 
 /// Parse a `WireUri` (already split into typed components by the registry)
 /// into a [`MastodonUriSpec`]. See the module-level "URI grammar" section
-/// for the exact rules and failure conditions.
-fn parse_mastodon_uri(uri: &WireUri) -> WireResult<MastodonUriSpec> {
+/// for the exact rules and failure conditions. Cross-cutting filters
+/// (`?limit=`) are parsed separately via [`WireFilters::parse`] and passed
+/// in as `limit`.
+fn parse_mastodon_uri(uri: &WireUri, limit: usize) -> WireResult<MastodonUriSpec> {
     let instance = uri
         .host()
         .filter(|h| !h.is_empty())
@@ -234,8 +243,6 @@ fn parse_mastodon_uri(uri: &WireUri) -> WireResult<MastodonUriSpec> {
         }
     };
 
-    let limit = parse_limit(uri.query_get("limit"))?;
-
     // `local` / `only_media` only apply to `timelines/public`; for
     // `timelines/home` they are silently ignored (not even validated), same
     // convention as `state` for `kind=releases` in the github adapter.
@@ -255,36 +262,6 @@ fn parse_mastodon_uri(uri: &WireUri) -> WireResult<MastodonUriSpec> {
         local,
         only_media,
     })
-}
-
-/// Parse and validate the `?limit=` query value. An oversized value is
-/// clamped to [`MASTODON_LIMIT_MAX`] (with a `tracing::warn!`), not
-/// rejected; see the module docs "URI grammar".
-fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
-    match raw {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "mastodon adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "mastodon adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            if n > MASTODON_LIMIT_MAX {
-                tracing::warn!(
-                    requested = n,
-                    clamped_to = MASTODON_LIMIT_MAX,
-                    "mastodon adapter: requested limit exceeds Mastodon's per-request max; clamping"
-                );
-                return Ok(MASTODON_LIMIT_MAX);
-            }
-            Ok(n)
-        }
-        None => Ok(DEFAULT_LIMIT),
-    }
 }
 
 /// Parse and validate a `"true"` / `"false"` query value (used for `local`
@@ -388,9 +365,18 @@ mod tests {
 
     // ---- parse_mastodon_uri ----
 
+    /// Helper: parse with the adapter's default limit (backwards-compatible
+    /// with the pre-Phase-2 default when no `?limit=` was supplied).
     fn parse(uri: &str) -> WireResult<MastodonUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_mastodon_uri(&wire)
+        parse_mastodon_uri(&wire, DEFAULT_LIMIT)
+    }
+
+    /// Helper: parse with an explicit limit (simulates
+    /// `filters.limit = Some(n)` after `WireFilters::parse`).
+    fn parse_with_limit(uri: &str, limit: usize) -> WireResult<MastodonUriSpec> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        parse_mastodon_uri(&wire, limit)
     }
 
     #[test]
@@ -423,18 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_mastodon_uri_limit_clamped_above_max() {
-        let spec = parse("mastodon://mastodon.social/timelines/home?limit=41").unwrap();
-        assert_eq!(spec.limit, MASTODON_LIMIT_MAX, "41 clamps down to 40");
-    }
-
-    #[test]
-    fn parse_mastodon_uri_limit_at_max_not_clamped() {
-        let spec = parse("mastodon://mastodon.social/timelines/home?limit=40").unwrap();
-        assert_eq!(spec.limit, 40);
-    }
-
-    #[test]
     fn parse_mastodon_uri_invalid_path_fails_loud() {
         let err = parse("mastodon://mastodon.social/statuses").unwrap_err();
         let msg = format!("{err}");
@@ -446,20 +420,6 @@ mod tests {
         let err = parse("mastodon:///timelines/home").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("missing instance"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_mastodon_uri_limit_non_numeric_fails_loud() {
-        let err = parse("mastodon://mastodon.social/timelines/home?limit=abc").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_mastodon_uri_limit_zero_fails_loud() {
-        let err = parse("mastodon://mastodon.social/timelines/home?limit=0").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
     }
 
     #[test]
@@ -487,19 +447,89 @@ mod tests {
     }
 
     #[test]
-    fn parse_mastodon_uri_auth_param_passthrough() {
-        // `?auth=` is a recognized key but is not validated by
+    fn parse_mastodon_uri_auth_param_passthrough_with_limit() {
+        // `?auth=` is a recognized addressing key but is not validated by
         // `parse_mastodon_uri` itself (consumed separately by
         // `resolve_service_key`) — it must not cause a parse failure.
-        let spec = parse("mastodon://mastodon.social/timelines/home?auth=work&limit=5").unwrap();
+        let spec = parse_with_limit(
+            "mastodon://mastodon.social/timelines/home?auth=work&limit=5",
+            5,
+        )
+        .unwrap();
         assert_eq!(spec.limit, 5);
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, MastodonAdapter.filter_caps())
+    }
+
+    #[test]
+    fn filter_caps_declares_limit_capped_at_max() {
+        assert_eq!(
+            MastodonAdapter.filter_caps(),
+            &[FilterCap::Limit {
+                max: Some(MASTODON_LIMIT_MAX)
+            }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_within_max() {
+        let f = parse_filters("mastodon://mastodon.social/timelines/home?limit=20").unwrap();
+        assert_eq!(f.limit, Some(20));
+    }
+
+    #[test]
+    fn wire_filters_limit_at_max_not_clamped() {
+        let f = parse_filters("mastodon://mastodon.social/timelines/home?limit=40").unwrap();
+        assert_eq!(f.limit, Some(40));
+    }
+
+    #[test]
+    fn wire_filters_limit_clamped_above_max() {
+        let f = parse_filters("mastodon://mastodon.social/timelines/home?limit=41").unwrap();
+        assert_eq!(f.limit, Some(MASTODON_LIMIT_MAX), "41 clamps down to 40");
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_fails_loud() {
+        let err = parse_filters("mastodon://mastodon.social/timelines/home?limit=abc").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_fails_loud() {
+        let err = parse_filters("mastodon://mastodon.social/timelines/home?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        let err = parse_filters("mastodon://mastodon.social/timelines/home?query=x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ---- endpoint_url ----
 
     #[test]
     fn endpoint_url_home_shape() {
-        let spec = parse("mastodon://mastodon.social/timelines/home?limit=5").unwrap();
+        let spec =
+            parse_with_limit("mastodon://mastodon.social/timelines/home?limit=5", 5).unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://mastodon.social/api/v1/timelines/home?limit=5"
@@ -508,9 +538,11 @@ mod tests {
 
     #[test]
     fn endpoint_url_public_shape() {
-        let spec =
-            parse("mastodon://fosstodon.org/timelines/public?local=true&only_media=false&limit=10")
-                .unwrap();
+        let spec = parse_with_limit(
+            "mastodon://fosstodon.org/timelines/public?local=true&only_media=false&limit=10",
+            10,
+        )
+        .unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://fosstodon.org/api/v1/timelines/public?local=true&only_media=false&limit=10"
@@ -519,7 +551,11 @@ mod tests {
 
     #[test]
     fn endpoint_url_never_includes_auth_param() {
-        let spec = parse("mastodon://mastodon.social/timelines/home?auth=work&limit=5").unwrap();
+        let spec = parse_with_limit(
+            "mastodon://mastodon.social/timelines/home?auth=work&limit=5",
+            5,
+        )
+        .unwrap();
         assert!(
             !spec.endpoint_url().contains("auth"),
             "auth is consumed by resolve_service_key, never forwarded upstream"

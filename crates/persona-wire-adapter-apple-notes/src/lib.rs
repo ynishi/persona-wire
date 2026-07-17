@@ -55,7 +55,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 
 /// Default `notes` cap when `?limit=` is absent from the URI.
 pub const DEFAULT_LIMIT: usize = 50;
@@ -69,11 +69,16 @@ impl Adapter for AppleNotesAdapter {
         "applenotes"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }, FilterCap::TextQuery]
+    }
+
     /// Parse `uri` and, on macOS, run the folder / query / limit filter
     /// against `NoteStore.sqlite`. Fails loud with `WireError::Storage` on
     /// every other platform.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let spec = parse_apple_notes_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_apple_notes_uri(uri, &filters)?;
         fetch_impl(&spec).await
     }
 }
@@ -92,36 +97,22 @@ struct AppleNotesUriSpec {
 }
 
 /// Parse a `WireUri` (already split into typed components by the registry)
-/// into an [`AppleNotesUriSpec`].
+/// into an [`AppleNotesUriSpec`], using `filters` for the cross-cutting
+/// `?limit=` / `?query=` values (already parsed and validated by
+/// [`WireFilters::parse`] on the adapter side).
 ///
 /// - `host` (the URI authority) is the folder filter; absent or empty means
 ///   "all folders" (`folder: None`).
-/// - `?query=<substring>` is a case-insensitive title substring filter;
-///   absent means "all notes" (`query: None`).
-/// - `?limit=N` must parse as a positive integer; non-numeric or `0` fails
-///   loud with [`WireError::Storage`].
-/// - Unknown query keys are silently ignored (forward-compatible
-///   convention).
-fn parse_apple_notes_uri(uri: &WireUri) -> WireResult<AppleNotesUriSpec> {
+/// - `filters.query` is a case-insensitive title substring filter (already
+///   percent-decoded by [`WireFilters::parse`]); `None` means "all notes".
+/// - `filters.limit` overrides [`DEFAULT_LIMIT`] when present.
+/// - Unknown addressing query keys are silently ignored (forward-compatible
+///   convention); unknown filter-vocabulary keys are rejected by
+///   [`WireFilters::parse`] before this is called.
+fn parse_apple_notes_uri(uri: &WireUri, filters: &WireFilters) -> WireResult<AppleNotesUriSpec> {
     let folder = uri.host().filter(|h| !h.is_empty()).map(|h| h.to_string());
-    let query = uri.query_get("query").map(|q| q.to_string());
-
-    let limit = match uri.query_get("limit") {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "apple-notes adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "apple-notes adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            n
-        }
-        None => DEFAULT_LIMIT,
-    };
+    let query = filters.query.clone();
+    let limit = filters.limit.unwrap_or(DEFAULT_LIMIT);
 
     Ok(AppleNotesUriSpec {
         folder,
@@ -284,9 +275,13 @@ mod tests {
 
     // ---- parse_apple_notes_uri (platform-independent) ----
 
+    /// Helper: parse with a filters snapshot derived from `WireFilters::parse`
+    /// against the adapter's declared caps (matches the production
+    /// `AppleNotesAdapter::fetch` code path).
     fn parse(uri: &str) -> WireResult<AppleNotesUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_apple_notes_uri(&wire)
+        let filters = WireFilters::parse(&wire, AppleNotesAdapter.filter_caps())?;
+        parse_apple_notes_uri(&wire, &filters)
     }
 
     #[test]
@@ -310,6 +305,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_apple_notes_uri_query_percent_decoded() {
+        // Behavior change (Phase 2): ?query= is now percent-decoded by
+        // WireFilters::parse (previously used raw). "hello%20world" → "hello world".
+        let spec = parse("applenotes://?query=hello%20world").unwrap();
+        assert_eq!(spec.query, Some("hello world".to_string()));
+    }
+
+    #[test]
     fn parse_apple_notes_uri_limit_override() {
         let spec = parse("applenotes://?limit=10").unwrap();
         assert_eq!(spec.limit, 10);
@@ -319,18 +322,24 @@ mod tests {
     fn parse_apple_notes_uri_limit_non_numeric_errors() {
         let err = parse("applenotes://?limit=abc").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn parse_apple_notes_uri_limit_zero_errors() {
         let err = parse("applenotes://?limit=0").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
-    fn parse_apple_notes_uri_unknown_query_key_ignored() {
+    fn parse_apple_notes_uri_unknown_addressing_key_ignored() {
         let spec = parse("applenotes://?utm_source=foo").unwrap();
         assert_eq!(spec.folder, None);
         assert_eq!(spec.query, None);
@@ -343,6 +352,29 @@ mod tests {
         assert_eq!(spec.folder, Some("Work".to_string()));
         assert_eq!(spec.query, Some("todo".to_string()));
         assert_eq!(spec.limit, 5);
+    }
+
+    // ---- filter_caps (Phase 2 unified filter IF) ----
+
+    #[test]
+    fn filter_caps_declares_limit_and_text_query() {
+        assert_eq!(
+            AppleNotesAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }, FilterCap::TextQuery]
+        );
+    }
+
+    #[test]
+    fn parse_apple_notes_uri_undeclared_filter_key_errors() {
+        // ?since=/?until= are not declared → must fail loud with a "not supported"
+        // message that lists the adapter's supported set.
+        let wire = WireUri::parse("applenotes://?since=2026-01-01").expect("valid WireUri");
+        let err = WireFilters::parse(&wire, AppleNotesAdapter.filter_caps()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("since") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ---- non-macOS stub (only compiled/run on non-macOS targets, e.g. the

@@ -107,7 +107,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
 
@@ -134,9 +134,16 @@ impl Adapter for BlueskyAdapter {
         "bluesky"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit {
+            max: Some(MAX_LIMIT),
+        }]
+    }
+
     /// Dispatch on `?kind=` to the matching XRPC fetch + normalize pair.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let spec = parse_bluesky_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_bluesky_uri(uri, filters.limit.unwrap_or(DEFAULT_LIMIT))?;
         let client = HttpClient::new("bluesky adapter").with_timeout(FETCH_TIMEOUT);
 
         match spec.kind {
@@ -193,14 +200,14 @@ struct BlueskyUriSpec {
 /// - `host` (actor) is required and must be non-empty.
 /// - `?kind=` must be `feed` (default), `profile`, or `thread`; any other
 ///   value fails loud.
-/// - `?limit=N` must parse as an integer in `1..=`[`MAX_LIMIT`]; non-numeric,
-///   `0`, or over [`MAX_LIMIT`] fails loud with [`WireError::Storage`].
-///   Parsed and range-checked regardless of `kind` (matches
-///   `persona-wire-adapter-activitypub`'s convention), even though only
-///   `feed` consumes it.
+/// - Cross-cutting filters (`?limit=N`) are parsed separately via
+///   [`WireFilters::parse`] (declared cap `Limit { max: Some(MAX_LIMIT) }`)
+///   and passed in as `limit`. `limit > MAX_LIMIT` is clamped to
+///   [`MAX_LIMIT`] with a `tracing::warn!` (behavior change from earlier
+///   versions where it hard-errored).
 /// - `?post=<rkey>` is required when `kind=thread` (error if absent);
 ///   silently accepted-but-unused for any other `kind`.
-fn parse_bluesky_uri(uri: &WireUri) -> WireResult<BlueskyUriSpec> {
+fn parse_bluesky_uri(uri: &WireUri, limit: usize) -> WireResult<BlueskyUriSpec> {
     let actor = uri.host().filter(|h| !h.is_empty()).ok_or_else(|| {
         WireError::Storage(format!(
             "bluesky adapter: missing host in '{}'",
@@ -217,23 +224,6 @@ fn parse_bluesky_uri(uri: &WireUri) -> WireResult<BlueskyUriSpec> {
                 "bluesky adapter: unknown kind '{other}' (must be 'feed', 'profile', or 'thread')"
             )));
         }
-    };
-
-    let limit = match uri.query_get("limit") {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "bluesky adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 || n > MAX_LIMIT {
-                return Err(WireError::Storage(format!(
-                    "bluesky adapter: invalid limit '{raw}' (must be between 1 and {MAX_LIMIT})"
-                )));
-            }
-            n
-        }
-        None => DEFAULT_LIMIT,
     };
 
     let post_rkey = uri.query_get("post").map(|s| s.to_string());
@@ -416,9 +406,18 @@ mod tests {
 
     // ---- parse_bluesky_uri ----
 
+    /// Helper: parse with the adapter's default limit (backwards-compatible
+    /// with the pre-Phase-2 default when no `?limit=` was supplied).
     fn parse(uri: &str) -> WireResult<BlueskyUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_bluesky_uri(&wire)
+        parse_bluesky_uri(&wire, DEFAULT_LIMIT)
+    }
+
+    /// Helper: parse with an explicit limit (simulates
+    /// `filters.limit = Some(n)` after `WireFilters::parse`).
+    fn parse_with_limit(uri: &str, limit: usize) -> WireResult<BlueskyUriSpec> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        parse_bluesky_uri(&wire, limit)
     }
 
     #[test]
@@ -470,36 +469,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_bluesky_uri_limit_override() {
-        let spec = parse("bluesky://bsky.app?limit=5").unwrap();
+    fn parse_bluesky_uri_limit_forwarded() {
+        // parse_bluesky_uri now receives limit as a parameter; it just
+        // forwards it (validation lives in WireFilters::parse).
+        let spec = parse_with_limit("bluesky://bsky.app", 5).unwrap();
         assert_eq!(spec.limit, 5);
-    }
-
-    #[test]
-    fn parse_bluesky_uri_limit_non_numeric_errors() {
-        let err = parse("bluesky://bsky.app?limit=abc").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_bluesky_uri_limit_zero_errors() {
-        let err = parse("bluesky://bsky.app?limit=0").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_bluesky_uri_limit_over_max_errors() {
-        let err = parse("bluesky://bsky.app?limit=101").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_bluesky_uri_limit_at_max_ok() {
-        let spec = parse("bluesky://bsky.app?limit=100").unwrap();
-        assert_eq!(spec.limit, MAX_LIMIT);
     }
 
     #[test]
@@ -524,6 +498,73 @@ mod tests {
         let spec = parse("bluesky://bsky.app?utm_source=foo").unwrap();
         assert_eq!(spec.kind, Kind::Feed);
         assert_eq!(spec.limit, DEFAULT_LIMIT);
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, BlueskyAdapter.filter_caps())
+    }
+
+    #[test]
+    fn filter_caps_declares_limit_capped_at_max() {
+        assert_eq!(
+            BlueskyAdapter.filter_caps(),
+            &[FilterCap::Limit {
+                max: Some(MAX_LIMIT)
+            }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_within_max() {
+        let f = parse_filters("bluesky://bsky.app?limit=30").unwrap();
+        assert_eq!(f.limit, Some(30));
+    }
+
+    #[test]
+    fn wire_filters_limit_at_max_not_clamped() {
+        let f = parse_filters("bluesky://bsky.app?limit=100").unwrap();
+        assert_eq!(f.limit, Some(MAX_LIMIT));
+    }
+
+    #[test]
+    fn wire_filters_limit_clamped_above_max() {
+        // Behavior change (Phase 2): limit>100 previously errored;
+        // now clamps to MAX_LIMIT with a `tracing::warn!`.
+        let f = parse_filters("bluesky://bsky.app?limit=101").unwrap();
+        assert_eq!(f.limit, Some(MAX_LIMIT), "101 clamps down to 100");
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_errors() {
+        let err = parse_filters("bluesky://bsky.app?limit=abc").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_errors() {
+        let err = parse_filters("bluesky://bsky.app?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        let err = parse_filters("bluesky://bsky.app?query=x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ---- normalize_feed ----

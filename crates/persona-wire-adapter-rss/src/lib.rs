@@ -23,9 +23,13 @@
 //!   plain HTTP (any other `scheme` value is ignored and falls back to
 //!   `https`, matching the forward-compatible convention below).
 //! - `?limit=N` caps the number of items returned (default
-//!   [`DEFAULT_LIMIT`]). A non-numeric or zero value fails loud.
-//! - Unknown query keys are silently ignored (same forward-compatible
-//!   convention as `persona-wire-adapter-obsidian`).
+//!   [`DEFAULT_LIMIT`]). Parsed via the shared
+//!   [`WireFilters::parse`]; unbounded declaration
+//!   ([`FilterCap::Limit { max: None }`]). Non-numeric or zero fails loud;
+//!   unknown filter-vocabulary keys (`?query=` etc.) fail loud too.
+//! - Adapter-specific addressing keys (currently only `?scheme=`) are
+//!   silently ignored when unknown (same forward-compatible convention as
+//!   `persona-wire-adapter-obsidian`).
 //! - An empty host is an error.
 //!
 //! ## Output shape
@@ -44,7 +48,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
 
@@ -67,20 +71,25 @@ impl Adapter for RssAdapter {
         "rss"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }]
+    }
+
     /// Fetch the feed at the URL derived from `uri` and normalize it.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
         let spec = parse_rss_uri(uri)?;
+        let limit = filters.limit.unwrap_or(DEFAULT_LIMIT);
         let client = HttpClient::new("rss adapter").with_timeout(FETCH_TIMEOUT);
         let bytes = client.get_bytes(&spec.url).await?;
-        normalize_feed(&bytes, &spec.url, spec.limit)
+        normalize_feed(&bytes, &spec.url, limit)
     }
 }
 
-/// Parsed `rss://` URI: target URL + item limit.
+/// Parsed `rss://` URI: target URL.
 #[derive(Debug)]
 struct RssUriSpec {
     url: String,
-    limit: usize,
 }
 
 /// Parse a `WireUri` (already split into typed components by the registry)
@@ -89,8 +98,9 @@ struct RssUriSpec {
 /// - `host` is required and must be non-empty.
 /// - `?scheme=http` downgrades the target scheme; any other value (or
 ///   absence) defaults to `https`.
-/// - `?limit=N` must parse as a positive integer; non-numeric or `0` fails
-///   loud with [`WireError::Storage`].
+/// - Cross-cutting filters (`?limit=N`) are parsed separately via
+///   [`WireFilters::parse`] using the capabilities declared in
+///   [`Adapter::filter_caps`].
 fn parse_rss_uri(uri: &WireUri) -> WireResult<RssUriSpec> {
     let host = uri.host().filter(|h| !h.is_empty()).ok_or_else(|| {
         WireError::Storage(format!("rss adapter: missing host in '{}'", uri.as_raw()))
@@ -101,26 +111,9 @@ fn parse_rss_uri(uri: &WireUri) -> WireResult<RssUriSpec> {
         _ => "https",
     };
 
-    let limit = match uri.query_get("limit") {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "rss adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "rss adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            n
-        }
-        None => DEFAULT_LIMIT,
-    };
-
     let url = format!("{scheme}://{host}{}", uri.path());
 
-    Ok(RssUriSpec { url, limit })
+    Ok(RssUriSpec { url })
 }
 
 /// Parse `bytes` as an RSS 2.0 / RSS 1.0 / Atom / JSON Feed document (format
@@ -189,7 +182,6 @@ mod tests {
     fn parse_rss_uri_https_default() {
         let spec = parse("rss://example.com/feed.xml").unwrap();
         assert_eq!(spec.url, "https://example.com/feed.xml");
-        assert_eq!(spec.limit, DEFAULT_LIMIT);
     }
 
     #[test]
@@ -205,26 +197,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_rss_uri_limit_override() {
-        let spec = parse("rss://example.com/feed.xml?limit=5").unwrap();
-        assert_eq!(spec.limit, 5);
-    }
-
-    #[test]
-    fn parse_rss_uri_limit_non_numeric_errors() {
-        let err = parse("rss://example.com/feed.xml?limit=abc").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_rss_uri_limit_zero_errors() {
-        let err = parse("rss://example.com/feed.xml?limit=0").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
     fn parse_rss_uri_empty_host_errors() {
         let err = parse("rss:///feed.xml").unwrap_err();
         let msg = format!("{err}");
@@ -232,23 +204,71 @@ mod tests {
     }
 
     #[test]
-    fn parse_rss_uri_unknown_query_key_ignored() {
+    fn parse_rss_uri_unknown_addressing_key_ignored() {
         let spec = parse("rss://example.com/feed.xml?utm_source=foo").unwrap();
         assert_eq!(spec.url, "https://example.com/feed.xml");
-        assert_eq!(spec.limit, DEFAULT_LIMIT);
     }
 
     #[test]
     fn parse_rss_uri_combined_scheme_and_limit() {
+        // parse_rss_uri no longer consumes ?limit=; url still computed correctly.
         let spec = parse("rss://example.com/feed.xml?scheme=http&limit=3").unwrap();
         assert_eq!(spec.url, "http://example.com/feed.xml");
-        assert_eq!(spec.limit, 3);
     }
 
     #[test]
     fn parse_rss_uri_host_with_port_preserved() {
         let spec = parse("rss://example.com:8080/feed.xml").unwrap();
         assert_eq!(spec.url, "https://example.com:8080/feed.xml");
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, RssAdapter.filter_caps())
+    }
+
+    #[test]
+    fn filter_caps_declares_limit_unbounded() {
+        assert_eq!(RssAdapter.filter_caps(), &[FilterCap::Limit { max: None }]);
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        let f = parse_filters("rss://example.com/feed.xml?limit=5").unwrap();
+        assert_eq!(f.limit, Some(5));
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_errors() {
+        let err = parse_filters("rss://example.com/feed.xml?limit=abc").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_errors() {
+        let err = parse_filters("rss://example.com/feed.xml?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        // rss does not declare TextQuery; `?query=` must fail loud (Phase 2 behavior change).
+        let err = parse_filters("rss://example.com/feed.xml?query=hello").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ---- normalize_feed ----

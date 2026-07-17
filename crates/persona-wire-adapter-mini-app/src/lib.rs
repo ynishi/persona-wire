@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::adapter::Adapter;
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 
 /// `mini-app://` URI から抽出した取り出し指示。 wire scope 内で意味解釈する 4 key
 /// (`scope` / `root` / `alias` / `limit`) は専用 field に、 残り query key 全てが `params`
@@ -42,9 +42,19 @@ struct MiniAppUriSpec {
     params: serde_json::Value,
 }
 
+/// Query keys owned by the cross-cutting [`WireFilters`] vocabulary. Kept
+/// as a literal list so the bespoke parser can skip them out of the
+/// `params` bag without pulling `persona_wire_core::infrastructure::filter`
+/// into this parser's control flow.
+const WIRE_FILTER_QUERY_KEYS: &[&str] = &[
+    "limit", "lines", "tail", "tail_n", "since", "until", "query",
+];
+
 /// `mini-app://<table>[?scope=<s>&root=<dir>&alias=<name>&k=v*&limit=<n>]` を parse する
-/// 内部 helper。 scheme prefix は呼び出し側で剥がす前提で受ける。
-fn parse_mini_app_uri(rest: &str) -> WireResult<MiniAppUriSpec> {
+/// 内部 helper。 scheme prefix は呼び出し側で剥がす前提で受ける。 cross-cutting filter keys
+/// (`?limit=` 等) は [`WireFilters::parse`] 側で解析され、 `limit` は呼び出し側から
+/// `limit_override` として渡される (`Some(n)` = ユーザー指定、 `None` = 未指定)。
+fn parse_mini_app_uri(rest: &str, limit_override: Option<u32>) -> WireResult<MiniAppUriSpec> {
     let full_uri = format!("mini-app://{rest}");
     let parsed = url::Url::parse(&full_uri)
         .map_err(|e| WireError::Storage(format!("mini-app adapter: bad uri: {full_uri}: {e}")))?;
@@ -59,20 +69,16 @@ fn parse_mini_app_uri(rest: &str) -> WireResult<MiniAppUriSpec> {
     let mut scope: Option<String> = None;
     let mut root: Option<PathBuf> = None;
     let mut alias: Option<String> = None;
-    let mut limit: Option<u32> = None;
     let mut params_map = serde_json::Map::new();
     for (k, v) in parsed.query_pairs() {
         match k.as_ref() {
             "scope" => scope = Some(v.into_owned()),
             "root" => root = Some(resolve_root_path(v.as_ref())?),
             "alias" => alias = Some(v.into_owned()),
-            "limit" => {
-                let n: u32 = v.parse().map_err(|e| {
-                    WireError::Storage(format!(
-                        "mini-app adapter: invalid limit '{v}' in {full_uri}: {e}"
-                    ))
-                })?;
-                limit = Some(n);
+            key if WIRE_FILTER_QUERY_KEYS.contains(&key) => {
+                // Cross-cutting filter keys are owned by WireFilters::parse
+                // (validated + optionally clamped on the adapter's fetch
+                // path). Do not surface them in `params`.
             }
             _ => {
                 params_map.insert(k.into_owned(), serde_json::Value::String(v.into_owned()));
@@ -93,7 +99,7 @@ fn parse_mini_app_uri(rest: &str) -> WireResult<MiniAppUriSpec> {
         scope,
         root,
         alias,
-        limit,
+        limit: limit_override,
         params: serde_json::Value::Object(params_map),
     })
 }
@@ -266,15 +272,26 @@ impl Adapter for MiniAppAdapter {
         "mini-app"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }]
+    }
+
     async fn fetch(
         &self,
         uri: &persona_wire_core::infrastructure::wire_uri::WireUri,
     ) -> WireResult<serde_json::Value> {
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        // WireFilters uses usize; mini-app's spec surface has always used
+        // u32 for `limit`. Clamp the shared usize to u32::MAX before the
+        // narrowing conversion so an oversized value (rare — practical
+        // limits are far below 2^32) never panics; the store treats these
+        // upper values as "give me everything you can".
+        let limit_override: Option<u32> = filters.limit.map(|n| n.min(u32::MAX as usize) as u32);
         let source_uri = uri.as_raw();
         let rest = source_uri.strip_prefix("mini-app://").ok_or_else(|| {
             WireError::Storage(format!("mini-app adapter: bad uri: {source_uri}"))
         })?;
-        let spec = parse_mini_app_uri(rest)?;
+        let spec = parse_mini_app_uri(rest, limit_override)?;
         if spec.alias.is_some() {
             self.fetch_via_alias(&spec).await
         } else {
@@ -460,7 +477,7 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_table_only() {
-        let spec = parse_mini_app_uri("mailbox").unwrap();
+        let spec = parse_mini_app_uri("mailbox", None).unwrap();
         assert_eq!(spec.table, "mailbox");
         assert_eq!(spec.alias, None);
         assert_eq!(spec.limit, None);
@@ -469,7 +486,7 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_with_alias_no_params() {
-        let spec = parse_mini_app_uri("mia_active_context?alias=active").unwrap();
+        let spec = parse_mini_app_uri("mia_active_context?alias=active", None).unwrap();
         assert_eq!(spec.table, "mia_active_context");
         assert_eq!(spec.alias.as_deref(), Some("active"));
         assert_eq!(spec.limit, None);
@@ -478,7 +495,8 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_with_alias_and_params() {
-        let spec = parse_mini_app_uri("mailbox?alias=unread_for&persona=mia&kind=info").unwrap();
+        let spec =
+            parse_mini_app_uri("mailbox?alias=unread_for&persona=mia&kind=info", None).unwrap();
         assert_eq!(spec.table, "mailbox");
         assert_eq!(spec.alias.as_deref(), Some("unread_for"));
         assert_eq!(spec.limit, None);
@@ -489,8 +507,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_mini_app_uri_with_limit() {
-        let spec = parse_mini_app_uri("mia_trigger?alias=due&persona=mia&limit=5").unwrap();
+    fn parse_mini_app_uri_with_limit_forwarded() {
+        // Phase 2: limit is parsed + validated by WireFilters::parse and
+        // passed in as `limit_override`; parse_mini_app_uri simply threads it
+        // through to the spec.
+        let spec =
+            parse_mini_app_uri("mia_trigger?alias=due&persona=mia&limit=5", Some(5)).unwrap();
         assert_eq!(spec.table, "mia_trigger");
         assert_eq!(spec.alias.as_deref(), Some("due"));
         assert_eq!(spec.limit, Some(5));
@@ -498,15 +520,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_mini_app_uri_invalid_limit_rejects() {
-        let r = parse_mini_app_uri("mailbox?limit=abc");
-        assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("invalid limit"));
+    fn parse_mini_app_uri_limit_query_key_is_excluded_from_params() {
+        // Even when the URI carries ?limit=... but the caller passes
+        // limit_override=None (as WireFilters::parse would when no `limit`
+        // query key was present), the key must not leak into `params`.
+        let spec = parse_mini_app_uri("t?alias=a&limit=10", None).unwrap();
+        assert_eq!(spec.alias.as_deref(), Some("a"));
+        assert_eq!(spec.limit, None);
+        assert_eq!(spec.params, serde_json::json!({}));
     }
 
     #[test]
     fn parse_mini_app_uri_reserved_keys_isolated_from_params() {
-        let spec = parse_mini_app_uri("t?alias=a&limit=10&alias_extra=x&limit_extra=y").unwrap();
+        let spec =
+            parse_mini_app_uri("t?alias=a&limit=10&alias_extra=x&limit_extra=y", Some(10)).unwrap();
         assert_eq!(spec.alias.as_deref(), Some("a"));
         assert_eq!(spec.limit, Some(10));
         assert_eq!(
@@ -517,16 +544,18 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_scope_absent_is_legacy_path() {
-        let spec = parse_mini_app_uri("mailbox?alias=unread").unwrap();
+        let spec = parse_mini_app_uri("mailbox?alias=unread", None).unwrap();
         assert_eq!(spec.scope, None);
         assert_eq!(spec.root, None);
     }
 
     #[test]
     fn parse_mini_app_uri_plain_form_with_scope_project_and_root() {
-        let spec =
-            parse_mini_app_uri("example_table?scope=example-project&root=/tmp/example-mini-app")
-                .unwrap();
+        let spec = parse_mini_app_uri(
+            "example_table?scope=example-project&root=/tmp/example-mini-app",
+            None,
+        )
+        .unwrap();
         assert_eq!(spec.table, "example_table");
         assert_eq!(spec.scope.as_deref(), Some("example-project"));
         assert_eq!(
@@ -540,7 +569,7 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_plain_form_scope_project_without_root_rejects() {
-        let r = parse_mini_app_uri("example_table?scope=example-project");
+        let r = parse_mini_app_uri("example_table?scope=example-project", None);
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();
         assert!(
@@ -551,7 +580,7 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_plain_form_with_scope_user_and_limit() {
-        let spec = parse_mini_app_uri("mailbox?scope=user&limit=50").unwrap();
+        let spec = parse_mini_app_uri("mailbox?scope=user&limit=50", Some(50)).unwrap();
         assert_eq!(spec.table, "mailbox");
         assert_eq!(spec.scope.as_deref(), Some("user"));
         assert_eq!(spec.alias, None);
@@ -560,7 +589,7 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_with_scope_user() {
-        let spec = parse_mini_app_uri("mailbox?scope=user&alias=unread").unwrap();
+        let spec = parse_mini_app_uri("mailbox?scope=user&alias=unread", None).unwrap();
         assert_eq!(spec.scope.as_deref(), Some("user"));
         assert_eq!(spec.root, None);
         assert_eq!(spec.alias.as_deref(), Some("unread"));
@@ -571,6 +600,7 @@ mod tests {
     fn parse_mini_app_uri_with_scope_project_and_root() {
         let spec = parse_mini_app_uri(
             "session_log?scope=persona-wire&root=/opt/data/pw&alias=recent&limit=5",
+            Some(5),
         )
         .unwrap();
         assert_eq!(spec.scope.as_deref(), Some("persona-wire"));
@@ -585,7 +615,7 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_scope_project_without_root_rejects() {
-        let r = parse_mini_app_uri("t?scope=example-project&alias=x");
+        let r = parse_mini_app_uri("t?scope=example-project&alias=x", None);
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();
         assert!(
@@ -596,7 +626,7 @@ mod tests {
 
     #[test]
     fn parse_mini_app_uri_scope_user_without_root_is_ok() {
-        let spec = parse_mini_app_uri("t?scope=user").unwrap();
+        let spec = parse_mini_app_uri("t?scope=user", None).unwrap();
         assert_eq!(spec.scope.as_deref(), Some("user"));
         assert_eq!(spec.root, None);
     }
@@ -608,7 +638,7 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", "/tmp/test-home");
         }
-        let spec = parse_mini_app_uri("t?scope=foo&root=~/.mini-app-foo").unwrap();
+        let spec = parse_mini_app_uri("t?scope=foo&root=~/.mini-app-foo", None).unwrap();
         match original {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -616,6 +646,63 @@ mod tests {
         assert_eq!(
             spec.root.as_deref(),
             Some(std::path::Path::new("/tmp/test-home/.mini-app-foo"))
+        );
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    #[test]
+    fn filter_caps_declares_limit_unbounded() {
+        assert_eq!(
+            MiniAppAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        use persona_wire_core::infrastructure::wire_uri::WireUri;
+        let wire = WireUri::parse("mini-app://mailbox?limit=7").unwrap();
+        let f = WireFilters::parse(&wire, MiniAppAdapter.filter_caps()).unwrap();
+        assert_eq!(f.limit, Some(7));
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_fails_loud() {
+        use persona_wire_core::infrastructure::wire_uri::WireUri;
+        let wire = WireUri::parse("mini-app://mailbox?limit=0").unwrap();
+        let err = WireFilters::parse(&wire, MiniAppAdapter.filter_caps()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_fails_loud() {
+        use persona_wire_core::infrastructure::wire_uri::WireUri;
+        let wire = WireUri::parse("mini-app://mailbox?limit=abc").unwrap();
+        let err = WireFilters::parse(&wire, MiniAppAdapter.filter_caps()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        use persona_wire_core::infrastructure::wire_uri::WireUri;
+        // `?query=` and `?since=` are filter-vocabulary keys not declared
+        // by mini-app; they must fail loud (adapter alias params like
+        // `?persona=` are addressing keys and are ignored by WireFilters).
+        let wire = WireUri::parse("mini-app://mailbox?query=hello").unwrap();
+        let err = WireFilters::parse(&wire, MiniAppAdapter.filter_caps()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
         );
     }
 

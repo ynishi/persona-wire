@@ -126,7 +126,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
@@ -156,13 +156,18 @@ impl Adapter for GithubAdapter {
         "github"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }]
+    }
+
     /// Fetch `spec.kind` items for the repo derived from `uri`, driving the
     /// Link-header pagination loop internally until `?limit=N` items are
     /// accumulated or the upstream signals end-of-data. See the module docs
     /// for URI grammar, auth resolution, and output shape (including
     /// `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let spec = parse_github_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_github_uri(uri, filters.limit.unwrap_or(DEFAULT_LIMIT))?;
         let client = github_http_client(uri)?;
         let mut items: Vec<serde_json::Value> = Vec::new();
         let mut url = spec.endpoint_url();
@@ -289,8 +294,10 @@ impl GithubUriSpec {
 
 /// Parse a `WireUri` (already split into typed components by the registry)
 /// into a [`GithubUriSpec`]. See the module-level "URI grammar" section for
-/// the exact rules and failure conditions.
-fn parse_github_uri(uri: &WireUri) -> WireResult<GithubUriSpec> {
+/// the exact rules and failure conditions. Cross-cutting filters
+/// (`?limit=`) are parsed separately via [`WireFilters::parse`] and passed
+/// in as `limit`.
+fn parse_github_uri(uri: &WireUri, limit: usize) -> WireResult<GithubUriSpec> {
     let owner = uri
         .host()
         .filter(|h| !h.is_empty())
@@ -345,23 +352,6 @@ fn parse_github_uri(uri: &WireUri) -> WireResult<GithubUriSpec> {
                 )));
             }
         }
-    };
-
-    let limit = match uri.query_get("limit") {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "github adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "github adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            n
-        }
-        None => DEFAULT_LIMIT,
     };
 
     Ok(GithubUriSpec {
@@ -528,9 +518,18 @@ mod tests {
 
     // ---- parse_github_uri ----
 
+    /// Helper: parse with the adapter's default limit (backwards-compatible
+    /// with the pre-Phase-2 default when no `?limit=` was supplied).
     fn parse(uri: &str) -> WireResult<GithubUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_github_uri(&wire)
+        parse_github_uri(&wire, DEFAULT_LIMIT)
+    }
+
+    /// Helper: parse with an explicit limit (simulates
+    /// `filters.limit = Some(n)` after `WireFilters::parse`).
+    fn parse_with_limit(uri: &str, limit: usize) -> WireResult<GithubUriSpec> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        parse_github_uri(&wire, limit)
     }
 
     #[test]
@@ -598,23 +597,60 @@ mod tests {
     }
 
     #[test]
-    fn parse_github_uri_limit_override() {
-        let spec = parse("github://octocat/hello-world?limit=5").unwrap();
+    fn parse_github_uri_limit_forwarded() {
+        let spec = parse_with_limit("github://octocat/hello-world", 5).unwrap();
         assert_eq!(spec.limit, 5);
     }
 
-    #[test]
-    fn parse_github_uri_limit_non_numeric_fails_loud() {
-        let err = parse("github://octocat/hello-world?limit=abc").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, GithubAdapter.filter_caps())
     }
 
     #[test]
-    fn parse_github_uri_limit_zero_fails_loud() {
-        let err = parse("github://octocat/hello-world?limit=0").unwrap_err();
+    fn filter_caps_declares_limit_unbounded() {
+        assert_eq!(
+            GithubAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        let f = parse_filters("github://octocat/hello-world?limit=5").unwrap();
+        assert_eq!(f.limit, Some(5));
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_fails_loud() {
+        let err = parse_filters("github://octocat/hello-world?limit=abc").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_fails_loud() {
+        let err = parse_filters("github://octocat/hello-world?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        let err = parse_filters("github://octocat/hello-world?query=x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
@@ -653,7 +689,7 @@ mod tests {
     fn endpoint_url_issues_shape() {
         // limit=5 over-fetches to per_page=20 (4x) so post-filter PR removal
         // still leaves enough real issues to satisfy the requested limit.
-        let spec = parse("github://octocat/hello-world?limit=5").unwrap();
+        let spec = parse_with_limit("github://octocat/hello-world?limit=5", 5).unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=20"
@@ -662,7 +698,7 @@ mod tests {
 
     #[test]
     fn endpoint_url_issues_over_fetches_per_page() {
-        let spec = parse("github://octocat/hello-world?limit=3").unwrap();
+        let spec = parse_with_limit("github://octocat/hello-world?limit=3", 3).unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=12"
@@ -672,7 +708,7 @@ mod tests {
     #[test]
     fn endpoint_url_issues_per_page_capped_at_100() {
         // limit=50 * 4 = 200, but GitHub's per_page ceiling caps it at 100.
-        let spec = parse("github://octocat/hello-world?limit=50").unwrap();
+        let spec = parse_with_limit("github://octocat/hello-world?limit=50", 50).unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=100"
@@ -684,7 +720,7 @@ mod tests {
         // limit > GITHUB_PER_PAGE_MAX must not panic (regression guard for
         // the clamp-vs-min choice in `endpoint_url`); per_page still caps at
         // GITHUB_PER_PAGE_MAX.
-        let spec = parse("github://octocat/hello-world?limit=250").unwrap();
+        let spec = parse_with_limit("github://octocat/hello-world?limit=250", 250).unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://api.github.com/repos/octocat/hello-world/issues?state=open&per_page=100"
@@ -694,7 +730,7 @@ mod tests {
     #[test]
     fn endpoint_url_pulls_shape_uses_limit_directly() {
         // `pulls` has no post-fetch filtering, so per_page = limit (no over-fetch).
-        let spec = parse("github://octocat/hello-world?kind=pulls&limit=5").unwrap();
+        let spec = parse_with_limit("github://octocat/hello-world?kind=pulls&limit=5", 5).unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://api.github.com/repos/octocat/hello-world/pulls?state=open&per_page=5"
@@ -703,7 +739,8 @@ mod tests {
 
     #[test]
     fn endpoint_url_releases_shape_has_no_state() {
-        let spec = parse("github://octocat/hello-world?kind=releases&limit=5").unwrap();
+        let spec =
+            parse_with_limit("github://octocat/hello-world?kind=releases&limit=5", 5).unwrap();
         assert_eq!(
             spec.endpoint_url(),
             "https://api.github.com/repos/octocat/hello-world/releases?per_page=5"
@@ -863,7 +900,7 @@ mod tests {
             issue_fixture(2, false),
             issue_fixture(3, true),
         ]);
-        let spec = parse("github://octocat/hello-world?limit=1").unwrap();
+        let spec = parse_with_limit("github://octocat/hello-world?limit=1", 1).unwrap();
         let v = normalize_github(&spec, &raw).unwrap();
         let items = v["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);

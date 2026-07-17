@@ -157,7 +157,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
@@ -194,12 +194,17 @@ impl Adapter for NotionAdapter {
         "notion"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }, FilterCap::TextQuery]
+    }
+
     /// Fetch `spec.kind` items, driving the `next_cursor` pagination loop
     /// internally until `?limit=N` items are accumulated or the upstream
     /// signals end-of-data. See the module docs for URI grammar, auth
     /// resolution, and output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let spec = parse_notion_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_notion_uri(uri, &filters)?;
         let client = notion_http_client(uri)?;
         match &spec.kind {
             NotionKind::Search => fetch_search(&client, &spec).await,
@@ -299,10 +304,12 @@ struct NotionUriSpec {
 }
 
 /// Parse a `WireUri` (already split into typed components by the registry)
-/// into a [`NotionUriSpec`]. See the module-level "URI grammar" section for
+/// into a [`NotionUriSpec`], using `filters` for cross-cutting `?limit=` /
+/// `?query=` values (already parsed and validated by
+/// [`WireFilters::parse`]). See the module-level "URI grammar" section for
 /// the exact rules and failure conditions.
-fn parse_notion_uri(uri: &WireUri) -> WireResult<NotionUriSpec> {
-    let limit = parse_limit(uri.query_get("limit"))?;
+fn parse_notion_uri(uri: &WireUri, filters: &WireFilters) -> WireResult<NotionUriSpec> {
+    let limit = filters.limit.unwrap_or(DEFAULT_LIMIT);
 
     let kind = match uri.host() {
         Some("search") => {
@@ -331,14 +338,12 @@ fn parse_notion_uri(uri: &WireUri) -> WireResult<NotionUriSpec> {
         }
     };
 
-    // `query` / `object` are unknown query keys for every kind other than
-    // Search and are not even read (module docs "URI grammar").
+    // `query` is meaningful only for Search; other kinds silently ignore a
+    // supplied `filters.query` (preserving pre-Phase-2 behavior). `object`
+    // is an adapter-specific addressing key (not part of the WireFilters
+    // vocabulary) and stays inline here.
     let (query, object) = if kind == NotionKind::Search {
-        let query = uri.query_get("query").map(|s| {
-            percent_encoding::percent_decode_str(s)
-                .decode_utf8_lossy()
-                .into_owned()
-        });
+        let query = filters.query.clone();
         let object = match uri.query_get("object") {
             None => None,
             Some(o @ ("page" | "data_source")) => Some(o.to_string()),
@@ -379,26 +384,8 @@ fn parse_single_id_segment(uri: &WireUri, kind_label: &str) -> WireResult<String
     }
 }
 
-/// Parse and validate the `?limit=` query value (see module docs "URI
-/// grammar" for the exact rules).
-fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
-    match raw {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "notion adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "notion adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            Ok(n)
-        }
-        None => Ok(DEFAULT_LIMIT),
-    }
-}
+// (`parse_limit` was removed — cross-cutting `?limit=` parsing is now done
+// by `WireFilters::parse` on the adapter side.)
 
 /// Builds the `POST /search` request body for `spec` — only the fields
 /// present in the URI are included (module docs "URI grammar").
@@ -821,9 +808,13 @@ mod tests {
 
     // ---- parse_notion_uri ----
 
+    /// Helper: run WireFilters::parse against the adapter's declared caps
+    /// and thread the resulting snapshot into `parse_notion_uri`, matching
+    /// the production `NotionAdapter::fetch` code path.
     fn parse(uri: &str) -> WireResult<NotionUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_notion_uri(&wire)
+        let filters = WireFilters::parse(&wire, NotionAdapter.filter_caps())?;
+        parse_notion_uri(&wire, &filters)
     }
 
     #[test]
@@ -940,18 +931,26 @@ mod tests {
     fn parse_notion_uri_limit_zero_fails_loud() {
         let err = parse("notion://search?limit=0").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn parse_notion_uri_limit_non_numeric_fails_loud() {
         let err = parse("notion://search?limit=abc").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
     fn parse_notion_uri_limit_above_max_ok() {
+        // The Limit cap is unbounded at the WireFilters level; the adapter
+        // clamps per-request page_size to MAX_LIMIT during pagination.
         let spec = parse("notion://search?limit=500").unwrap();
         assert_eq!(spec.limit, 500);
     }
@@ -963,10 +962,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_notion_uri_unknown_query_key_ignored() {
+    fn parse_notion_uri_unknown_addressing_key_ignored() {
         let spec = parse("notion://search?utm_source=foo").unwrap();
         assert_eq!(spec.kind, NotionKind::Search);
         assert_eq!(spec.query, None);
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    #[test]
+    fn filter_caps_declares_limit_and_text_query() {
+        assert_eq!(
+            NotionAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }, FilterCap::TextQuery]
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        let wire = WireUri::parse("notion://search?since=2026-01-01").expect("valid WireUri");
+        let err = WireFilters::parse(&wire, NotionAdapter.filter_caps()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("since") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ---- search_request_body ----

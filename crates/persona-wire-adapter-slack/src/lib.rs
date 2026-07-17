@@ -196,7 +196,7 @@
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
@@ -232,12 +232,17 @@ impl Adapter for SlackAdapter {
         "slack"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }]
+    }
+
     /// Fetch `spec.kind` items, driving the `next_cursor` pagination loop
     /// internally for paginatable kinds (`channels` / `history`). See the
     /// module docs for URI grammar, auth resolution, error handling, and
     /// output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let spec = parse_slack_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_slack_uri(uri, filters.limit.unwrap_or(DEFAULT_LIMIT))?;
         let client = slack_http_client(uri)?;
         match &spec.kind {
             SlackKind::Channels => drive_channels_loop(&client, &spec).await,
@@ -315,10 +320,12 @@ struct SlackUriSpec {
 
 /// Parse a `WireUri` (already split into typed components by the registry)
 /// into a [`SlackUriSpec`]. See the module-level "URI grammar" section for
-/// the exact rules and failure conditions.
-fn parse_slack_uri(uri: &WireUri) -> WireResult<SlackUriSpec> {
-    let limit = parse_limit(uri.query_get("limit"))?;
-
+/// the exact rules and failure conditions. Cross-cutting filters
+/// (`?limit=`) are parsed separately via [`WireFilters::parse`] and passed
+/// in as `limit`. `?oldest=` / `?latest=` are adapter-specific addressing
+/// keys (History only) and stay inline here (Phase 3 candidate for
+/// `SinceUntil` absorption).
+fn parse_slack_uri(uri: &WireUri, limit: usize) -> WireResult<SlackUriSpec> {
     let kind = match uri.host() {
         Some("channels") => {
             let path = uri.path();
@@ -399,26 +406,8 @@ fn parse_single_id_segment(uri: &WireUri, kind_label: &str) -> WireResult<String
     }
 }
 
-/// Parse and validate the `?limit=` query value (see module docs "URI
-/// grammar" for the exact rules).
-fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
-    match raw {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "slack adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "slack adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            Ok(n)
-        }
-        None => Ok(DEFAULT_LIMIT),
-    }
-}
+// (`parse_limit` was removed — cross-cutting `?limit=` parsing is now done
+// by `WireFilters::parse` on the adapter side.)
 
 /// Parse and validate the `?types=` query value for `kind=channels` (see
 /// module docs "URI grammar"). Absent defaults to `"public_channel"`; any
@@ -820,9 +809,18 @@ mod tests {
 
     // ---- parse_slack_uri ----
 
+    /// Helper: parse with the adapter's default limit (matches the pre-Phase-2
+    /// default when no `?limit=` was supplied).
     fn parse(uri: &str) -> WireResult<SlackUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_slack_uri(&wire)
+        parse_slack_uri(&wire, DEFAULT_LIMIT)
+    }
+
+    /// Helper: parse with an explicit limit (simulates
+    /// `filters.limit = Some(n)` after `WireFilters::parse`).
+    fn parse_with_limit(uri: &str, limit: usize) -> WireResult<SlackUriSpec> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        parse_slack_uri(&wire, limit)
     }
 
     #[test]
@@ -965,35 +963,77 @@ mod tests {
     }
 
     #[test]
-    fn parse_slack_uri_limit_zero_fails_loud() {
-        let err = parse("slack://channels?limit=0").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+    fn parse_slack_uri_limit_forwarded() {
+        let spec = parse_with_limit("slack://channels", 5).unwrap();
+        assert_eq!(spec.limit, 5);
     }
 
     #[test]
-    fn parse_slack_uri_limit_non_numeric_fails_loud() {
-        let err = parse("slack://channels?limit=abc").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_slack_uri_limit_above_max_ok() {
-        let spec = parse("slack://channels?limit=1500").unwrap();
-        assert_eq!(spec.limit, 1500);
-    }
-
-    #[test]
-    fn parse_slack_uri_limit_999_ok() {
-        let spec = parse("slack://channels?limit=999").unwrap();
-        assert_eq!(spec.limit, 999);
-    }
-
-    #[test]
-    fn parse_slack_uri_unknown_query_key_ignored() {
+    fn parse_slack_uri_unknown_addressing_key_ignored() {
         let spec = parse("slack://channels?utm_source=foo").unwrap();
         assert_eq!(spec.kind, SlackKind::Channels);
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, SlackAdapter.filter_caps())
+    }
+
+    #[test]
+    fn filter_caps_declares_limit_unbounded() {
+        assert_eq!(
+            SlackAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        let f = parse_filters("slack://channels?limit=5").unwrap();
+        assert_eq!(f.limit, Some(5));
+    }
+
+    #[test]
+    fn wire_filters_limit_above_adapter_max_ok() {
+        // WireFilters cap is unbounded; per-request clamp to MAX_LIMIT
+        // happens in the pagination loop.
+        let f = parse_filters("slack://channels?limit=1500").unwrap();
+        assert_eq!(f.limit, Some(1500));
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_fails_loud() {
+        let err = parse_filters("slack://channels?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_fails_loud() {
+        let err = parse_filters("slack://channels?limit=abc").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        // ?oldest= / ?latest= are adapter-specific addressing keys (Phase 3
+        // SinceUntil candidate) and stay inline; ?query= is not declared and
+        // must fail loud.
+        let err = parse_filters("slack://channels?query=x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ---- build_*_url ----
@@ -1010,7 +1050,7 @@ mod tests {
 
     #[test]
     fn build_history_url_with_oldest_and_latest() {
-        let spec = parse("slack://history/C1?oldest=1.5&latest=2.5&limit=5").unwrap();
+        let spec = parse_with_limit("slack://history/C1?oldest=1.5&latest=2.5&limit=5", 5).unwrap();
         let url = build_history_url("C1", &spec);
         assert!(url.starts_with("https://slack.com/api/conversations.history?channel=C1&limit=5"));
         assert!(url.contains("oldest=1%2E5"));
@@ -1368,7 +1408,7 @@ mod tests {
 
     #[test]
     fn slack_channels_url_clamps_limit_over_max() {
-        let spec = parse("slack://channels?limit=5000").unwrap();
+        let spec = parse_with_limit("slack://channels?limit=5000", 5000).unwrap();
         let url = build_channels_url(&spec);
         assert!(
             url.contains(&format!("limit={MAX_LIMIT}")),

@@ -76,7 +76,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
 
@@ -96,11 +96,17 @@ impl Adapter for ActivityPubAdapter {
         "activitypub"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }]
+    }
+
     /// Fetch the actor at the URL derived from `uri`, then either normalize
     /// the actor profile (`?kind=profile`) or fetch + normalize its outbox
     /// (`?kind=outbox`, default).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
         let spec = parse_activitypub_uri(uri)?;
+        let limit = filters.limit.unwrap_or(DEFAULT_LIMIT);
         let client = HttpClient::new("activitypub adapter")
             .with_timeout(FETCH_TIMEOUT)
             .with_header("Accept", "application/activity+json");
@@ -122,8 +128,8 @@ impl Adapter for ActivityPubAdapter {
                             "activitypub adapter: actor json missing 'outbox' field: {actor_url}"
                         ))
                     })?;
-                let items = fetch_outbox(&client, &outbox_url, spec.limit).await?;
-                let posts = normalize_posts(&items, spec.limit);
+                let items = fetch_outbox(&client, &outbox_url, limit).await?;
+                let posts = normalize_posts(&items, limit);
                 Ok(serde_json::json!({
                     "kind": "outbox",
                     "actor": {
@@ -146,14 +152,14 @@ enum Kind {
     Profile,
 }
 
-/// Parsed `activitypub://` URI: instance host, user, output kind, and item
-/// limit (see module docs for the grammar).
+/// Parsed `activitypub://` URI: instance host, user, and output kind (see
+/// module docs for the grammar). Cross-cutting filters (`?limit=`) are
+/// parsed separately via [`WireFilters::parse`].
 #[derive(Debug, Clone)]
 struct ActivityPubUriSpec {
     instance: String,
     user: String,
     kind: Kind,
-    limit: usize,
 }
 
 /// Parse a `WireUri` (already split into typed components by the registry)
@@ -164,8 +170,9 @@ struct ActivityPubUriSpec {
 ///   handle convention — see module docs).
 /// - `?kind=` must be `outbox` (default) or `profile`; any other value
 ///   fails loud.
-/// - `?limit=N` must parse as a positive integer; non-numeric or `0` fails
-///   loud with [`WireError::Storage`].
+/// - Cross-cutting filters (`?limit=N`) are parsed separately via
+///   [`WireFilters::parse`] using the capabilities declared in
+///   [`Adapter::filter_caps`].
 fn parse_activitypub_uri(uri: &WireUri) -> WireResult<ActivityPubUriSpec> {
     let instance = uri.host().filter(|h| !h.is_empty()).ok_or_else(|| {
         WireError::Storage(format!(
@@ -195,28 +202,10 @@ fn parse_activitypub_uri(uri: &WireUri) -> WireResult<ActivityPubUriSpec> {
         }
     };
 
-    let limit = match uri.query_get("limit") {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "activitypub adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "activitypub adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            n
-        }
-        None => DEFAULT_LIMIT,
-    };
-
     Ok(ActivityPubUriSpec {
         instance: instance.to_string(),
         user: user.to_string(),
         kind,
-        limit,
     })
 }
 
@@ -408,7 +397,6 @@ mod tests {
         assert_eq!(spec.instance, "mastodon.social");
         assert_eq!(spec.user, "alice");
         assert_eq!(spec.kind, Kind::Outbox);
-        assert_eq!(spec.limit, DEFAULT_LIMIT);
     }
 
     #[test]
@@ -448,37 +436,67 @@ mod tests {
     }
 
     #[test]
-    fn parse_activitypub_uri_limit_override() {
-        let spec = parse("activitypub://mastodon.social/@alice?limit=5").unwrap();
-        assert_eq!(spec.limit, 5);
-    }
-
-    #[test]
-    fn parse_activitypub_uri_limit_non_numeric_errors() {
-        let err = parse("activitypub://mastodon.social/@alice?limit=abc").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_activitypub_uri_limit_zero_errors() {
-        let err = parse("activitypub://mastodon.social/@alice?limit=0").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_activitypub_uri_unknown_query_key_ignored() {
+    fn parse_activitypub_uri_unknown_addressing_key_ignored() {
         let spec = parse("activitypub://mastodon.social/@alice?utm_source=foo").unwrap();
         assert_eq!(spec.kind, Kind::Outbox);
-        assert_eq!(spec.limit, DEFAULT_LIMIT);
     }
 
     #[test]
-    fn parse_activitypub_uri_combined_kind_and_limit() {
+    fn parse_activitypub_uri_combined_kind_ignores_limit() {
+        // parse_activitypub_uri no longer inspects ?limit=; addressing keys unaffected.
         let spec = parse("activitypub://mastodon.social/@alice?kind=profile&limit=3").unwrap();
         assert_eq!(spec.kind, Kind::Profile);
-        assert_eq!(spec.limit, 3);
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, ActivityPubAdapter.filter_caps())
+    }
+
+    #[test]
+    fn filter_caps_declares_limit_unbounded() {
+        assert_eq!(
+            ActivityPubAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        let f = parse_filters("activitypub://mastodon.social/@alice?limit=5").unwrap();
+        assert_eq!(f.limit, Some(5));
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_errors() {
+        let err = parse_filters("activitypub://mastodon.social/@alice?limit=abc").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_errors() {
+        let err = parse_filters("activitypub://mastodon.social/@alice?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        let err = parse_filters("activitypub://mastodon.social/@alice?query=x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ---- normalize_actor ----

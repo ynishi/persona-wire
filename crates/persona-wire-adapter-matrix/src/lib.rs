@@ -102,7 +102,7 @@
 use async_trait::async_trait;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
@@ -127,12 +127,17 @@ impl Adapter for MatrixAdapter {
         "matrix"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }]
+    }
+
     /// Fetch the `sync` or `rooms/<room_id>/messages` payload identified by
     /// `uri`, and wrap the raw upstream JSON in the envelope documented in
     /// the module docs "Output shape". See the module docs for URI grammar
     /// and auth resolution.
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let req = parse_matrix_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let req = parse_matrix_uri(uri, filters.limit.unwrap_or(DEFAULT_LIMIT))?;
         let client = matrix_http_client(uri)?;
         match req {
             MatrixRequest::Sync { homeserver, limit } => {
@@ -222,8 +227,10 @@ enum MatrixRequest {
 
 /// Parse a `WireUri` (already split into typed components by the registry)
 /// into a [`MatrixRequest`]. See the module-level "URI grammar" section for
-/// the exact rules and failure conditions.
-fn parse_matrix_uri(uri: &WireUri) -> WireResult<MatrixRequest> {
+/// the exact rules and failure conditions. Cross-cutting filters
+/// (`?limit=`) are parsed separately via [`WireFilters::parse`] and passed
+/// in as `limit`.
+fn parse_matrix_uri(uri: &WireUri, limit: usize) -> WireResult<MatrixRequest> {
     let homeserver = uri
         .host()
         .filter(|h| !h.is_empty())
@@ -238,15 +245,11 @@ fn parse_matrix_uri(uri: &WireUri) -> WireResult<MatrixRequest> {
     let segments: Vec<&str> = uri.path().split('/').filter(|s| !s.is_empty()).collect();
 
     match segments.as_slice() {
-        ["sync"] => {
-            let limit = parse_limit(uri)?;
-            Ok(MatrixRequest::Sync { homeserver, limit })
-        }
+        ["sync"] => Ok(MatrixRequest::Sync { homeserver, limit }),
         ["rooms", room_id, "messages"] => {
             let room_id = percent_decode_str(room_id)
                 .decode_utf8_lossy()
                 .into_owned();
-            let limit = parse_limit(uri)?;
             let dir = parse_dir(uri)?;
             Ok(MatrixRequest::RoomMessages {
                 homeserver,
@@ -259,27 +262,6 @@ fn parse_matrix_uri(uri: &WireUri) -> WireResult<MatrixRequest> {
             "matrix adapter: unsupported path '{}' (expected matrix://<homeserver>/sync or matrix://<homeserver>/rooms/<room_id>/messages)",
             uri.as_raw()
         ))),
-    }
-}
-
-/// Parses `?limit=` (module docs "URI grammar"): defaults to
-/// [`DEFAULT_LIMIT`]; a non-numeric or zero value fails loud.
-fn parse_limit(uri: &WireUri) -> WireResult<usize> {
-    match uri.query_get("limit") {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "matrix adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "matrix adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            Ok(n)
-        }
-        None => Ok(DEFAULT_LIMIT),
     }
 }
 
@@ -346,9 +328,18 @@ mod tests {
 
     // ---- parse_matrix_uri: sync ----
 
+    /// Helper: parse with the adapter's default limit (backwards-compatible
+    /// with the pre-Phase-2 default when no `?limit=` was supplied).
     fn parse(uri: &str) -> WireResult<MatrixRequest> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_matrix_uri(&wire)
+        parse_matrix_uri(&wire, DEFAULT_LIMIT)
+    }
+
+    /// Helper: parse with an explicit limit (simulates
+    /// `filters.limit = Some(n)` after `WireFilters::parse`).
+    fn parse_with_limit(uri: &str, limit: usize) -> WireResult<MatrixRequest> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        parse_matrix_uri(&wire, limit)
     }
 
     #[test]
@@ -365,7 +356,7 @@ mod tests {
 
     #[test]
     fn parse_sync_explicit_limit() {
-        let req = parse("matrix://matrix.org/sync?limit=10").unwrap();
+        let req = parse_with_limit("matrix://matrix.org/sync?limit=10", 10).unwrap();
         assert_eq!(
             req,
             MatrixRequest::Sync {
@@ -393,8 +384,11 @@ mod tests {
 
     #[test]
     fn parse_rooms_messages_dir_f_explicit() {
-        let req =
-            parse("matrix://matrix.org/rooms/!abc:matrix.org/messages?dir=f&limit=5").unwrap();
+        let req = parse_with_limit(
+            "matrix://matrix.org/rooms/!abc:matrix.org/messages?dir=f&limit=5",
+            5,
+        )
+        .unwrap();
         assert_eq!(
             req,
             MatrixRequest::RoomMessages {
@@ -440,11 +434,55 @@ mod tests {
         );
     }
 
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, MatrixAdapter.filter_caps())
+    }
+
     #[test]
-    fn parse_invalid_limit_fails_loud() {
-        let err = parse("matrix://matrix.org/sync?limit=abc").unwrap_err();
+    fn filter_caps_declares_limit_unbounded() {
+        assert_eq!(
+            MatrixAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        let f = parse_filters("matrix://matrix.org/sync?limit=10").unwrap();
+        assert_eq!(f.limit, Some(10));
+    }
+
+    #[test]
+    fn wire_filters_invalid_limit_fails_loud() {
+        let err = parse_filters("matrix://matrix.org/sync?limit=abc").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_zero_limit_fails_loud() {
+        let err = parse_filters("matrix://matrix.org/sync?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        let err = parse_filters("matrix://matrix.org/sync?query=x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

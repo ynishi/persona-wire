@@ -34,6 +34,7 @@
 //! | filter key absent | field stays `None` (default) |
 //! | value present but wrong type (`limit=abc`, `lines=x-y`, `tail_n=abc`, `tail=unknown`) | `Err` (fail loud) |
 //! | value well-typed but exceeds a declared cap (`limit=5000` w/ `max=Some(40)`, `tail_n=5000` w/ `n_max=1000`) | clamp to the cap + `tracing::warn!` |
+//! | `limit=0` (list-shaped filter with no useful semantics for zero) | `Err` |
 //! | `lines=FROM-TO` with `FROM > TO`, or `FROM == 0` (1-origin violation) | `Err` |
 //! | filter key present in the URI but not declared in `caps` | `Err` ("not supported by this adapter") |
 
@@ -144,7 +145,10 @@ impl WireFilters {
             let max = limit_cap.ok_or_else(|| unsupported_filter("limit", caps))?;
             let n: usize = raw
                 .parse()
-                .map_err(|_| invalid_value("limit", raw, "a non-negative integer"))?;
+                .map_err(|_| invalid_value("limit", raw, "a positive integer"))?;
+            if n == 0 {
+                return Err(invalid_value("limit", raw, "a positive integer (> 0)"));
+            }
             filters.limit = Some(match max {
                 Some(m) => clamp_with_warn("limit", n, m),
                 None => n,
@@ -377,6 +381,19 @@ mod tests {
         let caps = [FilterCap::Limit { max: Some(40) }];
         let r = WireFilters::parse(&uri("mini-app://t?limit=abc"), &caps);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_limit_zero_errs() {
+        let caps = [FilterCap::Limit { max: Some(40) }];
+        let r = WireFilters::parse(&uri("mini-app://t?limit=0"), &caps);
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("limit"), "message should name the key: {msg}");
+        assert!(
+            msg.contains("positive"),
+            "message should say positive: {msg}"
+        );
     }
 
     #[test]

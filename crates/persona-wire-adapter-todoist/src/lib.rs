@@ -116,7 +116,7 @@
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::{adapter::Adapter, wire_uri::WireUri};
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 use persona_wire_credentials::Credentials;
 use persona_wire_transport_http::HttpClient;
 use std::time::Duration;
@@ -148,12 +148,17 @@ impl Adapter for TodoistAdapter {
         "todoist"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        &[FilterCap::Limit { max: None }]
+    }
+
     /// Fetch `spec.kind` items, driving the `next_cursor` pagination loop
     /// internally until `?limit=N` items are accumulated or the upstream
     /// signals end-of-data. See the module docs for URI grammar, auth
     /// resolution, and output shape (including `has_more` semantics).
     async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
-        let spec = parse_todoist_uri(uri)?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_todoist_uri(uri, filters.limit.unwrap_or(DEFAULT_LIMIT))?;
         let client = todoist_http_client(uri)?;
         let mut items: Vec<serde_json::Value> = Vec::new();
         let mut cursor: Option<String> = None;
@@ -300,8 +305,10 @@ fn build_request_url(spec: &TodoistUriSpec, cursor: Option<&str>) -> String {
 
 /// Parse a `WireUri` (already split into typed components by the registry)
 /// into a [`TodoistUriSpec`]. See the module-level "URI grammar" section for
-/// the exact rules and failure conditions.
-fn parse_todoist_uri(uri: &WireUri) -> WireResult<TodoistUriSpec> {
+/// the exact rules and failure conditions. Cross-cutting filters
+/// (`?limit=`) are parsed separately via [`WireFilters::parse`] and passed
+/// in as `limit`.
+fn parse_todoist_uri(uri: &WireUri, limit: usize) -> WireResult<TodoistUriSpec> {
     let kind = match uri.host() {
         Some("tasks") => TodoistKind::Tasks,
         Some("projects") => TodoistKind::Projects,
@@ -325,8 +332,6 @@ fn parse_todoist_uri(uri: &WireUri) -> WireResult<TodoistUriSpec> {
             uri.as_raw()
         )));
     }
-
-    let limit = parse_limit(uri.query_get("limit"))?;
 
     match kind {
         TodoistKind::Tasks => {
@@ -364,26 +369,8 @@ fn parse_todoist_uri(uri: &WireUri) -> WireResult<TodoistUriSpec> {
     }
 }
 
-/// Parse and validate the `?limit=` query value (see module docs "URI
-/// grammar" for the exact rules).
-fn parse_limit(raw: Option<&str>) -> WireResult<usize> {
-    match raw {
-        Some(raw) => {
-            let n: usize = raw.parse().map_err(|_| {
-                WireError::Storage(format!(
-                    "todoist adapter: invalid limit '{raw}' (must be a positive integer)"
-                ))
-            })?;
-            if n == 0 {
-                return Err(WireError::Storage(format!(
-                    "todoist adapter: invalid limit '{raw}' (must be > 0)"
-                )));
-            }
-            Ok(n)
-        }
-        None => Ok(DEFAULT_LIMIT),
-    }
-}
+// (`parse_limit` was removed — cross-cutting `?limit=` parsing is now done
+// by `WireFilters::parse` on the adapter side.)
 
 /// Normalize a single-page Todoist API v1 response (`raw`, expected to be
 /// an object with a `results` array) per `spec.kind` into the Wire JSON
@@ -539,9 +526,18 @@ mod tests {
 
     // ---- parse_todoist_uri ----
 
+    /// Helper: parse with the adapter's default limit (matches the pre-Phase-2
+    /// default when no `?limit=` was supplied).
     fn parse(uri: &str) -> WireResult<TodoistUriSpec> {
         let wire = WireUri::parse(uri).expect("valid WireUri");
-        parse_todoist_uri(&wire)
+        parse_todoist_uri(&wire, DEFAULT_LIMIT)
+    }
+
+    /// Helper: parse with an explicit limit (simulates
+    /// `filters.limit = Some(n)` after `WireFilters::parse`).
+    fn parse_with_limit(uri: &str, limit: usize) -> WireResult<TodoistUriSpec> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        parse_todoist_uri(&wire, limit)
     }
 
     #[test]
@@ -610,7 +606,7 @@ mod tests {
 
     #[test]
     fn parse_todoist_uri_filter_raw_value_accepted() {
-        let spec = parse("todoist://tasks?filter=today | overdue&limit=5").unwrap();
+        let spec = parse_with_limit("todoist://tasks?filter=today | overdue&limit=5", 5).unwrap();
         assert_eq!(spec.filter.as_deref(), Some("today | overdue"));
         let url = build_request_url(&spec, None);
         assert!(!url.contains(' '), "space must be encoded: {url}");
@@ -626,42 +622,85 @@ mod tests {
     }
 
     #[test]
-    fn parse_todoist_uri_limit_zero_fails_loud() {
-        let err = parse("todoist://tasks?limit=0").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
+    fn parse_todoist_uri_limit_forwarded() {
+        // parse_todoist_uri now receives limit as a parameter; it just
+        // stores it. Validation (non-numeric / zero) lives in WireFilters.
+        let spec = parse_with_limit("todoist://tasks", 5).unwrap();
+        assert_eq!(spec.limit, 5);
     }
 
     #[test]
-    fn parse_todoist_uri_limit_non_numeric_fails_loud() {
-        let err = parse("todoist://tasks?limit=abc").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid limit"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn parse_todoist_uri_limit_above_max_ok() {
-        let spec = parse("todoist://tasks?limit=500").unwrap();
-        assert_eq!(spec.limit, 500);
-    }
-
-    #[test]
-    fn parse_todoist_uri_limit_200_ok() {
-        let spec = parse("todoist://tasks?limit=200").unwrap();
-        assert_eq!(spec.limit, 200);
-    }
-
-    #[test]
-    fn parse_todoist_uri_unknown_query_key_ignored() {
+    fn parse_todoist_uri_unknown_addressing_key_ignored() {
         let spec = parse("todoist://tasks?utm_source=foo").unwrap();
         assert_eq!(spec.kind, TodoistKind::Tasks);
         assert_eq!(spec.project_id, None);
         assert_eq!(spec.filter, None);
     }
 
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = WireUri::parse(uri).expect("valid WireUri");
+        WireFilters::parse(&wire, TodoistAdapter.filter_caps())
+    }
+
+    #[test]
+    fn filter_caps_declares_limit_unbounded() {
+        assert_eq!(
+            TodoistAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        let f = parse_filters("todoist://tasks?limit=5").unwrap();
+        assert_eq!(f.limit, Some(5));
+    }
+
+    #[test]
+    fn wire_filters_limit_above_adapter_max_ok() {
+        // MAX_LIMIT is enforced per-request during pagination; the WireFilters
+        // cap is unbounded, so oversized values pass parse.
+        let f = parse_filters("todoist://tasks?limit=500").unwrap();
+        assert_eq!(f.limit, Some(500));
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_fails_loud() {
+        let err = parse_filters("todoist://tasks?limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_non_numeric_fails_loud() {
+        let err = parse_filters("todoist://tasks?limit=abc").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("invalid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        // ?query= is not declared; ?filter= is an adapter-specific addressing
+        // key and stays inline (Todoist DSL, out of the WireFilters vocabulary).
+        let err = parse_filters("todoist://tasks?query=x").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("query") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
+    }
+
     #[test]
     fn endpoint_url_tasks_default_shape() {
-        let spec = parse("todoist://tasks?limit=5").unwrap();
+        let spec = parse_with_limit("todoist://tasks?limit=5", 5).unwrap();
         assert_eq!(
             build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=5"
@@ -670,7 +709,7 @@ mod tests {
 
     #[test]
     fn endpoint_url_tasks_with_project_id() {
-        let spec = parse("todoist://tasks?project_id=123&limit=5").unwrap();
+        let spec = parse_with_limit("todoist://tasks?project_id=123&limit=5", 5).unwrap();
         assert_eq!(
             build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=5&project_id=123"
@@ -679,7 +718,8 @@ mod tests {
 
     #[test]
     fn endpoint_url_tasks_filter_encodes_query() {
-        let spec = parse("todoist://tasks?filter=today%20%7C%20overdue&limit=5").unwrap();
+        let spec =
+            parse_with_limit("todoist://tasks?filter=today%20%7C%20overdue&limit=5", 5).unwrap();
         assert_eq!(spec.filter.as_deref(), Some("today | overdue"));
         let url = build_request_url(&spec, None);
         assert!(
@@ -693,7 +733,7 @@ mod tests {
 
     #[test]
     fn endpoint_url_projects_shape() {
-        let spec = parse("todoist://projects?limit=5").unwrap();
+        let spec = parse_with_limit("todoist://projects?limit=5", 5).unwrap();
         assert_eq!(
             build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/projects?limit=5"
@@ -899,7 +939,7 @@ mod tests {
     #[test]
     fn build_request_url_tasks_default_caps_at_max_limit() {
         // ?limit=5: per-request limit = min(5, 200) = 5.
-        let spec = parse("todoist://tasks?limit=5").unwrap();
+        let spec = parse_with_limit("todoist://tasks?limit=5", 5).unwrap();
         assert_eq!(
             build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=5"
@@ -909,7 +949,7 @@ mod tests {
     #[test]
     fn build_request_url_tasks_over_max_caps_at_max() {
         // ?limit=500: per-request limit = min(500, MAX_LIMIT=200) = 200.
-        let spec = parse("todoist://tasks?limit=500").unwrap();
+        let spec = parse_with_limit("todoist://tasks?limit=500", 500).unwrap();
         assert_eq!(
             build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=200"
@@ -918,7 +958,7 @@ mod tests {
 
     #[test]
     fn build_request_url_tasks_over_max_with_project_scope() {
-        let spec = parse("todoist://tasks?project_id=123&limit=500").unwrap();
+        let spec = parse_with_limit("todoist://tasks?project_id=123&limit=500", 500).unwrap();
         assert_eq!(
             build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/tasks?limit=200&project_id=123"
@@ -927,7 +967,7 @@ mod tests {
 
     #[test]
     fn build_request_url_projects_over_max_caps_at_max() {
-        let spec = parse("todoist://projects?limit=500").unwrap();
+        let spec = parse_with_limit("todoist://projects?limit=500", 500).unwrap();
         assert_eq!(
             build_request_url(&spec, None),
             "https://api.todoist.com/api/v1/projects?limit=200"
@@ -936,7 +976,7 @@ mod tests {
 
     #[test]
     fn build_request_url_with_cursor_appends_token() {
-        let spec = parse("todoist://tasks?limit=500").unwrap();
+        let spec = parse_with_limit("todoist://tasks?limit=500", 500).unwrap();
         let url = build_request_url(&spec, Some("abc"));
         assert!(url.contains("cursor=abc"), "unexpected url: {url}");
         assert!(url.contains("limit=200"), "unexpected url: {url}");

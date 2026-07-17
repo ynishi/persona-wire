@@ -42,7 +42,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use persona_wire_core::infrastructure::adapter::Adapter;
-use persona_wire_core::{WireError, WireResult};
+use persona_wire_core::{FilterCap, WireError, WireFilters, WireResult};
 
 #[derive(Debug, Clone)]
 struct SqliteUriSpec {
@@ -62,7 +62,17 @@ enum SqliteQueryKind {
     Table(String),
 }
 
-fn parse_sqlite_uri(source_uri: &str) -> WireResult<SqliteUriSpec> {
+/// Query keys owned by the cross-cutting [`WireFilters`] vocabulary. The
+/// bespoke parser skips them out of its "unknown query key" rejection path
+/// so cross-cutting filter keys can co-exist with the adapter's own
+/// `?query=` / `?table=` addressing surface (Phase 2 unified filter IF).
+const WIRE_FILTER_QUERY_KEYS: &[&str] = &["limit", "lines", "tail", "tail_n", "since", "until"];
+
+fn parse_sqlite_uri(
+    source_uri: &str,
+    limit_override: Option<usize>,
+    sql_from_filters: Option<String>,
+) -> WireResult<SqliteUriSpec> {
     let rest = source_uri
         .strip_prefix("sqlite://")
         .ok_or_else(|| WireError::Storage(format!("sqlite adapter: bad uri: {source_uri}")))?;
@@ -81,9 +91,10 @@ fn parse_sqlite_uri(source_uri: &str) -> WireResult<SqliteUriSpec> {
     }
     let path = expand_path(path_part)?;
 
-    let mut sql: Option<String> = None;
     let mut table: Option<String> = None;
-    let mut limit: Option<usize> = None;
+    // `?query=` は WireFilters::parse で percent-decoded 済みの値を
+    // sql_from_filters として受け取る。 The bespoke parser here only owns
+    // the addressing surface (`?table=`) and the path resolution.
     if let Some(qs) = query_part {
         for pair in qs.split('&') {
             if pair.is_empty() {
@@ -99,15 +110,16 @@ fn parse_sqlite_uri(source_uri: &str) -> WireResult<SqliteUriSpec> {
                 .map(|(_, val)| val.into_owned())
                 .unwrap_or_default();
             match k {
-                "query" => sql = Some(v),
                 "table" => table = Some(v),
-                "limit" => {
-                    let n: usize = v.parse().map_err(|e| {
-                        WireError::Storage(format!(
-                            "sqlite adapter: invalid limit '{v}' in {source_uri}: {e}"
-                        ))
-                    })?;
-                    limit = Some(n);
+                // `?query=` is a WireFilters TextQuery cap that the sqlite
+                // adapter re-uses as a SQL literal (see the crate-level
+                // notes on why the key was kept over renaming). It is
+                // consumed via `sql_from_filters`, not here.
+                "query" => {}
+                key if WIRE_FILTER_QUERY_KEYS.contains(&key) => {
+                    // Other WireFilters vocab keys (e.g. `?limit=`) are
+                    // parsed on the adapter's fetch entry point; skip
+                    // silently here.
                 }
                 _ => {
                     return Err(WireError::Storage(format!(
@@ -118,7 +130,7 @@ fn parse_sqlite_uri(source_uri: &str) -> WireResult<SqliteUriSpec> {
         }
     }
 
-    let query = match (sql, table) {
+    let query = match (sql_from_filters, table) {
         (Some(_), Some(_)) => {
             return Err(WireError::Storage(format!(
                 "sqlite adapter: `query` and `table` are mutually exclusive in {source_uri}"
@@ -133,7 +145,11 @@ fn parse_sqlite_uri(source_uri: &str) -> WireResult<SqliteUriSpec> {
         }
     };
 
-    Ok(SqliteUriSpec { path, query, limit })
+    Ok(SqliteUriSpec {
+        path,
+        query,
+        limit: limit_override,
+    })
 }
 
 fn expand_path(raw: &str) -> WireResult<PathBuf> {
@@ -281,11 +297,20 @@ impl Adapter for SqliteAdapter {
         "sqlite"
     }
 
+    fn filter_caps(&self) -> &'static [FilterCap] {
+        // `TextQuery` is declared so `?query=<SQL>` passes the WireFilters
+        // vocabulary gate (the SQL literal is percent-decoded there and
+        // handed back through `filters.query`). The sqlite adapter then
+        // uses it as its primary form.
+        &[FilterCap::Limit { max: None }, FilterCap::TextQuery]
+    }
+
     async fn fetch(
         &self,
         uri: &persona_wire_core::infrastructure::wire_uri::WireUri,
     ) -> WireResult<serde_json::Value> {
-        let spec = parse_sqlite_uri(uri.as_raw())?;
+        let filters = WireFilters::parse(uri, self.filter_caps())?;
+        let spec = parse_sqlite_uri(uri.as_raw(), filters.limit, filters.query.clone())?;
         // rusqlite は同期 API。 tokio runtime を block しないよう spawn_blocking でラップ。
         let self_ = SqliteAdapter;
         tokio::task::spawn_blocking(move || self_.execute(&spec))
@@ -324,7 +349,7 @@ mod tests {
 
     #[test]
     fn parse_sqlite_uri_table_form() {
-        let spec = parse_sqlite_uri("sqlite:///var/data/x.db?table=foo").unwrap();
+        let spec = parse_sqlite_uri("sqlite:///var/data/x.db?table=foo", None, None).unwrap();
         assert_eq!(spec.path, PathBuf::from("/var/data/x.db"));
         assert!(matches!(spec.query, SqliteQueryKind::Table(ref n) if n == "foo"));
         assert_eq!(spec.limit, None);
@@ -332,8 +357,12 @@ mod tests {
 
     #[test]
     fn parse_sqlite_uri_query_form() {
+        // Phase 2: the SQL is percent-decoded by WireFilters::parse and
+        // handed in as `sql_from_filters`.
         let spec = parse_sqlite_uri(
             "sqlite:///var/data/x.db?query=SELECT%20*%20FROM%20foo%20WHERE%20x%3D1",
+            None,
+            Some("SELECT * FROM foo WHERE x=1".to_string()),
         )
         .unwrap();
         match spec.query {
@@ -344,27 +373,32 @@ mod tests {
 
     #[test]
     fn parse_sqlite_uri_with_limit() {
-        let spec = parse_sqlite_uri("sqlite:///var/data/x.db?table=foo&limit=10").unwrap();
+        let spec =
+            parse_sqlite_uri("sqlite:///var/data/x.db?table=foo&limit=10", Some(10), None).unwrap();
         assert_eq!(spec.limit, Some(10));
     }
 
     #[test]
     fn parse_sqlite_uri_query_and_table_conflict() {
-        let r = parse_sqlite_uri("sqlite:///var/data/x.db?query=SELECT&table=foo");
+        let r = parse_sqlite_uri(
+            "sqlite:///var/data/x.db?query=SELECT&table=foo",
+            None,
+            Some("SELECT".to_string()),
+        );
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("mutually exclusive"));
     }
 
     #[test]
     fn parse_sqlite_uri_missing_query_and_table() {
-        let r = parse_sqlite_uri("sqlite:///var/data/x.db");
+        let r = parse_sqlite_uri("sqlite:///var/data/x.db", None, None);
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("must specify"));
     }
 
     #[test]
     fn parse_sqlite_uri_unknown_key_rejected() {
-        let r = parse_sqlite_uri("sqlite:///var/data/x.db?table=foo&hocus=pocus");
+        let r = parse_sqlite_uri("sqlite:///var/data/x.db?table=foo&hocus=pocus", None, None);
         assert!(r.is_err());
         assert!(r
             .unwrap_err()
@@ -379,7 +413,7 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", "/var/data/test-home");
         }
-        let spec = parse_sqlite_uri("sqlite://~/data.db?table=foo").unwrap();
+        let spec = parse_sqlite_uri("sqlite://~/data.db?table=foo", None, None).unwrap();
         match original {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -389,16 +423,59 @@ mod tests {
 
     #[test]
     fn parse_sqlite_uri_missing_path_rejected() {
-        let r = parse_sqlite_uri("sqlite://?table=foo");
+        let r = parse_sqlite_uri("sqlite://?table=foo", None, None);
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("missing path"));
     }
 
     #[test]
     fn parse_sqlite_uri_bad_scheme_rejected() {
-        let r = parse_sqlite_uri("file:///var/data/x.db");
+        let r = parse_sqlite_uri("file:///var/data/x.db", None, None);
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("bad uri"));
+    }
+
+    // ---- filter_caps + WireFilters integration (Phase 2 unified filter IF) ----
+
+    fn parse_filters(uri: &str) -> WireResult<WireFilters> {
+        let wire = persona_wire_core::infrastructure::wire_uri::WireUri::parse(uri)
+            .expect("valid WireUri");
+        WireFilters::parse(&wire, SqliteAdapter.filter_caps())
+    }
+
+    #[test]
+    fn filter_caps_declares_limit_and_text_query() {
+        assert_eq!(
+            SqliteAdapter.filter_caps(),
+            &[FilterCap::Limit { max: None }, FilterCap::TextQuery]
+        );
+    }
+
+    #[test]
+    fn wire_filters_limit_override() {
+        let f = parse_filters("sqlite:///var/data/x.db?table=foo&limit=5").unwrap();
+        assert_eq!(f.limit, Some(5));
+    }
+
+    #[test]
+    fn wire_filters_limit_zero_fails_loud() {
+        let err = parse_filters("sqlite:///var/data/x.db?table=foo&limit=0").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("limit") && msg.contains("positive"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_filters_undeclared_filter_key_errors() {
+        // ?since= is not declared; must fail loud.
+        let err = parse_filters("sqlite:///var/data/x.db?table=foo&since=2026-01-01").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("since") && msg.contains("not supported"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[tokio::test]
