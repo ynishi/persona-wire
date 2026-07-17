@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1](https://github.com/ynishi/persona-wire/compare/v0.14.0...v0.14.1) - 2026-07-17
+
+### Added
+
+- *(adapters)* absorb slack time bounds and obsidian line slicing into the unified filter vocabulary (Filter IF, Phase 3)
+- *(wire)* one-shot slot setup, raw fetch preview, explicit projection_ref resolution
+- *(adapters)* migrate 12 list-family adapters to unified WireFilters parser (Phase 2)
+
+### Other
+
+- replace internal example identifiers with generic placeholders
+- drop one remaining internal name from a test comment
+
 ## [0.14.0](https://github.com/ynishi/persona-wire/compare/v0.13.0...v0.14.0) - 2026-07-11
 
 ### Added
