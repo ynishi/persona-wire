@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2](https://github.com/ynishi/persona-wire/compare/v0.14.1...v0.14.2) - 2026-07-20
+
+### Added
+
+- *(core)* wire-layer generic post-filter for undeclared capabilities (Filter IF, closes #10)
+
 ## [0.14.1](https://github.com/ynishi/persona-wire/compare/v0.14.0...v0.14.1) - 2026-07-17
 
 ### Added
