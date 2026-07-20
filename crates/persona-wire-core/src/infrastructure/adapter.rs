@@ -154,6 +154,21 @@ pub trait Adapter: Send + Sync {
         &[]
     }
 
+    /// Whether the wire layer may claim filter-vocabulary keys this adapter
+    /// did not declare and apply them itself, post-fetch (GH #10 — see
+    /// [`WireFilters::split_post`]). Default `true`: the vocabulary keys
+    /// (`limit` / `lines` / `tail` / `tail_n` / `since` / `until` / `query`)
+    /// are reserved cross-cutting names, so a normal adapter never interprets
+    /// an undeclared one as addressing.
+    ///
+    /// Passthrough adapters whose URI grammar forwards arbitrary query keys
+    /// to an upstream (e.g. `mcp://`, where `?query=` becomes a tool
+    /// argument) MUST override this to `false` — stripping a vocabulary key
+    /// from their URI would change the upstream call.
+    fn post_filterable(&self) -> bool {
+        true
+    }
+
     /// Interprets the parsed `WireUri` per scheme and returns fresh data as a
     /// `serde_json::Value`.
     ///

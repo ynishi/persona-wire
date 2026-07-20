@@ -217,6 +217,208 @@ impl WireFilters {
 
         Ok(filters)
     }
+
+    /// Splits the vocabulary keys requested in `uri` into "native" (declared
+    /// in `caps`, left in the URI for the adapter's own
+    /// [`parse`](WireFilters::parse)) and "post" (requested but undeclared,
+    /// AND wire-applicable) sets. Returns `None` when no post-set key is
+    /// requested — the fetch proceeds exactly as before GH #10.
+    ///
+    /// Wire-applicable capabilities are [`FilterCap::TextQuery`] (applied to
+    /// list-shaped `items[]` responses), [`FilterCap::LineRange`] and
+    /// [`FilterCap::Tail`] (applied to document-shaped `body` strings via
+    /// [`apply_to_text`](WireFilters::apply_to_text)). Undeclared
+    /// [`FilterCap::Limit`] / [`FilterCap::SinceUntil`] requests are NOT
+    /// split — they stay in the URI and keep failing loud in the adapter's
+    /// own parse (limit interacts with upstream pagination and since/until
+    /// needs a per-shape timestamp path; see GH #10 "Out" scope).
+    ///
+    /// Post-set values are validated with the same grammar / error policy as
+    /// native parsing (wrong types and `FROM > TO` fail loud here, before
+    /// any fetch happens).
+    pub fn split_post(uri: &WireUri, caps: &[FilterCap]) -> WireResult<Option<PostFilterPlan>> {
+        let declared_lines = caps.iter().any(|c| matches!(c, FilterCap::LineRange));
+        let declared_tail = caps.iter().any(|c| matches!(c, FilterCap::Tail { .. }));
+        let declared_query = caps.iter().any(|c| matches!(c, FilterCap::TextQuery));
+
+        let post_lines = uri.query_get("lines").is_some() && !declared_lines;
+        let requested_tail_key = if uri.query_get("tail").is_some() {
+            Some("tail")
+        } else if uri.query_get("tail_n").is_some() {
+            Some("tail_n")
+        } else {
+            None
+        };
+        let post_tail = requested_tail_key.is_some() && !declared_tail;
+        let post_query = uri.query_get("query").is_some() && !declared_query;
+
+        if !(post_lines || post_tail || post_query) {
+            return Ok(None);
+        }
+
+        // Validate post values through the shared parser by augmenting the
+        // declared caps with the wire-applicable set. Undeclared limit /
+        // since / until requests still fail loud inside this parse — the
+        // augmentation never adds those caps.
+        let mut augmented: Vec<FilterCap> = caps.to_vec();
+        if !declared_lines {
+            augmented.push(FilterCap::LineRange);
+        }
+        if !declared_tail {
+            augmented.push(FilterCap::Tail {
+                n_max: crate::infrastructure::adapter::TAIL_N_MAX,
+            });
+        }
+        if !declared_query {
+            augmented.push(FilterCap::TextQuery);
+        }
+        let full = WireFilters::parse(uri, &augmented)?;
+
+        let mut filters = WireFilters::default();
+        let mut strip_keys: Vec<&'static str> = Vec::new();
+        let mut applied_keys: Vec<&'static str> = Vec::new();
+        if post_lines {
+            filters.line_range = full.line_range;
+            strip_keys.push("lines");
+            applied_keys.push("lines");
+        }
+        if post_tail {
+            filters.tail = full.tail.clone();
+            strip_keys.push("tail");
+            strip_keys.push("tail_n");
+            applied_keys.push(requested_tail_key.expect("post_tail implies a requested key"));
+        }
+        if post_query {
+            filters.query = full.query.clone();
+            strip_keys.push("query");
+            applied_keys.push("query");
+        }
+        // Same mutual-exclusion rule the document adapters enforce natively,
+        // applied to the post set (native/post cross-pairs are allowed: the
+        // native slice happens in the adapter, the post slice on its result).
+        if filters.line_range.is_some() && filters.tail.is_some() {
+            return Err(WireError::Storage(
+                "lines and tail are mutually exclusive".to_string(),
+            ));
+        }
+        Ok(Some(PostFilterPlan {
+            filters,
+            strip_keys,
+            applied_keys,
+        }))
+    }
+}
+
+/// Wire-layer post-filter plan produced by [`WireFilters::split_post`] (GH
+/// #10): the subset of requested filters the adapter did not declare but the
+/// wire layer applies in memory after the fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostFilterPlan {
+    /// The post-set filters. Only wire-applicable fields are ever populated
+    /// (`line_range` / `tail` / `query`) — never `limit` / `since` / `until`.
+    pub filters: WireFilters,
+    /// Vocabulary query keys to strip from the raw URI before adapter
+    /// dispatch (so the adapter's own parse never sees the post-set keys).
+    pub strip_keys: Vec<&'static str>,
+    /// The requested key spellings, recorded verbatim into the
+    /// `post_filtered` response marker after application.
+    pub applied_keys: Vec<&'static str>,
+}
+
+impl PostFilterPlan {
+    /// Applies the post-set filters to the adapter's response `value` in
+    /// place and inserts the `post_filtered: [<keys>]` marker.
+    ///
+    /// Shape contract (fail loud on mismatch — a requested filter is never
+    /// silently ignored):
+    /// - `query` requires a list-shaped response: a top-level `items` array.
+    ///   Items are retained when any string leaf (case-insensitive) contains
+    ///   the query text.
+    /// - `lines` / `tail` require a document-shaped response: a top-level
+    ///   `body` string, sliced via [`WireFilters::apply_to_text`].
+    /// - The response must be a JSON object (marker insertion target).
+    ///
+    /// Under-fill semantics: post-filters apply AFTER the adapter's native
+    /// `limit` / pagination, so a limited fetch may return fewer than
+    /// `limit` items once narrowed — by design, documented, not compensated.
+    pub fn apply(&self, value: &mut serde_json::Value) -> WireResult<()> {
+        if value.as_object().is_none() {
+            return Err(WireError::Storage(format!(
+                "wire post-filter ({}) requires a JSON-object response, got {}",
+                self.applied_keys.join(", "),
+                json_type_name(value)
+            )));
+        }
+
+        if let Some(q) = &self.filters.query {
+            let items = value
+                .get_mut("items")
+                .and_then(|v| v.as_array_mut())
+                .ok_or_else(|| {
+                    WireError::Storage(
+                        "wire post-filter 'query' requires a list-shaped response \
+                         (top-level `items` array) — this adapter's response has none"
+                            .to_string(),
+                    )
+                })?;
+            let needle = q.to_lowercase();
+            items.retain(|item| json_contains_text(item, &needle));
+        }
+
+        if self.filters.line_range.is_some() || self.filters.tail.is_some() {
+            let body = value
+                .get("body")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    WireError::Storage(
+                        "wire post-filter 'lines'/'tail' requires a document-shaped \
+                         response (top-level `body` string) — this adapter's response \
+                         has none"
+                            .to_string(),
+                    )
+                })?;
+            let sliced = self.filters.apply_to_text(&body);
+            value["body"] = serde_json::Value::String(sliced);
+        }
+
+        let obj = value
+            .as_object_mut()
+            .expect("checked to be an object above");
+        obj.insert(
+            "post_filtered".to_string(),
+            serde_json::Value::Array(
+                self.applied_keys
+                    .iter()
+                    .map(|k| serde_json::Value::String((*k).to_string()))
+                    .collect(),
+            ),
+        );
+        Ok(())
+    }
+}
+
+/// Case-insensitive substring search over every string leaf of `v`
+/// (`needle_lower` must already be lowercased).
+fn json_contains_text(v: &serde_json::Value, needle_lower: &str) -> bool {
+    match v {
+        serde_json::Value::String(s) => s.to_lowercase().contains(needle_lower),
+        serde_json::Value::Array(a) => a.iter().any(|x| json_contains_text(x, needle_lower)),
+        serde_json::Value::Object(o) => o.values().any(|x| json_contains_text(x, needle_lower)),
+        _ => false,
+    }
+}
+
+/// Short JSON type label for post-filter shape-mismatch errors.
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 /// Short vocabulary name for a capability, used in the "supported: ..."
@@ -656,5 +858,172 @@ mod tests {
     #[test]
     fn percent_decode_handles_plain_ascii() {
         assert_eq!(percent_decode("hello"), "hello");
+    }
+
+    // ---- split_post / PostFilterPlan (GH #10 wire-layer post-filter) ----
+
+    #[test]
+    fn split_post_none_when_no_vocab_keys_requested() {
+        let plan = WireFilters::split_post(&uri("rss://example.com/feed"), &[]).unwrap();
+        assert_eq!(plan, None);
+    }
+
+    #[test]
+    fn split_post_none_when_all_requested_keys_are_declared() {
+        let caps = [FilterCap::Limit { max: None }, FilterCap::TextQuery];
+        let plan =
+            WireFilters::split_post(&uri("mini-app://t?limit=5&query=hello"), &caps).unwrap();
+        assert_eq!(plan, None, "native-capability requests must not split");
+    }
+
+    #[test]
+    fn split_post_claims_undeclared_query_and_keeps_native_limit() {
+        let caps = [FilterCap::Limit { max: None }];
+        let plan = WireFilters::split_post(&uri("rss://h/feed?limit=3&query=Foo%20bar"), &caps)
+            .unwrap()
+            .expect("undeclared query must produce a post plan");
+        assert_eq!(plan.filters.query.as_deref(), Some("Foo bar"));
+        assert_eq!(
+            plan.filters.limit, None,
+            "native limit stays out of the post set"
+        );
+        assert_eq!(plan.strip_keys, vec!["query"]);
+        assert_eq!(plan.applied_keys, vec!["query"]);
+    }
+
+    #[test]
+    fn split_post_undeclared_limit_still_fails_loud() {
+        let r = WireFilters::split_post(&uri("note://h?limit=3&query=a"), &[]);
+        let err = r.expect_err("undeclared limit is not post-applicable");
+        assert!(err.to_string().contains("limit"), "err: {err}");
+    }
+
+    #[test]
+    fn split_post_undeclared_since_until_still_fails_loud() {
+        let r = WireFilters::split_post(&uri("note://h?since=2026-01-01&query=a"), &[]);
+        let err = r.expect_err("undeclared since is not post-applicable");
+        assert!(err.to_string().contains("since"), "err: {err}");
+    }
+
+    #[test]
+    fn split_post_validates_post_values_with_shared_grammar() {
+        let r = WireFilters::split_post(&uri("note://h?lines=abc"), &[]);
+        assert!(
+            r.is_err(),
+            "malformed post value must fail loud before fetch"
+        );
+    }
+
+    #[test]
+    fn split_post_post_lines_and_tail_mutually_exclusive() {
+        let r = WireFilters::split_post(&uri("note://h?lines=1-2&tail_n=3"), &[]);
+        let err = r.expect_err("post lines+tail must reject");
+        assert!(err.to_string().contains("mutually exclusive"), "err: {err}");
+    }
+
+    #[test]
+    fn split_post_tail_n_records_requested_key_and_clamps() {
+        let plan = WireFilters::split_post(&uri("note://h?tail_n=5000"), &[])
+            .unwrap()
+            .expect("undeclared tail_n must produce a post plan");
+        assert_eq!(
+            plan.filters.tail,
+            Some(TailSpec::LastN(1000)),
+            "clamped to TAIL_N_MAX"
+        );
+        assert_eq!(plan.applied_keys, vec!["tail_n"]);
+        assert!(plan.strip_keys.contains(&"tail") && plan.strip_keys.contains(&"tail_n"));
+    }
+
+    #[test]
+    fn split_post_native_line_range_with_post_query_splits_only_query() {
+        let caps = [FilterCap::LineRange];
+        let plan = WireFilters::split_post(&uri("note://h?lines=1-2&query=x"), &caps)
+            .unwrap()
+            .expect("query is post");
+        assert_eq!(plan.filters.line_range, None, "declared lines stays native");
+        assert_eq!(plan.strip_keys, vec!["query"]);
+    }
+
+    fn plan_query(q: &str) -> PostFilterPlan {
+        PostFilterPlan {
+            filters: WireFilters {
+                query: Some(q.to_string()),
+                ..WireFilters::default()
+            },
+            strip_keys: vec!["query"],
+            applied_keys: vec!["query"],
+        }
+    }
+
+    #[test]
+    fn apply_query_filters_items_case_insensitive_and_marks() {
+        let mut v = serde_json::json!({
+            "scheme": "rss",
+            "items": [
+                {"title": "Rust 1.90 released", "tags": ["lang"]},
+                {"title": "unrelated", "tags": ["misc"]},
+                {"title": "nested", "meta": {"note": "about RUST too"}},
+            ],
+            "has_more": false,
+        });
+        plan_query("rust").apply(&mut v).unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "case-insensitive match over string leaves");
+        assert_eq!(v["post_filtered"], serde_json::json!(["query"]));
+        assert_eq!(
+            v["has_more"],
+            serde_json::json!(false),
+            "other fields untouched"
+        );
+    }
+
+    #[test]
+    fn apply_query_requires_items_array() {
+        let mut v = serde_json::json!({"scheme": "file", "body": "text"});
+        let err = plan_query("x")
+            .apply(&mut v)
+            .expect_err("no items[] must fail loud");
+        assert!(err.to_string().contains("items"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_lines_slices_body_and_marks() {
+        let plan = PostFilterPlan {
+            filters: WireFilters {
+                line_range: Some((2, 3)),
+                ..WireFilters::default()
+            },
+            strip_keys: vec!["lines"],
+            applied_keys: vec!["lines"],
+        };
+        let mut v = serde_json::json!({"scheme": "x", "body": "a\nb\nc\nd"});
+        plan.apply(&mut v).unwrap();
+        assert_eq!(v["body"], serde_json::json!("b\nc"));
+        assert_eq!(v["post_filtered"], serde_json::json!(["lines"]));
+    }
+
+    #[test]
+    fn apply_lines_requires_body_string() {
+        let plan = PostFilterPlan {
+            filters: WireFilters {
+                line_range: Some((1, 2)),
+                ..WireFilters::default()
+            },
+            strip_keys: vec!["lines"],
+            applied_keys: vec!["lines"],
+        };
+        let mut v = serde_json::json!({"scheme": "x", "body": null});
+        let err = plan.apply(&mut v).expect_err("null body must fail loud");
+        assert!(err.to_string().contains("body"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_rejects_non_object_response() {
+        let mut v = serde_json::json!(["bare", "array"]);
+        let err = plan_query("x")
+            .apply(&mut v)
+            .expect_err("non-object must fail loud");
+        assert!(err.to_string().contains("array"), "err: {err}");
     }
 }

@@ -309,6 +309,44 @@ always single-row.
 Bulk-insert through `wire_nodes_create_batch` / `wire_edges_create_batch`
 when you have many axes at once.
 
+### Cross-cutting filters — native vs wire-layer post-filter
+
+The query keys `limit` / `lines` / `tail` / `tail_n` / `since` / `until` /
+`query` form a reserved cross-cutting filter vocabulary shared by every
+scheme (the per-scheme notes above tell you which keys each adapter
+interprets **natively**). When a URI requests a vocabulary key the adapter
+does not natively support, the wire layer steps in for the subset it can
+apply in memory after the fetch:
+
+- `?query=TEXT` on a **list-shaped** response — items whose string fields
+  contain `TEXT` (case-insensitive) are retained, the rest dropped. Works
+  on any adapter returning a top-level `items` array (`rss://`,
+  `github://`, `mastodon://`, ...).
+- `?lines=FROM-TO` / `?tail=` / `?tail_n=N` on a **document-shaped**
+  response — the top-level `body` string is sliced with the same engine
+  the `file:` adapter uses natively.
+
+A post-filtered response carries an explicit marker so consumers can tell
+wire-side narrowing from native filtering:
+
+```jsonc
+{ "items": [ ... ], "has_more": false, "post_filtered": ["query"] }
+```
+
+Semantics to be aware of:
+
+- **Under-fill**: post-filters run AFTER the adapter's native `limit` /
+  pagination, so `?limit=20&query=x` may return fewer than 20 items (the
+  20 fetched items are narrowed, not re-fetched). This is by design — the
+  marker tells you the narrowing happened at the wire layer.
+- **Still fail loud**: capabilities the wire layer cannot apply post-hoc
+  keep the Phase 2 fail-loud behavior — an undeclared `?limit=` /
+  `?since=` / `?until=` request, or a post `?query=` against a response
+  with no `items` array, errors instead of being silently ignored.
+- **`mcp://` is exempt**: its query keys are tool arguments (passthrough
+  grammar), so the wire layer never claims them — `?query=` on `mcp://`
+  reaches the MCP tool untouched, exactly as before.
+
 ## 2d. Adapter credentials — token setup
 
 Adapters that hit remote APIs (`github://` / `todoist://` / `notion://` /

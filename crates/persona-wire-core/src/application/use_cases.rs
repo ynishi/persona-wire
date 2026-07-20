@@ -7,6 +7,8 @@ use crate::domain::error::{DomainError, WireError, WireResult};
 use crate::domain::graph::Node;
 use crate::domain::port::ProjectionInput;
 use crate::domain::specification::Specification;
+use crate::infrastructure::adapter::Adapter;
+use crate::infrastructure::filter::WireFilters;
 use crate::infrastructure::storage::SqliteStorage;
 use crate::infrastructure::wire_uri::WireUri;
 
@@ -525,7 +527,7 @@ async fn render_collected_slot_async(
     // merge.
     let fetch_uri = merge_auth_query(&c.source_uri, c.auth.as_deref());
     let fetched = match registry.route(&fetch_uri) {
-        Ok((adapter, uri)) => match adapter.fetch(&uri).await {
+        Ok((adapter, uri)) => match fetch_with_post_filters(&*adapter, &uri, &fetch_uri).await {
             Ok(v) => v,
             Err(e) => {
                 warnings.push(format!(
@@ -586,6 +588,74 @@ async fn render_collected_slot_async(
         target_form: c.target_form,
         rendered,
     })
+}
+
+/// Adapter dispatch + wire-layer post-filter stage (GH #10) — the one fetch
+/// path both `render_collected_slot_async` and [`wire_fetch`] go through.
+///
+/// When the URI requests a filter-vocabulary key the adapter did not declare
+/// AND the wire layer can apply it post-hoc
+/// ([`WireFilters::split_post`] — `query` on `items[]`, `lines`/`tail` on
+/// `body`), the key is stripped from the URI before the adapter sees it, the
+/// fetch runs unfiltered for that key, and the filter is applied in memory
+/// here, marking the response with `post_filtered: [<keys>]`. Native
+/// requests (declared caps) pass through byte-identical — no split, no
+/// marker.
+///
+/// Opt-out: adapters whose query namespace is passthrough
+/// ([`Adapter::post_filterable`] `== false`, e.g. `mcp://`) never get keys
+/// stripped; their own parse/forwarding behavior is unchanged.
+async fn fetch_with_post_filters(
+    adapter: &dyn Adapter,
+    uri: &WireUri,
+    raw_fetch_uri: &str,
+) -> WireResult<serde_json::Value> {
+    let plan = if adapter.post_filterable() {
+        WireFilters::split_post(uri, adapter.filter_caps())?
+    } else {
+        None
+    };
+    match plan {
+        None => adapter.fetch(uri).await,
+        Some(plan) => {
+            let stripped = strip_query_params(raw_fetch_uri, &plan.strip_keys);
+            let stripped_uri = WireUri::parse(&stripped)?;
+            let mut fetched = adapter.fetch(&stripped_uri).await?;
+            plan.apply(&mut fetched)?;
+            Ok(fetched)
+        }
+    }
+}
+
+/// Removes the given query keys from `raw_uri`'s query string (raw
+/// string-level, the inverse of [`append_query_param`]). Drops the `?` when
+/// no query pairs remain; any `#fragment` is preserved. Scheme/host/path are
+/// never re-interpreted (same policy as [`append_query_param`]).
+fn strip_query_params(raw_uri: &str, keys: &[&str]) -> String {
+    let (base, fragment) = match raw_uri.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (raw_uri, None),
+    };
+    let (path, query) = match base.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => return raw_uri.to_string(),
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            let key = pair.split_once('=').map(|(k, _)| k).unwrap_or(pair);
+            !keys.contains(&key)
+        })
+        .collect();
+    let rebuilt = if kept.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", kept.join("&"))
+    };
+    match fragment {
+        Some(f) => format!("{rebuilt}#{f}"),
+        None => rebuilt,
+    }
 }
 
 /// Merges a wiring entry's `metadata.auth` service key into `source_uri` as
@@ -918,7 +988,7 @@ pub async fn wire_fetch(
     };
 
     let (adapter, uri) = registry.route(&fetch_uri)?;
-    let fetched_data = adapter.fetch(&uri).await?;
+    let fetched_data = fetch_with_post_filters(&*adapter, &uri, &fetch_uri).await?;
 
     Ok(WireFetchOutput {
         source_uri: stored_uri,
@@ -3824,6 +3894,224 @@ mod tests {
         .await
         .expect_err("both forms at once must reject");
         assert!(err.to_string().contains("wire_fetch"), "err: {err}");
+    }
+
+    // ---- wire-layer post-filter (GH #10) ----
+
+    /// List-shaped test adapter: declares `Limit` only (no `TextQuery`), so a
+    /// `?query=` request exercises the wire post-filter path. Its `fetch`
+    /// re-parses with the declared caps — if the wire layer failed to strip a
+    /// post key, the parse fails loud and the test catches the leak.
+    struct ListyAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for ListyAdapter {
+        fn scheme(&self) -> &'static str {
+            "listy"
+        }
+        fn filter_caps(&self) -> &'static [crate::infrastructure::filter::FilterCap] {
+            &[crate::infrastructure::filter::FilterCap::Limit { max: None }]
+        }
+        async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
+            let _ = WireFilters::parse(uri, self.filter_caps())?;
+            Ok(listy_raw_output())
+        }
+    }
+
+    fn listy_raw_output() -> serde_json::Value {
+        json!({
+            "scheme": "listy",
+            "items": [
+                {"title": "alpha item"},
+                {"title": "beta item"},
+                {"title": "beta second"},
+            ],
+            "has_more": false,
+        })
+    }
+
+    /// Passthrough test adapter (mcp:// stand-in): opts out of wire
+    /// post-filtering, echoes whether the `query` key survived to the fetch.
+    struct PassthroughAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for PassthroughAdapter {
+        fn scheme(&self) -> &'static str {
+            "passx"
+        }
+        fn post_filterable(&self) -> bool {
+            false
+        }
+        async fn fetch(&self, uri: &WireUri) -> WireResult<serde_json::Value> {
+            Ok(json!({ "saw_query": uri.query_get("query") }))
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_fetch_post_filters_undeclared_query_and_marks() {
+        let s = std::sync::Arc::new(std::sync::Mutex::new(setup()));
+        let registry = PluginRegistry::builder()
+            .with_adapter(ListyAdapter)
+            .build()
+            .unwrap();
+        let out = wire_fetch(
+            WireFetchInput {
+                source_uri: Some("listy://h?query=BETA".into()),
+                persona_id: None,
+                slot: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        let items = out.fetched_data["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "narrowed case-insensitively: {items:?}");
+        assert_eq!(out.fetched_data["post_filtered"], json!(["query"]));
+    }
+
+    #[tokio::test]
+    async fn wire_fetch_native_request_stays_byte_identical_without_marker() {
+        let s = std::sync::Arc::new(std::sync::Mutex::new(setup()));
+        let registry = PluginRegistry::builder()
+            .with_adapter(ListyAdapter)
+            .build()
+            .unwrap();
+        let out = wire_fetch(
+            WireFetchInput {
+                source_uri: Some("listy://h?limit=2".into()),
+                persona_id: None,
+                slot: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.fetched_data,
+            listy_raw_output(),
+            "declared-cap request must return the adapter output verbatim (no marker)"
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_fetch_post_query_on_document_shape_fails_loud() {
+        let dir = std::env::temp_dir().join(format!("wire-postq-doc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("doc.md");
+        std::fs::write(&file, "some text").unwrap();
+
+        let s = std::sync::Arc::new(std::sync::Mutex::new(setup()));
+        let registry = default_registry();
+        let err = wire_fetch(
+            WireFetchInput {
+                source_uri: Some(format!("file:{}?query=text", file.display())),
+                persona_id: None,
+                slot: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .expect_err("query post-filter on a document shape must fail loud");
+        assert!(err.to_string().contains("items"), "err: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn wire_fetch_optout_adapter_keeps_vocabulary_keys() {
+        let s = std::sync::Arc::new(std::sync::Mutex::new(setup()));
+        let registry = PluginRegistry::builder()
+            .with_adapter(PassthroughAdapter)
+            .build()
+            .unwrap();
+        let out = wire_fetch(
+            WireFetchInput {
+                source_uri: Some("passx://h?query=abc".into()),
+                persona_id: None,
+                slot: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.fetched_data,
+            json!({ "saw_query": "abc" }),
+            "opt-out adapter must see the key untouched and gain no marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_prompt_context_renders_post_filtered_items() {
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input(
+                "alpha",
+                "feed",
+                "listy://h?query=beta",
+                "{{#each entries}}{{#each this.fetched_data.items}}{{this.title}};{{/each}}{{/each}}",
+            ),
+            &storage,
+        )
+        .unwrap();
+
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = PluginRegistry::default_builder_for_wire()
+            .with_adapter(ListyAdapter)
+            .build()
+            .unwrap();
+        let out = wire_prompt_context(
+            WirePromptContextInput {
+                persona_id: "alpha".into(),
+                projection_names: None,
+                projection_exclude_names: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.prompt_context.contains("beta item;beta second;"),
+            "post-narrowed items render: {}",
+            out.prompt_context
+        );
+        assert!(
+            !out.prompt_context.contains("alpha item"),
+            "filtered-out item must not render: {}",
+            out.prompt_context
+        );
+        assert!(out.warnings.is_empty(), "warnings: {:?}", out.warnings);
+    }
+
+    // ---- strip_query_params ----
+
+    #[test]
+    fn strip_query_params_removes_only_listed_keys() {
+        assert_eq!(
+            strip_query_params("x://h/p?query=a&limit=3", &["query"]),
+            "x://h/p?limit=3"
+        );
+    }
+
+    #[test]
+    fn strip_query_params_drops_question_mark_when_empty() {
+        assert_eq!(strip_query_params("x://h/p?query=a", &["query"]), "x://h/p");
+    }
+
+    #[test]
+    fn strip_query_params_preserves_fragment_and_no_query_uri() {
+        assert_eq!(
+            strip_query_params("x://h/p?query=a&k=v#frag", &["query"]),
+            "x://h/p?k=v#frag"
+        );
+        assert_eq!(
+            strip_query_params("x://h/p#frag", &["query"]),
+            "x://h/p#frag"
+        );
     }
 
     // ---- empty-render warning ----

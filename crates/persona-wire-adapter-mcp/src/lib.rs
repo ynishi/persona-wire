@@ -386,6 +386,14 @@ impl Adapter for McpAdapter {
         "mcp"
     }
 
+    /// `mcp://` is a passthrough scheme: every `?key=value` pair becomes a
+    /// tool argument (see [`parse_tool_args`]), so the filter-vocabulary keys
+    /// (`?query=`, `?limit=`, ...) are addressing here, not filters. The wire
+    /// layer must never strip them for post-filtering (GH #10 opt-out).
+    fn post_filterable(&self) -> bool {
+        false
+    }
+
     async fn fetch(&self, uri: &WireUri) -> WireResult<Value> {
         let spec = parse_mcp_uri(uri)?;
         let endpoint = self.resolver.resolve(&spec.server).await?;
@@ -524,6 +532,23 @@ mod tests {
     fn parse(uri: &str) -> WireResult<McpUriSpec> {
         let wire = WireUri::parse(uri)?;
         parse_mcp_uri(&wire)
+    }
+
+    struct NeverResolver;
+
+    #[async_trait]
+    impl McpEndpointResolver for NeverResolver {
+        async fn resolve(&self, alias: &str) -> WireResult<ServerEndpoint> {
+            Err(WireError::Storage(format!("test resolver: {alias}")))
+        }
+    }
+
+    #[test]
+    fn mcp_adapter_opts_out_of_wire_post_filtering() {
+        // `?query=` etc. are tool arguments on this passthrough scheme — the
+        // wire layer must never strip them (GH #10 opt-out contract).
+        let adapter = McpAdapter::new(Arc::new(NeverResolver));
+        assert!(!adapter.post_filterable());
     }
 
     #[test]
