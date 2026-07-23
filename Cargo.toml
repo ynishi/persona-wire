@@ -32,7 +32,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.14.2"
+version = "0.14.3"
 edition = "2021"
 authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
@@ -108,21 +108,21 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 rpassword = "7"
 
 # Intra-workspace
-persona-wire-core = { path = "crates/persona-wire-core", version = "0.14.2" }
-persona-wire-adapter-activitypub = { path = "crates/persona-wire-adapter-activitypub", version = "0.14.2" }
-persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.14.2" }
-persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.14.2" }
-persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.14.2" }
-persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.14.2" }
-persona-wire-adapter-mcp = { path = "crates/persona-wire-adapter-mcp", version = "0.14.2" }
-persona-wire-adapter-rss = { path = "crates/persona-wire-adapter-rss", version = "0.14.2" }
-persona-wire-transport-http = { path = "crates/persona-wire-transport-http", version = "0.14.2" }
-persona-wire-credentials = { path = "crates/persona-wire-credentials", version = "0.14.2" }
-persona-wire-adapter-github = { path = "crates/persona-wire-adapter-github", version = "0.14.2" }
-persona-wire-adapter-todoist = { path = "crates/persona-wire-adapter-todoist", version = "0.14.2" }
-persona-wire-adapter-notion = { path = "crates/persona-wire-adapter-notion", version = "0.14.2" }
-persona-wire-adapter-slack = { path = "crates/persona-wire-adapter-slack", version = "0.14.2" }
-persona-wire-adapter-apple-notes = { path = "crates/persona-wire-adapter-apple-notes", version = "0.14.2" }
-persona-wire-adapter-bluesky = { path = "crates/persona-wire-adapter-bluesky", version = "0.14.2" }
-persona-wire-adapter-matrix = { path = "crates/persona-wire-adapter-matrix", version = "0.14.2" }
-persona-wire-adapter-mastodon = { path = "crates/persona-wire-adapter-mastodon", version = "0.14.2" }
+persona-wire-core = { path = "crates/persona-wire-core", version = "0.14.3" }
+persona-wire-adapter-activitypub = { path = "crates/persona-wire-adapter-activitypub", version = "0.14.3" }
+persona-wire-adapter-mini-app = { path = "crates/persona-wire-adapter-mini-app", version = "0.14.3" }
+persona-wire-adapter-persona-pack = { path = "crates/persona-wire-adapter-persona-pack", version = "0.14.3" }
+persona-wire-adapter-sqlite-x = { path = "crates/persona-wire-adapter-sqlite-x", version = "0.14.3" }
+persona-wire-adapter-obsidian = { path = "crates/persona-wire-adapter-obsidian", version = "0.14.3" }
+persona-wire-adapter-mcp = { path = "crates/persona-wire-adapter-mcp", version = "0.14.3" }
+persona-wire-adapter-rss = { path = "crates/persona-wire-adapter-rss", version = "0.14.3" }
+persona-wire-transport-http = { path = "crates/persona-wire-transport-http", version = "0.14.3" }
+persona-wire-credentials = { path = "crates/persona-wire-credentials", version = "0.14.3" }
+persona-wire-adapter-github = { path = "crates/persona-wire-adapter-github", version = "0.14.3" }
+persona-wire-adapter-todoist = { path = "crates/persona-wire-adapter-todoist", version = "0.14.3" }
+persona-wire-adapter-notion = { path = "crates/persona-wire-adapter-notion", version = "0.14.3" }
+persona-wire-adapter-slack = { path = "crates/persona-wire-adapter-slack", version = "0.14.3" }
+persona-wire-adapter-apple-notes = { path = "crates/persona-wire-adapter-apple-notes", version = "0.14.3" }
+persona-wire-adapter-bluesky = { path = "crates/persona-wire-adapter-bluesky", version = "0.14.3" }
+persona-wire-adapter-matrix = { path = "crates/persona-wire-adapter-matrix", version = "0.14.3" }
+persona-wire-adapter-mastodon = { path = "crates/persona-wire-adapter-mastodon", version = "0.14.3" }
