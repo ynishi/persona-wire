@@ -11,3 +11,5 @@ workspace
 !.env.sample
 !.env.template
 !.env.dist
+.codex
+AGENTS.md
