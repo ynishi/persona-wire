@@ -179,7 +179,7 @@ always single-row.
   `?lines=FROM-TO` (1-origin inclusive) slices the returned `body` after the
   frontmatter split; wiki-links are extracted from the sliced view.
   Returns `{ vault_path, note_path, frontmatter, body, wiki_links? }`.
-  Example: `obsidian:////Users/me/vault/daily.md?frontmatter=on&links=edge`.
+  Example: `obsidian://~/vault/daily.md?frontmatter=on&links=edge`.
 - `sqlite://<path>[?query=<SQL>|?table=<name>][&limit=N]` — read-only
   SQL against any SQLite file (mini-app schema convention 非依存).
   `<path>` accepts `~/` expansion; `sqlite:///abs/path.db`,
