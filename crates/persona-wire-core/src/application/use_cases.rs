@@ -4611,7 +4611,7 @@ mod tests {
     async fn wire_materialize_persists_snapshot_items_registry_and_edge() {
         let storage = setup();
         wire_slot_register(
-            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            slot_register_input("alpha", "mailbox", "stub://mailbox", "{{count}}"),
             &storage,
         )
         .unwrap();
@@ -4622,7 +4622,7 @@ mod tests {
             .unwrap();
         let out = wire_materialize(
             WireMaterializeInput {
-                persona_id: "shi".into(),
+                persona_id: "alpha".into(),
                 slot: "mailbox".into(),
                 item_path: Some("/items".into()),
                 item_id_key: Some("id".into()),
@@ -4633,7 +4633,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(out.tank_uri, "tank://shi/mailbox");
+        assert_eq!(out.tank_uri, "tank://alpha/mailbox");
         assert_eq!(out.item_count, 2);
         assert_eq!(out.new_item_count, 2);
         assert_eq!(out.deduped_count, 0);
@@ -4641,24 +4641,24 @@ mod tests {
 
         let g = s.lock().unwrap();
         let reg = g
-            .get_node_by_name("shi.tank.mailbox")
+            .get_node_by_name("alpha.tank.mailbox")
             .unwrap()
             .expect("registry node");
         assert_eq!(reg.r#type, "snapshot_registry");
-        assert_eq!(reg.metadata["source_uri"], "tank://shi/mailbox");
+        assert_eq!(reg.metadata["source_uri"], "tank://alpha/mailbox");
         assert_eq!(reg.metadata["upstream"], "stub://mailbox");
         assert_eq!(reg.metadata["item_path"], "/items");
         assert_eq!(reg.metadata["item_id_key"], "id");
         assert_eq!(reg.metadata["prov"]["wasDerivedFrom"], "stub://mailbox");
 
-        let wiring = g.get_node_by_name("shi.mailbox").unwrap().unwrap();
+        let wiring = g.get_node_by_name("alpha.mailbox").unwrap().unwrap();
         let edges = g.list_edges_from(&reg.id).unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].kind, "archives");
         assert_eq!(edges[0].tgt_node, wiring.id);
 
         let (items, _) = g
-            .tank_query_items("shi/mailbox", &tank_query_default())
+            .tank_query_items("alpha/mailbox", &tank_query_default())
             .unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].identity, "m1");
@@ -4669,7 +4669,7 @@ mod tests {
     async fn wire_materialize_second_run_dedups_and_stays_idempotent() {
         let storage = setup();
         wire_slot_register(
-            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            slot_register_input("alpha", "mailbox", "stub://mailbox", "{{count}}"),
             &storage,
         )
         .unwrap();
@@ -4681,7 +4681,7 @@ mod tests {
 
         let first = wire_materialize(
             WireMaterializeInput {
-                persona_id: "shi".into(),
+                persona_id: "alpha".into(),
                 slot: "mailbox".into(),
                 item_path: Some("/items".into()),
                 item_id_key: Some("id".into()),
@@ -4698,7 +4698,7 @@ mod tests {
         // (both omitted here) — same identities → all deduped.
         let second = wire_materialize(
             WireMaterializeInput {
-                persona_id: "shi".into(),
+                persona_id: "alpha".into(),
                 slot: "mailbox".into(),
                 item_path: None,
                 item_id_key: None,
@@ -4714,14 +4714,14 @@ mod tests {
         assert!(!second.registry_created, "registry node reused");
 
         let g = s.lock().unwrap();
-        let reg = g.get_node_by_name("shi.tank.mailbox").unwrap().unwrap();
+        let reg = g.get_node_by_name("alpha.tank.mailbox").unwrap().unwrap();
         assert_eq!(
             g.list_edges_from(&reg.id).unwrap().len(),
             1,
             "archives edge not duplicated"
         );
         let (items, _) = g
-            .tank_query_items("shi/mailbox", &tank_query_default())
+            .tank_query_items("alpha/mailbox", &tank_query_default())
             .unwrap();
         assert_eq!(items.len(), 2, "timeline still holds 2 items");
     }
@@ -4730,7 +4730,7 @@ mod tests {
     async fn wire_materialize_bad_item_path_fails_loud() {
         let storage = setup();
         wire_slot_register(
-            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            slot_register_input("alpha", "mailbox", "stub://mailbox", "{{count}}"),
             &storage,
         )
         .unwrap();
@@ -4741,7 +4741,7 @@ mod tests {
             .unwrap();
         let err = wire_materialize(
             WireMaterializeInput {
-                persona_id: "shi".into(),
+                persona_id: "alpha".into(),
                 slot: "mailbox".into(),
                 item_path: Some("/nonexistent".into()),
                 item_id_key: None,
@@ -4758,7 +4758,7 @@ mod tests {
     async fn wire_materialize_rejects_tank_source_loop() {
         let storage = setup();
         wire_slot_register(
-            slot_register_input("shi", "archive", "tank://shi/mailbox", "{{count}}"),
+            slot_register_input("alpha", "archive", "tank://alpha/mailbox", "{{count}}"),
             &storage,
         )
         .unwrap();
@@ -4770,7 +4770,7 @@ mod tests {
             .unwrap();
         let err = wire_materialize(
             WireMaterializeInput {
-                persona_id: "shi".into(),
+                persona_id: "alpha".into(),
                 slot: "archive".into(),
                 item_path: None,
                 item_id_key: None,
@@ -4787,7 +4787,7 @@ mod tests {
     async fn wire_materialize_then_wire_fetch_tank_reads_items() {
         let storage = setup();
         wire_slot_register(
-            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            slot_register_input("alpha", "mailbox", "stub://mailbox", "{{count}}"),
             &storage,
         )
         .unwrap();
@@ -4799,7 +4799,7 @@ mod tests {
             .unwrap();
         wire_materialize(
             WireMaterializeInput {
-                persona_id: "shi".into(),
+                persona_id: "alpha".into(),
                 slot: "mailbox".into(),
                 item_path: Some("/items".into()),
                 item_id_key: Some("id".into()),
@@ -4815,7 +4815,7 @@ mod tests {
         // proving the TankAdapter is really wired in.
         let out = wire_fetch(
             WireFetchInput {
-                source_uri: Some("tank://shi/mailbox?tail_n=1".into()),
+                source_uri: Some("tank://alpha/mailbox?tail_n=1".into()),
                 persona_id: None,
                 slot: None,
             },

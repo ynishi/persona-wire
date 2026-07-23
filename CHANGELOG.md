@@ -720,7 +720,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **DB path CWD pollution**: `.mcp.json`-driven startup auto-created `~/projects/persona-wire/persona-wire.db` under the project root, polluting the working tree. `storage::default_db_path()` now centralises the resolution under `~/.persona-wire/store.db` by default.
+- **DB path CWD pollution**: `.mcp.json`-driven startup auto-created a `persona-wire.db` file under `<repo_root>/`, polluting the working tree. `storage::default_db_path()` now centralises the resolution under `$XDG_DATA_HOME/persona-wire/store.db` (falls back to `$HOME/.persona-wire/store.db`) by default.
 
 ### Security
 

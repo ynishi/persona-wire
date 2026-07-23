@@ -302,10 +302,10 @@ mod tests {
     #[tokio::test]
     async fn empty_tank_is_graceful() {
         let a = TankAdapter::new(shared_store());
-        let uri = WireUri::parse("tank://shi/mailbox").unwrap();
+        let uri = WireUri::parse("tank://alpha/mailbox").unwrap();
         let v = a.fetch(&uri).await.unwrap();
         assert_eq!(v["kind"], "tank_items");
-        assert_eq!(v["tank"], "shi/mailbox");
+        assert_eq!(v["tank"], "alpha/mailbox");
         assert_eq!(v["count"], 0);
         assert_eq!(v["has_more"], false);
         assert_eq!(v["items"].as_array().unwrap().len(), 0);
@@ -322,14 +322,14 @@ mod tests {
     #[tokio::test]
     async fn rejects_multi_segment_path() {
         let a = TankAdapter::new(shared_store());
-        let uri = WireUri::parse("tank://shi/mailbox/extra").unwrap();
+        let uri = WireUri::parse("tank://alpha/mailbox/extra").unwrap();
         assert!(a.fetch(&uri).await.is_err());
     }
 
     #[tokio::test]
     async fn tail_last_section_fails_loud() {
         let a = TankAdapter::new(shared_store());
-        let uri = WireUri::parse("tank://shi/mailbox?tail=last_section").unwrap();
+        let uri = WireUri::parse("tank://alpha/mailbox?tail=last_section").unwrap();
         let err = a
             .fetch(&uri)
             .await
@@ -340,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn limit_and_tail_n_together_fail_loud() {
         let a = TankAdapter::new(shared_store());
-        let uri = WireUri::parse("tank://shi/mailbox?limit=2&tail_n=1").unwrap();
+        let uri = WireUri::parse("tank://alpha/mailbox?limit=2&tail_n=1").unwrap();
         let err = a
             .fetch(&uri)
             .await
@@ -353,11 +353,11 @@ mod tests {
         let store = shared_store();
         seed_items(
             &store,
-            "shi/mailbox",
+            "alpha/mailbox",
             &[("a", 100, "a"), ("b", 200, "b"), ("c", 300, "c")],
         );
         let a = TankAdapter::new(store);
-        let uri = WireUri::parse("tank://shi/mailbox?tail_n=2").unwrap();
+        let uri = WireUri::parse("tank://alpha/mailbox?tail_n=2").unwrap();
         let v = a.fetch(&uri).await.unwrap();
         assert_eq!(v["count"], 2);
         assert_eq!(v["has_more"], true);
@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(items[1]["identity"], "c");
         // Output shape checks.
         assert_eq!(items[1]["mimeType"], "application/json");
-        assert_eq!(items[1]["uri"], "tank://shi/mailbox#c");
+        assert_eq!(items[1]["uri"], "tank://alpha/mailbox#c");
         assert_eq!(items[1]["payload"], serde_json::json!({"body": "c"}));
         assert!(items[1]["annotations"]["lastModified"].is_string());
     }
@@ -420,11 +420,11 @@ mod tests {
         // one recent (within 1h), one stale (2d old)
         seed_items(
             &store,
-            "shi/mailbox",
+            "alpha/mailbox",
             &[("old", now - 2 * 86_400, "old"), ("new", now - 60, "new")],
         );
         let a = TankAdapter::new(store);
-        let uri = WireUri::parse("tank://shi/mailbox?since=-1d").unwrap();
+        let uri = WireUri::parse("tank://alpha/mailbox?since=-1d").unwrap();
         let v = a.fetch(&uri).await.unwrap();
         let items = v["items"].as_array().unwrap();
         assert_eq!(items.len(), 1, "only the recent item survives since=-1d");
