@@ -57,6 +57,11 @@ tokio = { version = "1", features = ["full"] }
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Content hashing for Tank item dedup identity — a stable hash across Rust
+# versions (unlike std DefaultHasher), required because the Tank item log
+# persists the identity key. Consumed by wire_materialize (persona-wire-core).
+sha2 = "0.10"
+
 # RFC3339 timestamp formatting (Core Data timestamp -> RFC3339, applenotes:// adapter macOS-only path)
 time = { version = "0.3", features = ["formatting"] }
 

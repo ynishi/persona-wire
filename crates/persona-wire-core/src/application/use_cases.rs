@@ -12,6 +12,15 @@ use crate::infrastructure::filter::WireFilters;
 use crate::infrastructure::storage::SqliteStorage;
 use crate::infrastructure::wire_uri::WireUri;
 
+/// Current wall-clock time as Unix epoch seconds. Used by [`wire_materialize`]
+/// to stamp the snapshot `fetched_at` / item `observed_at`.
+fn current_epoch_secs() -> WireResult<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| WireError::Other(format!("system clock before unix epoch: {e}")))
+}
+
 /// Resolve a `TemplateEngine` from `registry` by id, falling back to the
 /// `"handlebars"` default when `hint` is `None`. Surfaces a structured
 /// `WireError::Storage` when neither the hinted id nor the default is
@@ -994,6 +1003,322 @@ pub async fn wire_fetch(
         source_uri: stored_uri,
         fetched_data,
     })
+}
+
+// ---- wire_materialize (fetch + persist into the Tank) -----------------------
+
+/// Input for [`wire_materialize`] — the wiring entry to fetch, plus optional
+/// shred hints. `wire_fetch` is the read-only preview; `wire_materialize` is
+/// its persisting counterpart (fetch → shred → dedup → append to the Tank).
+#[derive(Debug)]
+pub struct WireMaterializeInput {
+    /// Persona owning the wiring entry (`<persona>.<slot>`).
+    pub persona_id: String,
+    /// Slot of the wiring entry to materialize.
+    pub slot: String,
+    /// JSON Pointer (RFC 6901) to the item array in the fetch result (e.g.
+    /// `"/items"`). `None` (and no persisted hint) = the whole response is a
+    /// single item.
+    pub item_path: Option<String>,
+    /// Item field name carrying a stable identity (e.g. `"id"` / `"guid"`).
+    /// Items missing the key (or with a null value) fall back to a content
+    /// hash. `None` (and no persisted hint) = every item is content-hashed.
+    pub item_id_key: Option<String>,
+}
+
+/// Output of [`wire_materialize`].
+#[derive(Debug)]
+pub struct WireMaterializeOutput {
+    /// The Tank URI the persisted items are addressable by (`tank://<p>/<s>`).
+    pub tank_uri: String,
+    /// ULID of the snapshot (observation batch) just recorded.
+    pub snapshot_id: String,
+    /// Item count after shred.
+    pub item_count: usize,
+    /// Newly appended item count after dedup.
+    pub new_item_count: usize,
+    /// Items dropped as duplicates (`item_count - new_item_count`).
+    pub deduped_count: usize,
+    /// ULID of the SnapshotRegistry node (fresh on create, preserved on
+    /// upsert).
+    pub registry_node_id: String,
+    /// `true` when the SnapshotRegistry node was created this call.
+    pub registry_created: bool,
+}
+
+/// Fetch the upstream Source behind a wiring entry, shred the response into
+/// items, dedup against the existing timeline, and append them to the Tank —
+/// creating (idempotently) the SnapshotRegistry node + `archives` edge that
+/// expose the Tank as a `tank://` Source.
+///
+/// Storage lock discipline: the wiring/registry read and the Tank write each
+/// take the mutex in a short block; the fetch (`await`) runs with no lock held
+/// (mirrors [`wire_fetch`]).
+pub async fn wire_materialize(
+    input: WireMaterializeInput,
+    storage: std::sync::Arc<std::sync::Mutex<SqliteStorage>>,
+    registry: &PluginRegistry,
+) -> WireResult<WireMaterializeOutput> {
+    use crate::application::wiring_mapper;
+    use crate::domain::graph::{Edge, Ulid};
+    use crate::infrastructure::storage::{TankItemRecord, TankSnapshotRecord};
+
+    let persona = &input.persona_id;
+    let slot = &input.slot;
+    let node_name = format!("{persona}.{slot}");
+    let registry_name = format!("{persona}.tank.{slot}");
+    let tank_key = format!("{persona}/{slot}");
+    let tank_uri = format!("tank://{persona}/{slot}");
+
+    // Step 1 (read lock, closed before the fetch await): resolve the wiring
+    // entry's source_uri + auth, and read any persisted shred hints off an
+    // existing SnapshotRegistry node.
+    let (source_uri, fetch_uri, wiring_node_id, reg_item_path, reg_item_id_key) = {
+        let s = storage
+            .lock()
+            .map_err(|_| WireError::Storage("storage mutex poisoned".to_string()))?;
+        let node = s.get_node_by_name(&node_name)?.ok_or_else(|| {
+            WireError::Domain(DomainError::NotFound(format!("wiring entry: {node_name}")))
+        })?;
+        let source_uri = wiring_mapper::extract_source_uri(&node)
+            .ok_or_else(|| {
+                WireError::Domain(DomainError::InvalidMetadata(format!(
+                    "wiring entry '{node_name}' lacks metadata.source_uri"
+                )))
+            })?
+            .to_owned();
+        let auth = wiring_mapper::extract_auth(&node).map(str::to_owned);
+        let fetch_uri = merge_auth_query(&source_uri, auth.as_deref());
+        let existing_reg = s.get_node_by_name(&registry_name)?;
+        let reg_item_path = existing_reg
+            .as_ref()
+            .and_then(|n| n.metadata.get("item_path").and_then(|v| v.as_str()))
+            .map(str::to_owned);
+        let reg_item_id_key = existing_reg
+            .as_ref()
+            .and_then(|n| n.metadata.get("item_id_key").and_then(|v| v.as_str()))
+            .map(str::to_owned);
+        (
+            source_uri,
+            fetch_uri,
+            node.id,
+            reg_item_path,
+            reg_item_id_key,
+        )
+    };
+
+    // Step 2: guard — materializing a tank:// into itself is a loop.
+    if WireUri::parse(&source_uri)
+        .map(|u| u.scheme() == "tank")
+        .unwrap_or(false)
+    {
+        return Err(WireError::Storage(
+            "wire_materialize: cannot materialize a tank:// source into itself".to_string(),
+        ));
+    }
+
+    // Step 4: resolve shred config (input > persisted registry hint > default).
+    let item_path = input.item_path.clone().or(reg_item_path);
+    let item_id_key = input.item_id_key.clone().or(reg_item_id_key);
+
+    // Step 3: fetch (no lock held). Fail loud, matching wire_fetch (a preview /
+    // ingestion call wants to see the failure, not a best-effort Null).
+    let (adapter, uri) = registry.route(&fetch_uri)?;
+    let fetched = fetch_with_post_filters(&*adapter, &uri, &fetch_uri).await?;
+
+    // Step 5: shred into items.
+    let items: Vec<serde_json::Value> = match &item_path {
+        Some(path) => {
+            let arr_node = fetched.pointer(path).ok_or_else(|| {
+                WireError::Storage(format!(
+                    "wire_materialize: item_path '{path}' not found in fetched data"
+                ))
+            })?;
+            let arr = arr_node.as_array().ok_or_else(|| {
+                WireError::Storage(format!(
+                    "wire_materialize: item_path '{path}' is not an array"
+                ))
+            })?;
+            arr.clone()
+        }
+        None => vec![fetched.clone()],
+    };
+
+    // Step 6 + 8 prep: identities + item records. observed_at = fetched_at.
+    // ULIDs are minted via a monotonic `Generator` so that within one
+    // materialize (where every item shares `observed_at`), the `ORDER BY id`
+    // tie-break in `tank_query_items` reflects the fetch array order
+    // (`Ulid::new()` is NOT monotonic within a millisecond).
+    let now = current_epoch_secs()?;
+    let content_hash = tank_content_hash(&fetched)?;
+    let mut id_gen = ulid::Generator::new();
+    let mut item_records: Vec<TankItemRecord> = Vec::with_capacity(items.len());
+    for item in &items {
+        let identity = tank_item_identity(item, item_id_key.as_deref())?;
+        let id = id_gen
+            .generate()
+            .map_err(|e| WireError::Storage(format!("wire_materialize: ulid generation: {e}")))?;
+        item_records.push(TankItemRecord {
+            id,
+            identity,
+            observed_at: now,
+            payload: item.clone(),
+            mime_type: "application/json".to_string(),
+        });
+    }
+
+    // The upstream URI's query map, recorded on the snapshot for audit.
+    let filters_applied = match WireUri::parse(&source_uri) {
+        Ok(u) => serde_json::Value::Object(
+            u.query()
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect(),
+        ),
+        Err(_) => serde_json::json!({}),
+    };
+
+    // Step 7 + 8 (write lock): ensure the registry node + archives edge, then
+    // record the snapshot and append the deduped items.
+    let (registry_node_id, registry_created, snapshot_id, item_count, new_item_count) = {
+        let s = storage
+            .lock()
+            .map_err(|_| WireError::Storage("storage mutex poisoned".to_string()))?;
+
+        // -- SnapshotRegistry node (upsert by name, ULID preserved). --
+        let mut reg_meta = serde_json::Map::new();
+        reg_meta.insert("source_uri".to_string(), serde_json::json!(tank_uri));
+        reg_meta.insert("upstream".to_string(), serde_json::json!(source_uri));
+        if let Some(p) = &item_path {
+            reg_meta.insert("item_path".to_string(), serde_json::json!(p));
+        }
+        if let Some(k) = &item_id_key {
+            reg_meta.insert("item_id_key".to_string(), serde_json::json!(k));
+        }
+        reg_meta.insert(
+            "prov".to_string(),
+            serde_json::json!({ "wasDerivedFrom": source_uri }),
+        );
+
+        let (registry_node_id, registry_created) = match s.get_node_by_name(&registry_name)? {
+            Some(existing) => {
+                let mut base = match existing.metadata {
+                    serde_json::Value::Object(map) => map,
+                    _ => serde_json::Map::new(),
+                };
+                for (k, v) in &reg_meta {
+                    base.insert(k.clone(), v.clone());
+                }
+                let updated =
+                    s.update_node_metadata(&existing.id, &serde_json::Value::Object(base))?;
+                if !updated {
+                    return Err(WireError::Storage(format!(
+                        "wire_materialize: registry node '{registry_name}' vanished \
+                         between read and write"
+                    )));
+                }
+                (existing.id, false)
+            }
+            None => {
+                let node = Node {
+                    id: Ulid::new(),
+                    name: registry_name.clone(),
+                    r#type: "snapshot_registry".to_string(),
+                    sot_ref: None,
+                    confidence: None,
+                    applicability: None,
+                    last_verified_at: None,
+                    review_due: None,
+                    version: 1,
+                    prev_id: None,
+                    metadata: serde_json::Value::Object(reg_meta.clone()),
+                };
+                s.insert_node(&node)?;
+                (node.id, true)
+            }
+        };
+
+        // -- archives edge (registry → wiring entry), inserted once. --
+        let already_linked = s
+            .list_edges_from(&registry_node_id)?
+            .iter()
+            .any(|e| e.tgt_node == wiring_node_id && e.kind == "archives");
+        if !already_linked {
+            let edge = Edge {
+                id: Ulid::new(),
+                name: None,
+                src_node: registry_node_id,
+                tgt_node: wiring_node_id,
+                kind: "archives".to_string(),
+                severity: None,
+                metadata: serde_json::json!({ "prov": "wasDerivedFrom" }),
+                version: 1,
+                prev_id: None,
+            };
+            s.insert_edge(&edge)?;
+        }
+
+        // -- Tank write: snapshot first (FK), append items, backfill count. --
+        let snapshot_id = Ulid::new();
+        let item_count = item_records.len();
+        s.tank_insert_snapshot(&TankSnapshotRecord {
+            id: snapshot_id,
+            tank_key: tank_key.clone(),
+            source_uri: source_uri.clone(),
+            fetched_at: now,
+            filters_applied,
+            content_hash,
+            item_count,
+            new_item_count: 0,
+        })?;
+        let new_item_count = s.tank_append_items(&tank_key, &snapshot_id, &item_records)?;
+        s.tank_update_snapshot_new_count(&snapshot_id, new_item_count)?;
+
+        (
+            registry_node_id,
+            registry_created,
+            snapshot_id,
+            item_count,
+            new_item_count,
+        )
+    };
+
+    Ok(WireMaterializeOutput {
+        tank_uri,
+        snapshot_id: snapshot_id.to_string(),
+        item_count,
+        new_item_count,
+        deduped_count: item_count - new_item_count,
+        registry_node_id: registry_node_id.to_string(),
+        registry_created,
+    })
+}
+
+/// SHA-256 hex of a JSON value's canonical string form. serde_json serialises
+/// `Object`s with sorted keys (its `Map` is a `BTreeMap` unless the
+/// `preserve_order` feature is on, which this workspace does not enable), so
+/// the digest is stable across runs and Rust versions — a requirement for a
+/// persisted dedup identity that `std::hash::DefaultHasher` cannot meet.
+fn tank_content_hash(v: &serde_json::Value) -> WireResult<String> {
+    use sha2::{Digest, Sha256};
+    let s = serde_json::to_string(v).map_err(|e| WireError::Storage(e.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Resolve one item's dedup identity: the `item_id_key` field (string as-is,
+/// number stringified) when present and non-null, otherwise the item's
+/// content hash.
+fn tank_item_identity(item: &serde_json::Value, item_id_key: Option<&str>) -> WireResult<String> {
+    if let Some(key) = item_id_key {
+        match item.get(key) {
+            Some(serde_json::Value::String(s)) => return Ok(s.clone()),
+            Some(serde_json::Value::Number(n)) => return Ok(n.to_string()),
+            _ => {} // missing / null / other → fall back to content hash
+        }
+    }
+    tank_content_hash(item)
 }
 
 /// Iterate every registered node type and collect nodes matching `spec`.
@@ -4255,5 +4580,254 @@ mod tests {
         );
         assert_eq!(out.projections[0].name, "shared.section.notes");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- wire_materialize (fetch + persist into the Tank) ----
+
+    /// Stub upstream adapter returning a fixed 2-item list-shaped payload, so a
+    /// repeat materialize exercises the dedup path deterministically.
+    struct StubItemsAdapter;
+
+    #[async_trait::async_trait]
+    impl Adapter for StubItemsAdapter {
+        fn scheme(&self) -> &'static str {
+            "stub"
+        }
+        async fn fetch(&self, _uri: &WireUri) -> WireResult<serde_json::Value> {
+            Ok(json!({
+                "items": [
+                    {"id": "m1", "body": "first"},
+                    {"id": "m2", "body": "second"},
+                ]
+            }))
+        }
+    }
+
+    fn tank_query_default() -> crate::infrastructure::storage::TankQuery {
+        crate::infrastructure::storage::TankQuery::default()
+    }
+
+    #[tokio::test]
+    async fn wire_materialize_persists_snapshot_items_registry_and_edge() {
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            &storage,
+        )
+        .unwrap();
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = PluginRegistry::builder()
+            .with_adapter(StubItemsAdapter)
+            .build()
+            .unwrap();
+        let out = wire_materialize(
+            WireMaterializeInput {
+                persona_id: "shi".into(),
+                slot: "mailbox".into(),
+                item_path: Some("/items".into()),
+                item_id_key: Some("id".into()),
+            },
+            s.clone(),
+            &registry,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.tank_uri, "tank://shi/mailbox");
+        assert_eq!(out.item_count, 2);
+        assert_eq!(out.new_item_count, 2);
+        assert_eq!(out.deduped_count, 0);
+        assert!(out.registry_created);
+
+        let g = s.lock().unwrap();
+        let reg = g
+            .get_node_by_name("shi.tank.mailbox")
+            .unwrap()
+            .expect("registry node");
+        assert_eq!(reg.r#type, "snapshot_registry");
+        assert_eq!(reg.metadata["source_uri"], "tank://shi/mailbox");
+        assert_eq!(reg.metadata["upstream"], "stub://mailbox");
+        assert_eq!(reg.metadata["item_path"], "/items");
+        assert_eq!(reg.metadata["item_id_key"], "id");
+        assert_eq!(reg.metadata["prov"]["wasDerivedFrom"], "stub://mailbox");
+
+        let wiring = g.get_node_by_name("shi.mailbox").unwrap().unwrap();
+        let edges = g.list_edges_from(&reg.id).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, "archives");
+        assert_eq!(edges[0].tgt_node, wiring.id);
+
+        let (items, _) = g
+            .tank_query_items("shi/mailbox", &tank_query_default())
+            .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].identity, "m1");
+        assert_eq!(items[1].identity, "m2");
+    }
+
+    #[tokio::test]
+    async fn wire_materialize_second_run_dedups_and_stays_idempotent() {
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            &storage,
+        )
+        .unwrap();
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = PluginRegistry::builder()
+            .with_adapter(StubItemsAdapter)
+            .build()
+            .unwrap();
+
+        let first = wire_materialize(
+            WireMaterializeInput {
+                persona_id: "shi".into(),
+                slot: "mailbox".into(),
+                item_path: Some("/items".into()),
+                item_id_key: Some("id".into()),
+            },
+            s.clone(),
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.new_item_count, 2);
+        assert!(first.registry_created);
+
+        // Second run relies on the persisted item_path / item_id_key hints
+        // (both omitted here) — same identities → all deduped.
+        let second = wire_materialize(
+            WireMaterializeInput {
+                persona_id: "shi".into(),
+                slot: "mailbox".into(),
+                item_path: None,
+                item_id_key: None,
+            },
+            s.clone(),
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.item_count, 2);
+        assert_eq!(second.new_item_count, 0, "same fetch → nothing new");
+        assert_eq!(second.deduped_count, 2);
+        assert!(!second.registry_created, "registry node reused");
+
+        let g = s.lock().unwrap();
+        let reg = g.get_node_by_name("shi.tank.mailbox").unwrap().unwrap();
+        assert_eq!(
+            g.list_edges_from(&reg.id).unwrap().len(),
+            1,
+            "archives edge not duplicated"
+        );
+        let (items, _) = g
+            .tank_query_items("shi/mailbox", &tank_query_default())
+            .unwrap();
+        assert_eq!(items.len(), 2, "timeline still holds 2 items");
+    }
+
+    #[tokio::test]
+    async fn wire_materialize_bad_item_path_fails_loud() {
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            &storage,
+        )
+        .unwrap();
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = PluginRegistry::builder()
+            .with_adapter(StubItemsAdapter)
+            .build()
+            .unwrap();
+        let err = wire_materialize(
+            WireMaterializeInput {
+                persona_id: "shi".into(),
+                slot: "mailbox".into(),
+                item_path: Some("/nonexistent".into()),
+                item_id_key: None,
+            },
+            s,
+            &registry,
+        )
+        .await
+        .expect_err("bad JSON pointer must fail loud");
+        assert!(err.to_string().contains("item_path"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wire_materialize_rejects_tank_source_loop() {
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input("shi", "archive", "tank://shi/mailbox", "{{count}}"),
+            &storage,
+        )
+        .unwrap();
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = PluginRegistry::builder()
+            .with_adapter(StubItemsAdapter)
+            .with_adapter(crate::infrastructure::tank::TankAdapter::new(s.clone()))
+            .build()
+            .unwrap();
+        let err = wire_materialize(
+            WireMaterializeInput {
+                persona_id: "shi".into(),
+                slot: "archive".into(),
+                item_path: None,
+                item_id_key: None,
+            },
+            s.clone(),
+            &registry,
+        )
+        .await
+        .expect_err("materializing a tank:// into itself must fail loud");
+        assert!(err.to_string().contains("itself"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wire_materialize_then_wire_fetch_tank_reads_items() {
+        let storage = setup();
+        wire_slot_register(
+            slot_register_input("shi", "mailbox", "stub://mailbox", "{{count}}"),
+            &storage,
+        )
+        .unwrap();
+        let s = std::sync::Arc::new(std::sync::Mutex::new(storage));
+        let registry = PluginRegistry::builder()
+            .with_adapter(StubItemsAdapter)
+            .with_adapter(crate::infrastructure::tank::TankAdapter::new(s.clone()))
+            .build()
+            .unwrap();
+        wire_materialize(
+            WireMaterializeInput {
+                persona_id: "shi".into(),
+                slot: "mailbox".into(),
+                item_path: Some("/items".into()),
+                item_id_key: Some("id".into()),
+            },
+            s.clone(),
+            &registry,
+        )
+        .await
+        .unwrap();
+
+        // The Tank is now a Source — read it back through the same registry
+        // dispatch wire_fetch uses. tail_n=1 must return the last item (m2),
+        // proving the TankAdapter is really wired in.
+        let out = wire_fetch(
+            WireFetchInput {
+                source_uri: Some("tank://shi/mailbox?tail_n=1".into()),
+                persona_id: None,
+                slot: None,
+            },
+            s.clone(),
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.fetched_data["kind"], "tank_items");
+        let items = out.fetched_data["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["identity"], "m2", "last item on the timeline");
+        assert_eq!(items[0]["payload"], json!({"id": "m2", "body": "second"}));
     }
 }

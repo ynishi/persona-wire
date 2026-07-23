@@ -23,6 +23,12 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] 
 url.workspace = true
 async-trait.workspace = true
 ulid.workspace = true
+# SHA-256 content hashing for Tank item dedup identity (wire_materialize).
+sha2.workspace = true
+# `parsing` feature enables RFC3339 since/until parsing in the tank:// adapter.
+# The workspace default already carries `formatting` (applenotes:// path); the
+# feature sets are unioned, so core gets both.
+time = { workspace = true, features = ["parsing"] }
 # Secret-holding token type for AuthMaterial (application::auth) — never
 # Debug/log-exposed. Same dep already used by persona-wire-credentials /
 # persona-wire-transport-http / every HTTP adapter crate.

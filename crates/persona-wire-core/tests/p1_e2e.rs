@@ -41,7 +41,7 @@ fn full_pipeline_init_seed_register_render_close() {
 
     // Sanity: type vocabulary is in place.
     let nodes = storage.list_types_by_kind("node").unwrap();
-    assert_eq!(nodes.len(), 10, "expected 10 seeded node types");
+    assert_eq!(nodes.len(), 11, "expected 11 seeded node types");
 
     // Insert a small persona-routing graph.
     // alpha -[routes_to]-> beta

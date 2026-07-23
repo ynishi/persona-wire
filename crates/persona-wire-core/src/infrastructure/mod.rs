@@ -5,12 +5,14 @@
 //! - [`template`]  — Template Engine Plugin trait (`HandlebarsEngine` default impl)
 //! - [`adapter`]   — Layer 6 SoT Adapter Plugin trait (`FileAdapter`; mini-app は外部 crate `persona-wire-adapter-mini-app`)
 //! - [`filter`]    — Unified cross-cutting adapter filter vocabulary (`FilterCap` / `WireFilters`) shared by every `Adapter::filter_caps` opt-in
+//! - [`tank`]      — `tank://` Adapter reading the persisted observation item log written by `wire_materialize`
 
 pub mod adapter;
 pub mod filter;
 pub mod projection;
 pub mod rendering;
 pub mod storage;
+pub mod tank;
 pub mod template;
 pub mod wire_uri;
 

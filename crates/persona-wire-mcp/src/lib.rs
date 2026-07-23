@@ -51,20 +51,21 @@ use persona_wire_core::application::projection_registry::ProjectionRegistry;
 use persona_wire_core::application::spec_registry::SpecRegistry;
 use persona_wire_core::application::use_cases::{
     wire_close, wire_context_get, wire_doctor, wire_edge_delete, wire_edges_create_batch,
-    wire_fetch, wire_init, wire_node_delete, wire_node_update, wire_nodes_create_batch,
-    wire_projection_delete, wire_prompt_context, wire_query, wire_render, wire_slot_delete,
-    wire_slot_register, wire_spec_delete, wire_workflow_fire, wire_workflow_list,
+    wire_fetch, wire_init, wire_materialize, wire_node_delete, wire_node_update,
+    wire_nodes_create_batch, wire_projection_delete, wire_prompt_context, wire_query, wire_render,
+    wire_slot_delete, wire_slot_register, wire_spec_delete, wire_workflow_fire, wire_workflow_list,
     wire_workflow_register, WireCloseInput, WireContextGetInput, WireDeleteInput,
-    WireEdgesCreateBatchInput, WireFetchInput, WireInitInput, WireNodeUpdateInput,
-    WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput, WireQueryInput,
-    WireRenderInput, WireSlotDeleteInput, WireSlotRegisterInput, WireWorkflowFireInput,
-    WireWorkflowListInput, WireWorkflowRegisterInput,
+    WireEdgesCreateBatchInput, WireFetchInput, WireInitInput, WireMaterializeInput,
+    WireNodeUpdateInput, WireNodeUpdateMode, WireNodesCreateBatchInput, WirePromptContextInput,
+    WireQueryInput, WireRenderInput, WireSlotDeleteInput, WireSlotRegisterInput,
+    WireWorkflowFireInput, WireWorkflowListInput, WireWorkflowRegisterInput,
 };
 use persona_wire_core::domain::entity::projection::{PluginDispatch, Projection};
 use persona_wire_core::domain::entity::TargetForm;
 use persona_wire_core::domain::graph::{Edge, Node, Severity};
 use persona_wire_core::domain::specification::Specification;
 use persona_wire_core::infrastructure::storage::SqliteStorage;
+use persona_wire_core::infrastructure::tank::TankAdapter;
 
 /// MCP server wrapping persona-wire-core.
 #[derive(Clone)]
@@ -96,7 +97,7 @@ impl WireServer {
         let mcp_resolver: Arc<dyn McpEndpointResolver> =
             Arc::new(SqliteEndpointResolver::new(storage_arc.clone()));
         Self {
-            storage: storage_arc,
+            storage: storage_arc.clone(),
             registry: Arc::new(
                 PluginRegistry::default_builder_for_wire()
                     .with_adapter(MiniAppAdapter)
@@ -114,6 +115,9 @@ impl WireServer {
                     .with_adapter(AppleNotesAdapter)
                     .with_adapter(ActivityPubAdapter)
                     .with_adapter(BlueskyAdapter)
+                    // Tank adapter (tank://) — reads the observation item log
+                    // wire_materialize persists into the shared store.
+                    .with_adapter(TankAdapter::new(storage_arc.clone()))
                     .build()
                     .expect("default plugin registry build"),
             ),
@@ -360,6 +364,24 @@ pub struct WireFetchParams {
     /// Slot name of the wiring entry to preview. Requires `persona_id`.
     #[serde(default)]
     pub slot: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WireMaterializeParams {
+    /// Persona owning the wiring entry to materialize (`<persona>.<slot>`).
+    pub persona_id: String,
+    /// Slot of the wiring entry to fetch + persist.
+    pub slot: String,
+    /// JSON Pointer (RFC 6901) to the item array in the fetch result (e.g.
+    /// `"/items"`). Omit to treat the whole response as a single item.
+    /// Persisted on the SnapshotRegistry node and reused on later calls.
+    #[serde(default)]
+    pub item_path: Option<String>,
+    /// Item field carrying a stable identity for dedup (e.g. `"id"` / `"guid"`).
+    /// Items missing it fall back to a content hash. Omit to content-hash every
+    /// item. Persisted on the SnapshotRegistry node and reused on later calls.
+    #[serde(default)]
+    pub item_id_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1208,6 +1230,40 @@ impl WireServer {
         serde_json::to_string_pretty(&serde_json::json!({
             "source_uri": out.source_uri,
             "fetched_data": out.fetched_data,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    /// Fetch a wiring entry and persist its shredded, deduped items into the Tank.
+    #[tool(
+        name = "wire_materialize",
+        description = "Fetch + persist counterpart of wire_fetch (which only previews). Routes the `<persona>.<slot>` wiring entry's source_uri through the same PluginRegistry dispatch, shreds the response into items (via `item_path`, a JSON Pointer to the array, e.g. `/items`), dedups them against the existing timeline (identity = the `item_id_key` field, else a content hash), and appends them to the Tank. Idempotently ensures a SnapshotRegistry node (`<persona>.tank.<slot>`) + `archives` edge so the archive is itself a Source: read it back with `tank://<persona>/<slot>?since=-30d&tail_n=N`. Returns {tank_uri, snapshot_id, item_count, new_item_count, deduped_count, registry_node_id, registry_created}."
+    )]
+    async fn wire_materialize_tool(
+        &self,
+        Parameters(p): Parameters<WireMaterializeParams>,
+    ) -> Result<String, String> {
+        let storage = self.storage.clone();
+        let out = wire_materialize(
+            WireMaterializeInput {
+                persona_id: p.persona_id,
+                slot: p.slot,
+                item_path: p.item_path,
+                item_id_key: p.item_id_key,
+            },
+            storage,
+            &self.registry,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "tank_uri": out.tank_uri,
+            "snapshot_id": out.snapshot_id,
+            "item_count": out.item_count,
+            "new_item_count": out.new_item_count,
+            "deduped_count": out.deduped_count,
+            "registry_node_id": out.registry_node_id,
+            "registry_created": out.registry_created,
         }))
         .map_err(|e| e.to_string())
     }

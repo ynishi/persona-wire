@@ -160,7 +160,7 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Seed concept-doc §4.1/§4.2 type vocabulary (9 node + 9 edge).
+    /// Seed concept-doc §4.1/§4.2 type vocabulary (11 node + 10 edge).
     /// Idempotent via `INSERT OR IGNORE`.
     pub fn seed_default_types(&self) -> WireResult<()> {
         const SEED: &[(&str, &str, Option<&str>)] = &[
@@ -178,6 +178,11 @@ impl SqliteStorage {
             // `metadata.maintenance_exempt = true` so doctor's orphan_node
             // probe (`is_self_attached_wiring`) skips it cleanly.
             ("mcp_server", "node", None),
+            // Tank (wire_materialize) — SnapshotRegistry node ("a Source that
+            // serves past observations") + the `archives` edge that links it
+            // back to the upstream wiring entry it was derived from.
+            ("snapshot_registry", "node", None),
+            ("archives", "edge", None),
             ("triggers_review_of", "edge", Some("hard,soft,advisory")),
             ("cites", "edge", None),
             ("derives_from", "edge", None),
@@ -1099,6 +1104,187 @@ impl SqliteStorage {
             .map_err(|e| WireError::Storage(e.to_string()))?;
         Ok(n > 0)
     }
+
+    // ---- Tank (wire_materialize snapshot + item log) ----
+
+    /// Insert one snapshot (observation batch) row. The `snapshot_id`
+    /// referenced by [`tank_append_items`] must exist first (FK
+    /// `tank_items.snapshot_id → tank_snapshots.id`), so the caller inserts
+    /// the snapshot, appends items, then backfills the dedup count via
+    /// [`tank_update_snapshot_new_count`].
+    pub fn tank_insert_snapshot(&self, rec: &TankSnapshotRecord) -> WireResult<()> {
+        let filters_str = serde_json::to_string(&rec.filters_applied)
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        self.conn
+            .execute(
+                "INSERT INTO tank_snapshots (id, tank_key, source_uri, fetched_at, \
+                 filters_applied, content_hash, item_count, new_item_count) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    rec.id.to_string(),
+                    rec.tank_key,
+                    rec.source_uri,
+                    rec.fetched_at,
+                    filters_str,
+                    rec.content_hash,
+                    rec.item_count as i64,
+                    rec.new_item_count as i64,
+                ],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Backfill a snapshot's `new_item_count` after [`tank_append_items`]
+    /// reports how many rows survived the `UNIQUE(tank_key, identity)` dedup.
+    /// Kept separate from [`tank_insert_snapshot`] because the FK on
+    /// `tank_items.snapshot_id` forces snapshot-insert-before-item-append, so
+    /// the count is not known at insert time.
+    pub fn tank_update_snapshot_new_count(
+        &self,
+        snapshot_id: &Ulid,
+        new_item_count: usize,
+    ) -> WireResult<()> {
+        self.conn
+            .execute(
+                "UPDATE tank_snapshots SET new_item_count = ?1 WHERE id = ?2",
+                params![new_item_count as i64, snapshot_id.to_string()],
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Append items to the log via `INSERT OR IGNORE`, deduped on
+    /// `UNIQUE(tank_key, identity)`. Returns the number of rows actually
+    /// inserted (already-present identities are ignored, and duplicate
+    /// identities within `items` collapse to one). Runs in a single
+    /// transaction.
+    pub fn tank_append_items(
+        &self,
+        tank_key: &str,
+        snapshot_id: &Ulid,
+        items: &[TankItemRecord],
+    ) -> WireResult<usize> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let mut new_count = 0usize;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO tank_items (id, tank_key, snapshot_id, identity, \
+                     observed_at, payload, mime_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(|e| WireError::Storage(e.to_string()))?;
+            for item in items {
+                let payload_str = serde_json::to_string(&item.payload)
+                    .map_err(|e| WireError::Storage(e.to_string()))?;
+                let n = stmt
+                    .execute(params![
+                        item.id.to_string(),
+                        tank_key,
+                        snapshot_id.to_string(),
+                        item.identity,
+                        item.observed_at,
+                        payload_str,
+                        item.mime_type,
+                    ])
+                    .map_err(|e| WireError::Storage(e.to_string()))?;
+                new_count += n;
+            }
+        }
+        tx.commit().map_err(|e| WireError::Storage(e.to_string()))?;
+        Ok(new_count)
+    }
+
+    /// Query the item log for one tank, interpreting the closed filter
+    /// vocabulary in SQL (the tank adapter declares these caps, so they run
+    /// storage-side rather than post-fetch):
+    ///
+    /// - base: `WHERE tank_key = ?` `[AND observed_at >= since]`
+    ///   `[AND observed_at <= until]` `[AND payload LIKE '%'||query||'%']`
+    /// - `limit`: earliest N (`ORDER BY observed_at ASC, id ASC`)
+    /// - `tail_n`: latest N returned in chronological order
+    ///   (`ORDER BY observed_at DESC, id DESC` then reversed)
+    /// - neither: full log in `observed_at ASC, id ASC` order
+    ///
+    /// Returns `(items, has_more)`; `has_more` is `true` when a `limit` /
+    /// `tail_n` bound truncated the result (detected via `LIMIT N+1`).
+    /// `limit` and `tail_n` are mutually exclusive at the caller (the adapter);
+    /// when both are set here `tail_n` wins.
+    pub fn tank_query_items(
+        &self,
+        tank_key: &str,
+        q: &TankQuery,
+    ) -> WireResult<(Vec<TankItemRecord>, bool)> {
+        use rusqlite::types::ToSql;
+
+        let mut sql = String::from(
+            "SELECT id, identity, observed_at, payload, mime_type FROM tank_items \
+             WHERE tank_key = ?",
+        );
+        let mut args: Vec<Box<dyn ToSql>> = vec![Box::new(tank_key.to_string())];
+
+        if let Some(since) = q.since {
+            sql.push_str(" AND observed_at >= ?");
+            args.push(Box::new(since));
+        }
+        if let Some(until) = q.until {
+            sql.push_str(" AND observed_at <= ?");
+            args.push(Box::new(until));
+        }
+        if let Some(query) = &q.query {
+            sql.push_str(" AND payload LIKE '%' || ? || '%'");
+            args.push(Box::new(query.clone()));
+        }
+
+        // `tail_n` wins over `limit` when both are (erroneously) set.
+        let (reverse, fetch_limit) = match (q.tail_n, q.limit) {
+            (Some(n), _) => {
+                sql.push_str(" ORDER BY observed_at DESC, id DESC LIMIT ?");
+                (true, Some(n))
+            }
+            (None, Some(n)) => {
+                sql.push_str(" ORDER BY observed_at ASC, id ASC LIMIT ?");
+                (false, Some(n))
+            }
+            (None, None) => {
+                sql.push_str(" ORDER BY observed_at ASC, id ASC");
+                (false, None)
+            }
+        };
+        if let Some(n) = fetch_limit {
+            // Fetch N+1 to detect whether more rows exist beyond the bound.
+            args.push(Box::new((n as i64).saturating_add(1)));
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(args.iter().map(|b| &**b)),
+                row_to_tank_item,
+            )
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+        let mut items: Vec<TankItemRecord> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WireError::Storage(e.to_string()))?;
+
+        let has_more = match fetch_limit {
+            Some(n) if items.len() > n => {
+                items.truncate(n);
+                true
+            }
+            _ => false,
+        };
+        if reverse {
+            items.reverse();
+        }
+        Ok((items, has_more))
+    }
 }
 
 impl crate::domain::repository::Repository for SqliteStorage {
@@ -1284,6 +1470,76 @@ fn row_to_projection_full(row: &Row<'_>) -> rusqlite::Result<ProjectionFullRow> 
     ))
 }
 
+/// One `tank_snapshots` row (a single observation batch). Provenance / audit
+/// only — snapshots never surface on the query face; consumers read the item
+/// timeline via [`SqliteStorage::tank_query_items`].
+#[derive(Debug, Clone)]
+pub struct TankSnapshotRecord {
+    /// ULID primary key.
+    pub id: Ulid,
+    /// `"<persona>/<slot>"` tank key.
+    pub tank_key: String,
+    /// Upstream source URI (the stored, pre-auth-merge value).
+    pub source_uri: String,
+    /// Fetch time (epoch seconds).
+    pub fetched_at: i64,
+    /// The upstream URI's query map as a JSON object.
+    pub filters_applied: serde_json::Value,
+    /// sha256 hex of the whole fetch result.
+    pub content_hash: String,
+    /// Item count after shred.
+    pub item_count: usize,
+    /// Newly appended count after dedup.
+    pub new_item_count: usize,
+}
+
+/// One `tank_items` row (a single observed unit on the timeline).
+#[derive(Debug, Clone)]
+pub struct TankItemRecord {
+    /// ULID primary key (minted in insertion order for same-`observed_at`
+    /// tie-break).
+    pub id: Ulid,
+    /// Source-provided id, or the item's content hash when none is declared.
+    pub identity: String,
+    /// Observation time (epoch seconds, = the snapshot's `fetched_at`).
+    pub observed_at: i64,
+    /// The item JSON payload.
+    pub payload: serde_json::Value,
+    /// MIME type of `payload` (default `application/json`).
+    pub mime_type: String,
+}
+
+/// Query filter for [`SqliteStorage::tank_query_items`], mirroring the tank
+/// adapter's declared [`crate::infrastructure::filter::FilterCap`]s resolved to
+/// concrete values (times already parsed to epoch seconds).
+#[derive(Debug, Clone, Default)]
+pub struct TankQuery {
+    /// Inclusive lower `observed_at` bound (epoch seconds).
+    pub since: Option<i64>,
+    /// Inclusive upper `observed_at` bound (epoch seconds).
+    pub until: Option<i64>,
+    /// Substring match against the raw `payload` JSON text.
+    pub query: Option<String>,
+    /// Earliest-N bound.
+    pub limit: Option<usize>,
+    /// Latest-N bound (chronological order preserved on return).
+    pub tail_n: Option<usize>,
+}
+
+fn row_to_tank_item(row: &Row<'_>) -> rusqlite::Result<TankItemRecord> {
+    // Column order: id, identity, observed_at, payload, mime_type
+    let id_str: String = row.get(0)?;
+    let payload_str: String = row.get(3)?;
+    let payload = serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+    Ok(TankItemRecord {
+        id: text_to_ulid(&id_str)?,
+        identity: row.get(1)?,
+        observed_at: row.get(2)?,
+        payload,
+        mime_type: row.get(4)?,
+    })
+}
+
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 
@@ -1404,6 +1660,37 @@ CREATE TABLE IF NOT EXISTS bundle_installs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bundle_installs_bundle ON bundle_installs(bundle_id);
+
+-- Tank (wire_materialize) — snapshot batches + the shredded/deduped item log.
+-- Kept in separate tables from the graph nodes/edges: observed records are not
+-- graph vertices (only Source declarations are), and the split keeps a future
+-- replication (Litestream attach) migration possible. `CREATE TABLE IF NOT
+-- EXISTS` makes this migration safe on pre-existing DBs.
+CREATE TABLE IF NOT EXISTS tank_snapshots (
+    id              TEXT PRIMARY KEY,             -- ULID
+    tank_key        TEXT NOT NULL,                -- "<persona>/<slot>"
+    source_uri      TEXT NOT NULL,                -- upstream URI (stored, pre-auth-merge)
+    fetched_at      INTEGER NOT NULL,             -- epoch seconds
+    filters_applied TEXT NOT NULL DEFAULT '{}',   -- upstream URI query map JSON
+    content_hash    TEXT NOT NULL,                -- sha256 hex of the whole fetch result
+    item_count      INTEGER NOT NULL DEFAULT 0,   -- item count after shred
+    new_item_count  INTEGER NOT NULL DEFAULT 0    -- newly appended count after dedup
+);
+
+CREATE INDEX IF NOT EXISTS idx_tank_snapshots_key ON tank_snapshots(tank_key, fetched_at);
+
+CREATE TABLE IF NOT EXISTS tank_items (
+    id          TEXT PRIMARY KEY,                 -- ULID (minted in insertion order = same-snapshot tie-break)
+    tank_key    TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL REFERENCES tank_snapshots(id),
+    identity    TEXT NOT NULL,                    -- source id or per-item content hash
+    observed_at INTEGER NOT NULL,                 -- epoch seconds (= snapshot fetched_at)
+    payload     TEXT NOT NULL,                    -- item JSON
+    mime_type   TEXT NOT NULL DEFAULT 'application/json',
+    UNIQUE(tank_key, identity)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tank_items_key_observed ON tank_items(tank_key, observed_at);
 "#;
 
 #[cfg(test)]
@@ -1455,6 +1742,8 @@ mod tests {
                 "nodes",
                 "projections",
                 "specifications",
+                "tank_items",
+                "tank_snapshots",
                 "type_registry",
                 "versions",
                 "workflow_runs",
@@ -1471,15 +1760,17 @@ mod tests {
     }
 
     #[test]
-    fn seed_inserts_10_node_and_9_edge_types() {
+    fn seed_inserts_11_node_and_10_edge_types() {
         let s = setup();
         let nodes = s.list_types_by_kind("node").unwrap();
         let edges = s.list_types_by_kind("edge").unwrap();
-        assert_eq!(nodes.len(), 10);
-        assert_eq!(edges.len(), 9);
+        assert_eq!(nodes.len(), 11);
+        assert_eq!(edges.len(), 10);
         assert!(nodes.contains(&"persona".to_string()));
         assert!(nodes.contains(&"mcp_server".to_string()));
+        assert!(nodes.contains(&"snapshot_registry".to_string()));
         assert!(edges.contains(&"triggers_review_of".to_string()));
+        assert!(edges.contains(&"archives".to_string()));
     }
 
     #[test]
@@ -1487,16 +1778,17 @@ mod tests {
         let s = setup();
         s.seed_default_types().unwrap();
         s.seed_default_types().unwrap();
-        assert_eq!(s.list_types().unwrap().len(), 19);
+        assert_eq!(s.list_types().unwrap().len(), 21);
     }
 
     #[test]
     fn list_types_orders_by_kind_then_name() {
         let s = setup();
         let all = s.list_types().unwrap();
-        // edges come before nodes (kind ordering 'e' < 'n')
+        // edges come before nodes (kind ordering 'e' < 'n'). 10 edges occupy
+        // indices 0-9, so the first node is at index 10.
         assert_eq!(all[0].1, "edge");
-        assert_eq!(all[9].1, "node");
+        assert_eq!(all[10].1, "node");
     }
 
     #[test]
@@ -2084,5 +2376,237 @@ mod tests {
         .unwrap();
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].name, "alpha");
+    }
+
+    // ---- Tank (snapshot + item log) ----
+
+    fn insert_snapshot(s: &SqliteStorage, key: &str) -> Ulid {
+        let id = Ulid::new();
+        s.tank_insert_snapshot(&TankSnapshotRecord {
+            id,
+            tank_key: key.into(),
+            source_uri: "rss://example.com/feed".into(),
+            fetched_at: 1000,
+            filters_applied: json!({"limit": "20"}),
+            content_hash: "deadbeef".into(),
+            item_count: 0,
+            new_item_count: 0,
+        })
+        .unwrap();
+        id
+    }
+
+    fn tank_item(identity: &str, observed_at: i64, body: &str) -> TankItemRecord {
+        TankItemRecord {
+            id: Ulid::new(),
+            identity: identity.into(),
+            observed_at,
+            payload: json!({"body": body}),
+            mime_type: "application/json".into(),
+        }
+    }
+
+    #[test]
+    fn tank_insert_survives_double_migrate() {
+        let s = SqliteStorage::open_in_memory().unwrap();
+        s.migrate().unwrap();
+        s.migrate().unwrap();
+        s.seed_default_types().unwrap();
+        let snap = insert_snapshot(&s, "p/s");
+        let n = s
+            .tank_append_items("p/s", &snap, &[tank_item("x", 1, "x")])
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn tank_append_items_dedups_on_identity() {
+        let s = setup();
+        let snap = insert_snapshot(&s, "p/s");
+        let n1 = s
+            .tank_append_items(
+                "p/s",
+                &snap,
+                &[tank_item("id-1", 1000, "a"), tank_item("id-2", 1000, "b")],
+            )
+            .unwrap();
+        assert_eq!(n1, 2, "both fresh identities inserted");
+
+        // id-1 is already present → ignored; only id-3 is new.
+        let n2 = s
+            .tank_append_items(
+                "p/s",
+                &snap,
+                &[
+                    tank_item("id-1", 1001, "a-updated"),
+                    tank_item("id-3", 1001, "c"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(n2, 1, "existing identity ignored, one new appended");
+
+        let (all, has_more) = s.tank_query_items("p/s", &TankQuery::default()).unwrap();
+        assert_eq!(all.len(), 3, "3 distinct identities on the timeline");
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn tank_query_orders_by_observed_at_asc() {
+        let s = setup();
+        let snap = insert_snapshot(&s, "p/s");
+        // Insert out of chronological order — query must sort ascending.
+        s.tank_append_items(
+            "p/s",
+            &snap,
+            &[
+                tank_item("c", 300, "c"),
+                tank_item("a", 100, "a"),
+                tank_item("b", 200, "b"),
+            ],
+        )
+        .unwrap();
+        let (items, _) = s.tank_query_items("p/s", &TankQuery::default()).unwrap();
+        let ids: Vec<_> = items.iter().map(|i| i.identity.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn tank_query_since_until_inclusive() {
+        let s = setup();
+        let snap = insert_snapshot(&s, "p/s");
+        s.tank_append_items(
+            "p/s",
+            &snap,
+            &[
+                tank_item("a", 100, "a"),
+                tank_item("b", 200, "b"),
+                tank_item("c", 300, "c"),
+            ],
+        )
+        .unwrap();
+        let q = TankQuery {
+            since: Some(200),
+            until: Some(300),
+            ..Default::default()
+        };
+        let (items, _) = s.tank_query_items("p/s", &q).unwrap();
+        let ids: Vec<_> = items.iter().map(|i| i.identity.as_str()).collect();
+        assert_eq!(ids, vec!["b", "c"], "since/until are inclusive");
+    }
+
+    #[test]
+    fn tank_query_tail_n_returns_last_n_chronological_with_has_more() {
+        let s = setup();
+        let snap = insert_snapshot(&s, "p/s");
+        s.tank_append_items(
+            "p/s",
+            &snap,
+            &[
+                tank_item("a", 100, "a"),
+                tank_item("b", 200, "b"),
+                tank_item("c", 300, "c"),
+            ],
+        )
+        .unwrap();
+        let q = TankQuery {
+            tail_n: Some(2),
+            ..Default::default()
+        };
+        let (items, has_more) = s.tank_query_items("p/s", &q).unwrap();
+        let ids: Vec<_> = items.iter().map(|i| i.identity.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["b", "c"],
+            "last 2 returned in chronological order"
+        );
+        assert!(has_more, "an older item exists beyond the tail");
+
+        // Exactly-N never reports has_more.
+        let q_all = TankQuery {
+            tail_n: Some(3),
+            ..Default::default()
+        };
+        let (_items, has_more) = s.tank_query_items("p/s", &q_all).unwrap();
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn tank_query_limit_returns_first_n_with_has_more() {
+        let s = setup();
+        let snap = insert_snapshot(&s, "p/s");
+        s.tank_append_items(
+            "p/s",
+            &snap,
+            &[
+                tank_item("a", 100, "a"),
+                tank_item("b", 200, "b"),
+                tank_item("c", 300, "c"),
+            ],
+        )
+        .unwrap();
+        let q = TankQuery {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let (items, has_more) = s.tank_query_items("p/s", &q).unwrap();
+        let ids: Vec<_> = items.iter().map(|i| i.identity.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "first 2 in ascending order");
+        assert!(has_more);
+    }
+
+    #[test]
+    fn tank_query_text_filters_payload_substring() {
+        let s = setup();
+        let snap = insert_snapshot(&s, "p/s");
+        s.tank_append_items(
+            "p/s",
+            &snap,
+            &[
+                tank_item("a", 100, "hello world"),
+                tank_item("b", 200, "goodbye"),
+            ],
+        )
+        .unwrap();
+        let q = TankQuery {
+            query: Some("hello".into()),
+            ..Default::default()
+        };
+        let (items, _) = s.tank_query_items("p/s", &q).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].identity, "a");
+    }
+
+    #[test]
+    fn tank_query_scopes_by_tank_key() {
+        let s = setup();
+        let snap_a = insert_snapshot(&s, "p/a");
+        let snap_b = insert_snapshot(&s, "p/b");
+        s.tank_append_items("p/a", &snap_a, &[tank_item("x", 100, "in-a")])
+            .unwrap();
+        s.tank_append_items("p/b", &snap_b, &[tank_item("x", 100, "in-b")])
+            .unwrap();
+        // Same identity in two tanks stays isolated (UNIQUE is per tank_key).
+        let (a, _) = s.tank_query_items("p/a", &TankQuery::default()).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].payload, json!({"body": "in-a"}));
+        let (b, _) = s.tank_query_items("p/b", &TankQuery::default()).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].payload, json!({"body": "in-b"}));
+    }
+
+    #[test]
+    fn tank_update_snapshot_new_count_persists() {
+        let s = setup();
+        let snap = insert_snapshot(&s, "p/s");
+        s.tank_update_snapshot_new_count(&snap, 5).unwrap();
+        let got: i64 = s
+            .conn
+            .query_row(
+                "SELECT new_item_count FROM tank_snapshots WHERE id = ?1",
+                params![snap.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(got, 5);
     }
 }
